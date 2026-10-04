@@ -49,7 +49,7 @@ when it was taken and when the server received it.
 | `decisions` | CONFIRMED STEMI, NOT STEMI or repeat ECG request, with the cardiologist's identity, time, reason and note, and when the crew saw and acknowledged it |
 | `destinations`, `etas` | Destination recommendation and changes, ETA |
 | `case_updates` | What the cardiologist sees as NEW, and when it was seen |
-| `audit_events` | The audit trail: time, user, action, CAD number |
+| `audit_events` | The audit trail: time, user, role (`crew`, `cardiologist`, `system`, `cad-feed`), action, CAD number |
 | `ops` | Every action received from a device, once, with its device time and server receipt time |
 | `users`, `settings` | Test users; test console settings |
 

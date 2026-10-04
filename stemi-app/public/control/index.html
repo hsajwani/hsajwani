@@ -90,8 +90,8 @@ ol.aud .tm{text-align:left}
       <div class="pres" id="pres"></div>
       <p class="note urls" id="urls"></p>
       <p class="grp">Simulated CAD feed</p>
-      <div class="row"><button class="btn p" data-c="new-incident">New fictional CAD incident</button><button class="btn bad" data-c="reset">Delete all test data</button></div>
-      <p class="note">A new incident replaces the active test case on both screens (one active case at a time in this build: Q-69, Q-73 open).</p>
+      <div class="row"><button class="btn p" data-c="new-incident">New fictional CAD incident</button><button class="btn" data-c="demo-case">Pre-filled demo case (sent)</button><button class="btn bad" data-c="reset">Delete all test data</button></div>
+      <p class="note">A new incident replaces the active test case on both screens (one active case at a time in this build: Q-69, Q-73 open). The pre-filled demo case arrives already sent by the crew: ECG 1, minimum dataset, aspirin and the mock AI result. It raises the normal new-case alarm on the cardiologist's device; the crew can then add ECG 2 and update vital signs.</p>
       <p class="grp">Test ECGs and the simulated AI</p>
       <div id="sim"></div>
       <p class="note">Findings apply to test ECGs captured from now on; photo quality to the next photo the crew takes. The AI is a mock service with scripted results.</p>
@@ -172,7 +172,7 @@ function tst(){
 function aud(){
  const items=R.audit.filter(a=>audf==='all'||a.kind==='key').sort((a,b)=>b.t-a.t||b.i-a.i);
  const ol=$('#aud'),st=ol.scrollTop;
- ol.innerHTML=items.map(a=>`<li class="${a.kind==='view'?'view':''}"><span class="tm">${hms(a.t)}</span><span>${esc(a.text)}${a.who?`<small>${esc(a.who)}</small>`:''}</span></li>`).join('');
+ ol.innerHTML=items.map(a=>`<li class="${a.kind==='view'?'view':''}"><span class="tm">${hms(a.t)}</span><span>${esc(a.text)}${a.who||a.role?`<small>${esc(a.who)}${a.role?` · role: ${esc(a.role)}`:''}</small>`:''}</span></li>`).join('');
  ol.scrollTop=st;
  $$('#audf button').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.v===audf)));
 }
@@ -201,7 +201,7 @@ document.addEventListener('click',async e=>{
  if(b.closest('#audf')){audf=b.dataset.v;aud();return}
  const c=b.dataset.c;if(!c)return;
  if(c==='reset'&&!confirm('Delete every test case, image and audit event? The test users stay.'))return;
- if(c==='new-incident'&&R&&R.path&&!confirm('Start a new fictional CAD incident? The current test case is closed on both screens.'))return;
+ if((c==='new-incident'||c==='demo-case')&&R&&R.path&&!confirm('Start a new fictional CAD incident? The current test case is closed on both screens.'))return;
  await fetch('/api/control/'+c,{method:'POST'});
 });
 setInterval(()=>{if(R)steps()},2000);

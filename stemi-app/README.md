@@ -1,6 +1,6 @@
 # Unified STEMI Platform · crew ↔ cardiologist test build
 
-**Version 0.1 · 4 October 2026 · built from the approved round-3 prototype (v0.2, "Connected crew and cardiologist")**
+**Version 0.1.1 · 4 October 2026 · built from the approved round-3 prototype (v0.2, "Connected crew and cardiologist")**
 
 > **TEST BUILD · FICTIONAL DATA ONLY.** Use only fictional patients, simulated CAD numbers, simulated ECG images and the
 > two test users. Never enter real patient information: this build runs over plain HTTP on a local Wi-Fi network and
@@ -32,12 +32,19 @@ other dependencies.
    node --version        # must print v22.13.0 or later (v24 is fine)
    ```
 2. **Unzip the project**, for example into your Documents folder, so you have `~/Documents/stemi-app`.
+   Or clone the GitHub repository; the app is the `stemi-app` folder inside it:
+   ```bash
+   cd ~/Documents
+   git clone -b claude/magical-faraday-sjzcvc https://github.com/hsajwani/hsajwani.git
+   cd hsajwani/stemi-app
+   ```
 3. **Start the server** in Terminal:
    ```bash
-   cd ~/Documents/stemi-app
+   cd ~/Documents/stemi-app      # or ~/Documents/hsajwani/stemi-app
    npm start
    ```
-   There is no `npm install` step. The first start creates the test database in `data/`.
+   There is no `npm install` step (the app has no dependencies; running `npm install` anyway is harmless). The first
+   start creates the test database in `data/`.
 4. **If macOS asks** *"Do you want the application node to accept incoming network connections?"*, click **Allow**.
    Without it the iPhone cannot reach the Mac.
 5. Terminal now shows the addresses to use, for example:
@@ -98,9 +105,12 @@ The two sample ECG images are in `samples/`. They are generated test images, mar
 | 13 | Mac | **Capture new ECG (ECG 2)** → **Upload** → `samples/test-ecg-2-evolving-anterior.jpg` → **Send to cardiologist** | ECG 2 received |
 | 14 | iPhone | Nothing; watch | NEW BP, NEW Aspirin and **NEW — ECG 2 received — HH:MM**, without refresh and **without sound** |
 | 15 | iPhone | **Compare ECG 1 \| ECG 2** | The two ECGs side by side |
-| 16 | iPhone | Open ECG 2 and scroll to **AI ECG interpretation** | The AI result, the same as on the crew screen, with *AI interpretation is decision support only. Final STEMI decision: Cardiologist.* |
+| 16 | iPhone | Open ECG 2 and scroll to **AI ECG interpretation** | The AI result, the same as on the crew screen, with *AI interpretation is decision support. The Cardiologist makes the final STEMI decision.* |
 | 17 | iPhone | **Decide** → **CONFIRMED STEMI** → **Confirm STEMI** | The decision recorded with Dr X's name and time |
 | 18 | Mac | Nothing; watch | **CONFIRMED STEMI** takes over the crew screen at once; press **Acknowledge** |
+
+This is the same test as the 21-step milestone in the brief: brief steps 1-5 are rows 1-5, 6-9 are rows 6-9, 10-13 are
+rows 10-13, 14-17 are row 14, 18 is row 15, 19 is row 16, 20 is row 17 and 21 is row 18.
 
 The **test console** (`/control`) ticks each step off as the case record shows it happened, and shows the pathway
 timestamps and the audit trail (time, user, action, CAD number). To run the test again, press
@@ -131,7 +141,13 @@ password can be changed with `TEST_USER_PASSWORD` in `.env`. Login is deliberate
 It stands in for the CAD feed and for the prototype's *Simulate* panel:
 
 - **New fictional CAD incident** starts a new simulated incident (CAD number, Ambulance 214, chest pain) on both
-  screens. One case is active at a time.
+  screens. One case is active at a time. The day's first incident is `CAD #YYYYMMDD-0123-1` (today
+  `CAD #20261004-0123-1`); later ones get a random fictional number.
+- **Pre-filled demo case (sent)** starts a new incident that arrives already sent by the crew, through the same crew
+  actions the tablet uses: ECG 1 (the borderline sample image), the minimum dataset (58 y, male, chest pain, onset
+  about 45 minutes ago, BP 142/88, HR 88, SpO₂ 97 %, GCS 15) and aspirin 300 mg. The cardiologist's phone gets the
+  normal NEW CARDIAC CASE alarm and the mock AI analyses ECG 1. From there the crew can add ECG 2 and update vital
+  signs during the test. Use it for demonstrations; the acceptance test above starts from a plain incident.
 - **Delete all test data** wipes every case and image (the test users stay).
 - **Simulation settings:** test ECG findings (borderline then evolving, or a clear STEMI pattern), the next simulated
   photo (good, glare, leads cut off), the AI (completes, unavailable, stays processing), screen IDs on the devices.
@@ -164,7 +180,8 @@ It stands in for the CAD feed and for the prototype's *Simulate* panel:
   changes, plus a heartbeat every 5 seconds. Screens send actions (Send, an update, acknowledge, decide) as HTTP
   requests. Each action has a unique id and is stored once, so resending after a lost connection is harmless.
 - **Nothing is overwritten:** each new vital sign, correction, ECG and decision is a new row; the audit trail records
-  time, user, action and CAD number for every event.
+  time, user, role, action and CAD number for every event. The role is `crew` or `cardiologist` for a person's own
+  action, `system` for the platform, the AI service and the destination engine, and `cad-feed` for the simulated CAD.
 - **Alarm:** only for a new case, played by the cardiologist's page until ACKNOWLEDGE & OPEN reaches the server.
   Acknowledgement and decision are separate events, each with the cardiologist's identity and time.
 - **AI:** one analysis per ECG, made once on the server and shown unchanged on both screens. It sits behind a small
@@ -211,7 +228,7 @@ Never put real secrets or real patient data in `.env`. It is excluded from git.
   ```bash
   sqlite3 data/stemi-test.db
   sqlite> .tables
-  sqlite> SELECT datetime(at/1000,'unixepoch','localtime') AS time, cad, actor, action FROM audit_events ORDER BY at;
+  sqlite> SELECT datetime(at/1000,'unixepoch','localtime') AS time, cad, actor, role, action FROM audit_events ORDER BY at;
   ```
 - The data layer is one file (`server/db.js`), so moving to PostgreSQL later changes that file and the schema, not
   the screens.
@@ -320,7 +337,18 @@ The build uses the round-3 prototype's working defaults wherever a decision is s
 per CAD incident, Q-69, and how the CAD number reaches the tablet, Q-70). Each one is listed with its working default
 in [docs/open-decisions.md](docs/open-decisions.md).
 
-## 14. What changed from the approved prototype
+## 14. Changes in 0.1.1
+
+- Every audit event now also records the **role** (`crew`, `cardiologist`, `system`, `cad-feed`). A database made by
+  0.1 gets the new column on the next start; existing events are kept (their role is left empty).
+- The AI sections on both screens use the wording of the brief: *AI interpretation is decision support. The
+  Cardiologist makes the final STEMI decision.*
+- The day's first simulated incident is `CAD #YYYYMMDD-0123-1`, matching the brief's example.
+- The test console has **Pre-filled demo case (sent)** (see section 4).
+- Kept as approved, not changed: the third decision is labelled **UNCLEAR / REQUEST REPEAT ECG** on the phone (the
+  prototype's wording); it is the brief's REQUEST REPEAT ECG option.
+
+## 15. What changed from the approved prototype
 
 The screens, wording and workflow are the prototype's. These changes were needed to make it work on real devices:
 

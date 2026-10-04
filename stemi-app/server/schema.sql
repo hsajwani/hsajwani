@@ -121,10 +121,11 @@ CREATE TABLE IF NOT EXISTS case_updates (
   text TEXT NOT NULL, ref_json TEXT, at INTEGER NOT NULL, seen_at INTEGER
 );
 
--- the audit timeline: timestamp, user, action, CAD number
+-- the audit timeline: timestamp, user, role, action, CAD number
+-- role: crew | cardiologist for a person's action; system for the platform, AI service and destination engine; cad-feed for CAD
 CREATE TABLE IF NOT EXISTS audit_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT, cad TEXT NOT NULL, at INTEGER NOT NULL,
-  actor TEXT, user_id TEXT, action TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'evt'
+  actor TEXT, user_id TEXT, role TEXT, action TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'evt'
 );
 
 -- every action a device sent, once (the id makes a resend after reconnection harmless)

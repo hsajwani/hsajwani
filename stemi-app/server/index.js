@@ -155,6 +155,12 @@ async function route(req, res) {
       platform.push();
       return send(res, 200, { cad });
     }
+    if (what === 'demo-case') {
+      const cad = platform.demoCase();
+      live.broadcast('init', { now: Date.now(), cad, epoch: D.epoch() });
+      platform.push();
+      return send(res, 200, { cad });
+    }
     if (what === 'reminder') return send(res, 200, { ok: platform.reminder() });
     if (what === 'escalate') return send(res, 200, { ok: platform.escalate() });
   }

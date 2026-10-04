@@ -10,7 +10,7 @@ build invents no numbers, rosters, response times or hospital capabilities.
 | # | Question | What this build does (working default) |
 |---|---|---|
 | Q-69 | Can one CAD incident have more than one STEMI patient? | One STEMI case per CAD incident. Opening the pathway again opens the same case. |
-| Q-70 | How does the CAD number reach the tablet in V1? | The test console's simulated CAD feed creates the incident and its CAD number. No temporary ID. Q-51 (CAD number format) also open; the build uses `YYYYMMDD-NNNN-1` from the example in the brief. |
+| Q-70 | How does the CAD number reach the tablet in V1? | The test console's simulated CAD feed creates the incident and its CAD number. No temporary ID. Q-51 (CAD number format) also open; the build uses `YYYYMMDD-NNNN-1` from the example in the brief; the day's first incident is `YYYYMMDD-0123-1`, later ones random. |
 | Q-71 | May a cardiologist acknowledge while offline? | No: ACKNOWLEDGE & OPEN needs a connection and the alarm continues. |
 | Q-72 | What does a reminder do, to whom, how often? | Nothing automatic. *Reminder interval reached* in the test console repeats the alert to the same cardiologist and the crew sees it. `ALERT_REMINDER_SECONDS` is empty. |
 | Q-73 | Several new cases at once for one cardiologist? | Not built: one active case at a time. |

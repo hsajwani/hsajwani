@@ -22,10 +22,12 @@ function ensureUsers() {
 }
 
 const p2 = n => String(n).padStart(2, '0');
-/* CAD#YYYYMMDD-NNNN-1, the format of the example in the brief; NNNN is random and fictional */
+/* CAD#YYYYMMDD-NNNN-1, the format of the example in the brief. The day's first incident is NNNN 0123 (CAD#20261004-0123-1
+   on 4 October 2026, the brief's example); later ones are random and fictional */
 function newCad() {
   const d = new Date();
   const day = `${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}`;
+  if (!D.get('SELECT cad FROM cases WHERE cad=?', `${day}-0123-1`)) return `${day}-0123-1`;
   for (;;) {
     const cad = `${day}-${String(Math.floor(Math.random() * 9000) + 100).padStart(4, '0')}-1`;
     if (!D.get('SELECT cad FROM cases WHERE cad=?', cad)) return cad;
@@ -40,8 +42,8 @@ function newIncident() {
     D.run('UPDATE cases SET active=0 WHERE active=1');
     D.run(`INSERT INTO cases(cad,active,unit,emirate,crew_name,incident_type,dispatched_at,at_patient_at,created_at)
            VALUES(?,1,?,?,?,?,?,?,?)`, cad, crew.unit, crew.emirate, crewT, 'Chest pain / heart problem', t - 11 * 60000 - 20000, t - 3 * 60000 - 5000, t);
-    D.run('INSERT INTO audit_events(cad,at,actor,action,kind) VALUES(?,?,?,?,?)', cad, t - 11 * 60000 - 20000, 'CAD (simulated feed)', `CAD ${cad} dispatched to ${crew.unit}`, 'key');
-    D.run('INSERT INTO audit_events(cad,at,actor,action,kind) VALUES(?,?,?,?,?)', cad, t - 3 * 60000 - 5000, 'CAD (crew status button, simulated)', `${crew.unit} at patient`, 'key');
+    D.run('INSERT INTO audit_events(cad,at,actor,role,action,kind) VALUES(?,?,?,?,?,?)', cad, t - 11 * 60000 - 20000, 'CAD (simulated feed)', 'cad-feed', `CAD ${cad} dispatched to ${crew.unit}`, 'key');
+    D.run('INSERT INTO audit_events(cad,at,actor,role,action,kind) VALUES(?,?,?,?,?,?)', cad, t - 3 * 60000 - 5000, 'CAD (crew status button, simulated)', 'cad-feed', `${crew.unit} at patient`, 'key');
   });
   D.bumpEpoch();
   return cad;

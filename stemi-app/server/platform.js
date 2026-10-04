@@ -25,13 +25,15 @@ function onDutyCardiologist() {
 }
 
 /* ---------- audit and NEW updates ---------- */
+/* the role of an audit event: the logged-in user's role for their own actions, otherwise the system that acted */
+const auditRole = (who, user) => (user && who === userT(user) ? user.role : /^CAD/.test(who || '') ? 'cad-feed' : 'system');
 function writer(cad, user) {
   const buf = [];
   return {
-    au(t, text, who, kind) { buf.push({ t, text, who: who || '', kind: kind || 'evt', uid: user ? user.id : null }); },
+    au(t, text, who, kind) { const self = user && who === userT(user); buf.push({ t, text, who: who || '', kind: kind || 'evt', uid: self ? user.id : null, role: auditRole(who, user) }); },
     upd(at, kind, text, ref) { D.run('INSERT INTO case_updates(id,cad,kind,text,ref_json,at) VALUES(?,?,?,?,?,?)', D.uid('u'), cad, kind, text, J(ref || {}), at); },
     flush(fix) {
-      for (const a of buf) { if (fix) fix(a); D.run('INSERT INTO audit_events(cad,at,actor,user_id,action,kind) VALUES(?,?,?,?,?,?)', cad, a.t, a.who, a.uid, a.text, a.kind); }
+      for (const a of buf) { if (fix) fix(a); D.run('INSERT INTO audit_events(cad,at,actor,user_id,role,action,kind) VALUES(?,?,?,?,?,?,?)', cad, a.t, a.who, a.uid, a.role, a.text, a.kind); }
       buf.length = 0;
     },
     buf
@@ -379,7 +381,7 @@ function snapshot(cad) {
     reason: x.reason || '', note: x.note || '', adv: x.advice || '', reasons: P(x.reasons_json) || [], instr: x.instruction || '', within: x.within_min, ai: x.ai_feedback, dlv: x.delivered_at, crewAck: x.crew_ack_at
   }));
   R.upd = D.all('SELECT rowid, * FROM case_updates WHERE cad=? ORDER BY at, rowid', cad).map(u => ({ id: u.id, at: u.at, kind: u.kind, text: u.text, ref: P(u.ref_json) || {}, seen: u.seen_at }));
-  R.audit = D.all('SELECT * FROM audit_events WHERE cad=? ORDER BY at, id', cad).map((a, i) => ({ t: a.at, text: a.action, who: a.actor || '', kind: a.kind, i }));
+  R.audit = D.all('SELECT * FROM audit_events WHERE cad=? ORDER BY at, id', cad).map((a, i) => ({ t: a.at, text: a.action, who: a.actor || '', role: a.role || '', kind: a.kind, i }));
   D.all('SELECT op_id, received_at FROM ops WHERE cad=?', cad).forEach(o => { R.ops[o.op_id] = o.received_at; });
   return R;
 }
@@ -395,9 +397,44 @@ function push() {
   });
 }
 
+/* ---------- a pre-filled fictional case for demonstrations (test console) ----------
+   Starts a new simulated CAD incident and sends it exactly as the crew tablet would: the pathway, ECG 1 (the sample
+   test image), the minimum dataset and aspirin go through the same crew actions, so the cardiologist gets the normal
+   NEW CARDIAC CASE alert and the mock AI analyses ECG 1. The crew can then add ECG 2 and update vital signs live. */
+function demoCase() {
+  const fs = require('node:fs'), path = require('node:path'), crypto = require('node:crypto');
+  const cad = seed.newIncident();
+  const crew = D.get("SELECT * FROM users WHERE role='crew' ORDER BY id LIMIT 1");
+  const buf = fs.readFileSync(path.join(cfg.ROOT, 'samples', 'test-ecg-1-borderline-anterior.jpg'));
+  const imageId = D.uid('img'), file = imageId + '.jpg';
+  fs.writeFileSync(path.join(cfg.IMAGE_DIR, file), buf);
+  const t = Date.now();
+  D.run('INSERT INTO ecg_images(id,cad,uploaded_at,source,file_name,mime,bytes,sha256,uploaded_by) VALUES(?,?,?,?,?,?,?,?,?)',
+    imageId, cad, t - 3500, 'file', file, 'image/jpeg', buf.length, crypto.createHash('sha256').update(buf).digest('hex'), userT(crew));
+  const id = k => `demo-${cad}-${k}`, mdT = t - 2000;
+  const md = {
+    age: { v: '58 y', raw: { v: 58, est: null }, t: mdT },
+    sex: { v: 'Male', raw: { v: 'Male' }, t: mdT },
+    complaint: { v: 'Chest pain', raw: { v: 'cp', det: '' }, t: mdT },
+    onset: { v: `${hm(t - 45 * 60000)} (approximate)`, raw: { v: t - 45 * 60000, approx: true }, t: mdT },
+    bp: { v: '142/88', raw: { sys: 142, dia: 88, at: mdT }, t: mdT },
+    hr: { v: '88 bpm', raw: { v: 88, at: mdT }, t: mdT },
+    spo2: { v: '97 %', raw: { v: 97, at: mdT }, t: mdT },
+    gcs: { v: '15', raw: { v: 15 }, t: mdT }
+  };
+  const variant = D.sim().find === 'clear' ? 'clear' : 'border';
+  applyOps(crew, [
+    { id: id('open'), cad, k: 'open', t: t - 4500, data: { cad } },
+    { id: id('submit'), cad, k: 'submit', t: t - 1000, data: { sendAt: t - 1000, late: false, md, ev: [{ t: mdT, text: 'Minimum dataset entered' }],
+      ecg: { n: 1, acq: t - 3000, variant, pri: 1, same: false, timeWhy: null, imgs: [{ i: 1, kind: 'full', q: 'file', at: t - 3000, imageId }] } } },
+    { id: id('asp'), cad, k: 'rec', t: t - 500, data: { k: 'asp', label: 'Aspirin', group: 'Treatments given', v: `Given · 300 mg · ${hm(t - 500)}`, nv: false, at: t - 500, multi: false, ev: 'Aspirin documented' } }
+  ]);
+  return cad;
+}
+
 function hello() {
   const cad = seed.activeCad();
   return [['init', { now: Date.now(), cad, epoch: D.epoch() }], ['cfg', { sim: D.sim() }], ['snap', { rec: snapshot(cad), at: Date.now() }]];
 }
 
-module.exports = { applyOps, snapshot, push, hello, reminder, escalate, aiResume, aiFinish, HN };
+module.exports = { applyOps, snapshot, push, hello, demoCase, reminder, escalate, aiResume, aiFinish, HN };

@@ -583,7 +583,7 @@ function aiSecHtml(){
     `<div class="airows">${AIROWS.map(([k,l])=>`<div class="airow${a.lim&&a.lim[k]?' lim':''}${k==='imp'?' imp':''}"><span class="l">${l}</span><span class="v">${esc(aiVal(a,e.n,k))}</span></div>`).join('')}</div>`;
   return `<section class="rec aisec" id="r-ai">${idTag('C-07d')}<div class="rec-h"><h2 class="h2"><span class="aitag">AI</span>AI ECG interpretation</h2></div>
    <div class="aidec"><span class="aidec-l">Cardiologist decision</span>${dec}</div>
-   <p class="aids"><b>AI interpretation is decision support only. Final STEMI decision: Cardiologist.</b> The AI never confirms a STEMI.</p>
+   <p class="aids"><b>AI interpretation is decision support. The Cardiologist makes the final STEMI decision.</b> The AI never confirms a STEMI.</p>
    ${tabs}<div class="aimeta"><img src="${x.img}" alt="ECG ${e.n}, the image the AI analysed"><div class="aimeta-t"><b class="mono">ECG ${e.n} — ${hm(e.acq)}</b>${e.n>1?`<span class="ainewan">New ECG analysis · the analysis of ECG ${e.n-1} is kept</span>`:''}<span class="aist">${G(!a||a.st==='proc'?'prog':a.st==='ok'?'done':a.st==='down'?'nv':'warn')}${aiStLine(a)}</span></div></div>
    ${body}${a&&a.st!=='proc'?`<p class="aifoot">Shown the same on the cardiologist's screen${e.imgs.length>1?' · Primary image analysed':''} · ${esc(a.ver||'')}</p>`:''}</section>`;
 }

@@ -372,7 +372,7 @@ function aiBody(){
  /* viewing an earlier ECG: its own analysis stays here, and the newer analysis is one tap away, never swapped in silently */
  const newer=L.n>e.n?`<div class="ai-newer">${G('info')}<span class="t">ECG ${L.n} has its own analysis${L.ai&&L.ai.st!=='proc'?`: ${AIST[L.ai.st]}`:L.ai?': processing':''}.</span><button class="btn btn-q" data-act="ecg" data-n="${L.n}">View ECG ${L.n}</button></div>`:'';
  const foot=!a||a.st==='proc'?`<div class="ai-foot">The alert did not wait for the AI, and your review does not need it.</div>`:`<div class="ai-foot">Shown the same on the crew tablet${e.imgs.length>1?' · Primary image analysed':''} · ${esc(a.ver||'')}</div>`;
- return `<div class="ai"><div class="ai-top"><div class="ai-title"><span class="g g-ai">AI</span>AI ECG INTERPRETATION${newTag(us)}</div><div class="ai-sub">AI interpretation is decision support only. Final STEMI decision: Cardiologist.</div></div>${newer}${aiMeta(e)}${body}${foot}</div>`;
+ return `<div class="ai"><div class="ai-top"><div class="ai-title"><span class="g g-ai">AI</span>AI ECG INTERPRETATION${newTag(us)}</div><div class="ai-sub">AI interpretation is decision support. The Cardiologist makes the final STEMI decision.</div></div>${newer}${aiMeta(e)}${body}${foot}</div>`;
 }
 
 /* ---------- D-06: serial comparison, ECG 1 | ECG 2 and later ECG 1 | ECG 2 | ECG 3 ---------- */
@@ -396,7 +396,7 @@ function cmpAi(ns){
   else x=a.ser;
   return `<div class="air imp"><span class="l">ECG ${n} vs ECG ${n-1}</span><span class="v"><b>${esc(x.h)}.</b> ${esc(x.t)}</span></div>`;
  }).join('');
- return `<div class="ai"><div class="ai-top"><div class="ai-title"><span class="g g-ai">AI</span>AI SERIAL ECG COMPARISON</div><div class="ai-sub">AI interpretation is decision support only. Final STEMI decision: Cardiologist. The ECGs stay in full view; the crew tablet shows the same comparison.</div></div><div class="ai-rows">${rows}</div></div>`;
+ return `<div class="ai"><div class="ai-top"><div class="ai-title"><span class="g g-ai">AI</span>AI SERIAL ECG COMPARISON</div><div class="ai-sub">AI interpretation is decision support. The Cardiologist makes the final STEMI decision. The ECGs stay in full view; the crew tablet shows the same comparison.</div></div><div class="ai-rows">${rows}</div></div>`;
 }
 const cmpSets=()=>{const n=R.ecgs.length;return n<3?[[1,2]]:n===3?[[1,2,3],[1,2],[2,3]]:[[n-2,n-1,n],[n-1,n]]};
 function cmpHead(){
