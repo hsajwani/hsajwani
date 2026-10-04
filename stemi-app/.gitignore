@@ -4,3 +4,5 @@ data/
 *.log
 .DS_Store
 scripts/out/
+# local development runner: PID file, log (npm run dev / dev:bg)
+.local/

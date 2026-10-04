@@ -64,6 +64,33 @@ other dependencies.
 Keep the Terminal window open while you test. **Ctrl+C** stops the server; `npm start` starts it again with the case
 still there. To stop the Mac sleeping during a long test, start with `caffeinate -i npm start` instead.
 
+### Development mode: keep it running in the background
+
+While the app is being developed, start it once and leave it running:
+
+```bash
+cd ~/Documents/hsajwani/stemi-app
+npm run dev:bg          # start in the background (survives closing Terminal)
+npm run dev:status      # running? which port? current Crew / Cardiologist / Control addresses
+npm run dev:restart     # stop and start again (rarely needed)
+npm run dev:stop        # stop it
+npm run dev             # the same server in the foreground instead (Ctrl+C stops it)
+```
+
+- A **backend change** (`server/`, `public/shared/cad.js`, `package.json`, `.env`) restarts the server by itself. A
+  **screen change** (crew, cardiologist, console) needs only a browser refresh: those files are read from disk on
+  every request. If the server stops unexpectedly it is restarted.
+- **The test data is kept.** A restart is never a reset; only *Delete all test data* or `npm run reset` clears it.
+- **One copy only.** Starting it again reports the running one. A STEMI server started another way (`npm start`) or
+  another program on port 3000 is detected and left alone; nothing unrelated is ever stopped.
+- **Log:** `.local/stemi-dev.log` (starts, restarts and why, port and server errors, live-link connections). No
+  passwords, cookies or secrets are written. `.local/` is not committed.
+- **Health check:** `http://localhost:3000/health` (status, version, port, uptime; no case or user data).
+- **Changes from Claude Code arrive by themselves** if you set `DEV_AUTO_PULL=true` in `.env` (copy `.env.example`
+  first): every 30 seconds the runner fast-forwards this checkout from GitHub, only when you have no local edits.
+  Otherwise run `git pull` after each change; the server then restarts by itself as needed.
+- It stops when you run `npm run dev:stop` or the Mac restarts. After a restart of the Mac, run `npm run dev:bg` again.
+
 ### The crew MDT on the Mac
 
 1. Open Safari or Chrome at **http://localhost:3000/crew**.
@@ -299,7 +326,7 @@ Never put real secrets or real patient data in `.env`. It is excluded from git.
 stemi-app/
 ├── README.md                  this file
 ├── .env.example               every setting, with comments
-├── package.json               npm start · npm run dev · npm run reset · npm run test:acceptance
+├── package.json               npm start · npm run dev / dev:bg / dev:status / dev:restart / dev:stop · npm run reset · tests
 ├── docs/
 │   ├── architecture.md        how the pieces fit, the live link, the data model, the AI interface
 │   ├── production-gaps.md     what must change before any real patient use
@@ -326,6 +353,7 @@ stemi-app/
 └── scripts/
     ├── acceptance.js          automated test with two browsers: 19 steps, CAD number checks, CONFIRMED STEMI stays active, COMPLETE STEMI PATHWAY (needs Playwright)
     ├── pathway-test.js        NOT STEMI closes the pathway automatically; a repeat ECG request keeps it active
+    ├── dev.js                 development runner: background server, restart on backend changes, log, status
     ├── cad-entry-test.js      CAD number edge cases: offline entry, duplicate found at Send, correction
     ├── make-sample-ecgs.js    regenerates the sample ECG images
     └── reset.js               deletes the test data

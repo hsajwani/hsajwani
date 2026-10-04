@@ -19,6 +19,13 @@ const live = require('./live');
 const platform = require('./platform');
 
 seed.ensureUsers();
+/* STEMI_DEV is set by the development runner (scripts/dev.js) */
+const DEV = process.env.STEMI_DEV === '1';
+const STARTED = Date.now();
+const VERSION = require('../package.json').version;
+const stamp = () => new Date().toISOString();
+process.on('uncaughtException', e => { console.error(`[${stamp()}] uncaught server error:`, e); process.exit(1); });
+process.on('unhandledRejection', e => console.error(`[${stamp()}] unhandled promise rejection:`, e));
 
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json',
   '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.svg': 'image/svg+xml', '.woff2': 'font/woff2', '.ico': 'image/x-icon', '.txt': 'text/plain; charset=utf-8' };
@@ -83,6 +90,11 @@ async function route(req, res) {
   }
   if (req.method === 'POST' && p === '/api/logout') return send(res, 200, { ok: true }, { 'Set-Cookie': auth.logoutCookie });
   if (req.method === 'GET' && p === '/api/ping') return send(res, 200, { ok: true, now: Date.now() });
+  /* is the server alive? No login, and nothing about cases, users, settings or secrets */
+  if (req.method === 'GET' && p === '/health') {
+    return send(res, 200, { status: 'ok', app: 'stemi-unified-platform', environment: DEV ? 'development' : 'standard', version: VERSION,
+      port: cfg.PORT, pid: process.pid, startedAt: new Date(STARTED).toISOString(), uptimeSeconds: Math.round((Date.now() - STARTED) / 1000) });
+  }
 
   /* everything below needs a logged-in test user */
   if (!user) return send(res, 401, { error: 'Not logged in' });
@@ -230,10 +242,26 @@ function lanAddresses() {
   return out.sort((a, b) => (a.name === 'en0' ? -1 : b.name === 'en0' ? 1 : 0));
 }
 
+server.on('error', e => {
+  if (e.code === 'EADDRINUSE') console.error(`[${stamp()}] Port ${cfg.PORT} is already in use. Another program (or another copy of this server) is using it. Check with: npm run dev:status`);
+  else console.error(`[${stamp()}] server error:`, e);
+  process.exit(1);
+});
+
 server.listen(cfg.PORT, cfg.HOST, () => {
   const lan = lanAddresses();
   const ip = lan[0] ? lan[0].address : '<this computer\'s IP address>';
   const line = '─'.repeat(64);
+  if (DEV) {
+    console.log(`\n${line}\n STEMI Development Server Running · ${stamp()} · FICTIONAL TEST DATA ONLY\n${line}`);
+    console.log(` Crew:                      http://localhost:${cfg.PORT}/crew`);
+    console.log(` Control:                   http://localhost:${cfg.PORT}/control`);
+    console.log(` Cardiologist on this Mac:  http://localhost:${cfg.PORT}/cardiologist`);
+    console.log(` Cardiologist on iPhone:    http://${ip}:${cfg.PORT}/cardiologist`);
+    if (lan.length > 1) console.log(` Other addresses: ${lan.slice(1).map(a => `${a.address} (${a.name})`).join(', ')}`);
+    console.log(` Health: http://localhost:${cfg.PORT}/health · database: ${path.relative(cfg.ROOT, cfg.DB_FILE)} (kept across restarts)\n${line}\n`);
+    return;
+  }
   console.log(`\n${line}\n Unified STEMI Platform · test build · FICTIONAL TEST DATA ONLY\n${line}`);
   console.log(` Crew MDT (this computer):   http://localhost:${cfg.PORT}/crew`);
   console.log(` Cardiologist (iPhone):      http://${ip}:${cfg.PORT}/cardiologist`);

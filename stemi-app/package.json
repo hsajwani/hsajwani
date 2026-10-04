@@ -7,7 +7,11 @@
   "engines": { "node": ">=22.13" },
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning server/index.js",
-    "dev": "node --watch --disable-warning=ExperimentalWarning server/index.js",
+    "dev": "node scripts/dev.js run",
+    "dev:bg": "node scripts/dev.js bg",
+    "dev:status": "node scripts/dev.js status",
+    "dev:restart": "node scripts/dev.js restart",
+    "dev:stop": "node scripts/dev.js stop",
     "reset": "node --disable-warning=ExperimentalWarning scripts/reset.js",
     "test:acceptance": "node --disable-warning=ExperimentalWarning scripts/acceptance.js",
     "test:cad": "node --disable-warning=ExperimentalWarning scripts/cad-entry-test.js",

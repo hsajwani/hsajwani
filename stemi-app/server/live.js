@@ -39,7 +39,9 @@ function add(req, res, user, hello) {
   clients.add(c);
   req.socket.setKeepAlive(true);
   req.socket.setNoDelay(true);
-  req.on('close', () => { clients.delete(c); if (count(c.role) === 0) setPresence(c.role, false); });
+  if (process.env.STEMI_DEV === '1') console.log(`[${new Date().toISOString()}] live link: ${c.role} screen connected (${clients.size} open)`);
+  req.on('close', () => { clients.delete(c); if (count(c.role) === 0) setPresence(c.role, false); if (process.env.STEMI_DEV === '1') console.log(`[${new Date().toISOString()}] live link: ${c.role} screen disconnected (${clients.size} open)`); });
+  res.on('error', e => console.error(`[${new Date().toISOString()}] live link error (${c.role}): ${e.message}`));
   for (const [ev, data] of hello()) write(c, ev, data);
   setPresence(c.role, true);
 }
