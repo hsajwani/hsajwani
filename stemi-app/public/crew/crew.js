@@ -688,10 +688,13 @@ function vHo(){
   if(!S||!S.sub)return `<div class="vbody"><div class="cadv"><p class="cadv-hint">The case summary is available once the case has been sent.</p></div></div>`+ab(`<button class="btn btn-q" data-act="ho-back">${IC.back}Back to the case</button>`,'','');
   if(S.closed)return `<div class="vbody ho" data-keep="ho">${hoPage(S,true)}</div>`+ab(`<button class="btn btn-q" data-act="home">${IC.back}My cases</button>`,'<span>STEMI pathway closed · read-only</span>','');
   if(!S.hopen&&!c.hopenSent){c.hopenSent=1;setT(0,()=>op('hopen'))}
-  const can=SC.online&&!OUTQ.length;
+  /* COMPLETE STEMI PATHWAY only while the cardiologist's current decision is CONFIRMED STEMI (NOT STEMI closes the
+     pathway by itself; a repeat ECG request or no decision keeps it under review) */
+  const d=lastOf(S.dec),conf=!!d&&d.k==='confirm',can=conf&&SC.online&&!OUTQ.length;
+  const note=!conf?(d&&d.k==='repeat'?'Repeat ECG requested: the cardiologist is still reviewing':'Awaiting the cardiologist\'s decision'):!SC.online?'No connection: completing needs the platform':OUTQ.length?'Sending your latest entries…':'No further documentation is needed here';
   return `<div class="vbody ho" data-keep="ho">${hoPage(S,false)}</div>`+
-    ab(`<button class="btn btn-q" data-act="ho-back">${IC.back}Back to the case</button>`,`<span>${!SC.online?'No connection: completing needs the platform':OUTQ.length?'Sending your latest entries…':'No further documentation is needed here'}</span>`,
-      `<button class="btn btn-p btn-xl" data-act="ho-complete" ${can?'':'disabled'}>COMPLETE STEMI PATHWAY</button>`);
+    ab(`<button class="btn btn-q" data-act="ho-back">${IC.back}Back to the case</button>`,`<span>${note}</span>`,
+      conf?`<button class="btn btn-p btn-xl" data-act="ho-complete" ${can?'':'disabled'}>COMPLETE STEMI PATHWAY</button>`:`<span class="muted">COMPLETE STEMI PATHWAY becomes available after CONFIRMED STEMI</span>`);
 }
 /* a completed case from the history list: the same summary, read-only */
 let HREC=null,HLIST=null,HQ='',histT=null;
@@ -1191,7 +1194,7 @@ function act(a,el){
   case 'ho-back':view='WS';render();break;
   case 'ho-img':{const S=view==='HIST'?HREC:SRV,e=S&&S.ecgs[Number(d.n)-1];if(!e)break;const x=e.imgs.find(i=>i.i===e.pri)||e.imgs[0];
     layer={t:'hoimg',url:x.url,label:`ECG ${e.n} · acquired ${hm(e.acq)} · primary image`};renderLayer();break;}
-  case 'ho-complete':if(!SRV||!SRV.sub||SRV.closed)break;layer={t:'hoconfirm'};renderLayer();break;
+  case 'ho-complete':{const d0=SRV&&lastOf(SRV.dec);if(!SRV||!SRV.sub||SRV.closed||!d0||d0.k!=='confirm')break}layer={t:'hoconfirm'};renderLayer();break;
   case 'ho-close':{
     if(!SC.online||OUTQ.length){layer.err='Waiting for the connection and for your latest entries to be sent. Try again in a moment.';renderLayer();break}
     layer.busy=true;layer.err='';renderLayer();

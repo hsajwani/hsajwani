@@ -289,6 +289,9 @@ function closeCase(user, rawCad) {
   if (!C || (rawCad && CADN.normalize(rawCad) !== cad)) return { status: 'notactive' };
   if (C.closed_at) return { status: 'closed', cad, already: true };
   if (!C.server_received_at) return { status: 'incomplete', cad, missing: ['The case has not been sent yet'] };
+  /* only after CONFIRMED STEMI: NOT STEMI closes the pathway by itself, and a repeat ECG request keeps it under review */
+  const last = D.get('SELECT kind FROM decisions WHERE cad=? ORDER BY decided_at DESC, rowid DESC LIMIT 1', cad);
+  if (!last || last.kind !== 'confirm') return { status: 'incomplete', cad, missing: ['COMPLETE STEMI PATHWAY is available only after the cardiologist decides CONFIRMED STEMI'] };
   const t = Date.now(), CREWT = userT(user), W = writer(cad, user);
   D.tx(() => {
     markClosed(cad, t, CREWT, user.id, CLOSE_CREW);

@@ -1,7 +1,9 @@
 /* The STEMI pathway's closure rules, with two real browsers (crew MDT and the cardiologist's phone):
    Test 1 — NOT STEMI: the pathway closes automatically, the crew sees NOT STEMI — PATHWAY CLOSED at once, the case moves
             to Completed and is read-only; no cath-lab activation; the CAD incident is not "cancelled"; everything kept.
-   Test 3 — UNCLEAR / REQUEST REPEAT ECG: the pathway stays active, the crew sees the request and sends ECG 2.
+   Test 3 — UNCLEAR / REQUEST REPEAT ECG: the pathway stays active, the crew sees the request and sends ECG 2, and
+            COMPLETE STEMI PATHWAY is not available; once the cardiologist changes the decision to CONFIRMED STEMI it
+            is available at once, and the crew completes the pathway.
    (Tests 2 and 4, CONFIRMED STEMI staying active and COMPLETE STEMI PATHWAY, are in scripts/acceptance.js.)
    Needs Playwright, like scripts/acceptance.js.   Run:  npm run test:pathway        Fictional test data only. */
 const { spawn } = require('node:child_process');
@@ -131,6 +133,25 @@ async function main(server) {
     const c3 = DBQ(`SELECT status, closed_at, active FROM cases WHERE cad='${CAD3}'`)[0];
     ok('3.2', 'ECG 2 sent and received; the pathway stays active, no automatic closure', DBQ(`SELECT n FROM ecgs WHERE cad='${CAD3}' AND n=2 AND received_at IS NOT NULL`).length === 1 && !c3.closed_at && c3.active === 1);
     ok('3.3', 'The cardiologist can decide again on ECG 2 (review continues)', await doc.locator('[data-act="decide"]:visible').count() > 0);
+    /* while the decision is UNCLEAR / REQUEST REPEAT ECG, the crew cannot complete the pathway */
+    await crew.waitForSelector('.ch [data-act="handover"]'); await tap('.ch [data-act="handover"]');
+    await crew.waitForSelector('#h-sum');
+    const sum3 = (await crew.textContent('#view')).replace(/\s+/g, ' ');
+    const refused = await crewCtx.request.post(BASE + '/api/cases/close', { data: { cad: CAD3 } });
+    ok('3.4', 'UNCLEAR: COMPLETE STEMI PATHWAY not available on the case summary, and the platform refuses it', (await crew.locator('[data-act="ho-complete"]').count()) === 0 && /available after CONFIRMED STEMI/.test(sum3) && refused.status() === 409 && !DBQ(`SELECT closed_at FROM cases WHERE cad='${CAD3}'`)[0].closed_at, `close request → ${refused.status()}`);
+    /* the cardiologist changes the decision to CONFIRMED STEMI on ECG 2: the button is available at once */
+    await doc.locator('[data-act="ecg"][data-n="2"]:visible').first().click().catch(() => {});
+    await sleep(500);
+    await decide('confirm');
+    await doc.click('[data-act="c-go"]');
+    await crew.waitForSelector('[data-act="ho-complete"]:not([disabled])', { state: 'attached', timeout: 8000 }).catch(() => {});
+    ok('3.5', 'After CONFIRMED STEMI, COMPLETE STEMI PATHWAY is available immediately (case summary still open)', (await crew.locator('[data-act="ho-complete"]:not([disabled])').count()) === 1 && !DBQ(`SELECT closed_at FROM cases WHERE cad='${CAD3}'`)[0].closed_at);
+    await tap('[data-act="dec-ack"]');
+    await tap('.ch [data-act="handover"]'); await crew.waitForSelector('[data-act="ho-complete"]:not([disabled])');
+    await tap('[data-act="ho-complete"]'); await tap('[data-act="ho-close"]');
+    await crew.waitForSelector('text=Completed cases', { timeout: 8000 });
+    const c3b = DBQ(`SELECT status, closure_reason, closure_source FROM cases WHERE cad='${CAD3}'`)[0];
+    ok('3.6', 'The crew completes the confirmed pathway: closed by the crew, read-only, under Completed', c3b.status === 'closed' && c3b.closure_reason === 'STEMI pathway completed' && c3b.closure_source === 'crew', JSON.stringify(c3b));
     ok('E', 'No script errors', !errors.length, errors.slice(0, 3).join(' | '));
   } finally {
     await browser.close();

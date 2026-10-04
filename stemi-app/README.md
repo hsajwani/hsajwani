@@ -132,6 +132,11 @@ case is under **Completed cases**. The iPhone shows **NOT STEMI — PATHWAY CLOS
 activation, no sound. **UNCLEAR / REQUEST REPEAT ECG** keeps the pathway active: the crew sees the request and sends
 ECG 2, and the review continues.
 
+**COMPLETE STEMI PATHWAY is available only while the cardiologist's current decision is CONFIRMED STEMI.** Without a
+decision, or after UNCLEAR / REQUEST REPEAT ECG, the case summary shows *COMPLETE STEMI PATHWAY becomes available after
+CONFIRMED STEMI* (the platform refuses it too). When the cardiologist changes the decision to CONFIRMED STEMI, the
+button appears at once; a change to NOT STEMI closes the pathway automatically.
+
 The CAD number appears on the iPhone in the new-case alert, the case header, the ECG review screen and the timeline
 (**Timeline** button), always as `CAD #20261004-0123-1`.
 
@@ -353,9 +358,10 @@ It then checks that CONFIRMED STEMI keeps the pathway active, and completes it f
 fields), with the cardiologist's silent STEMI PATHWAY COMPLETED, read-only screens, the platform refusing changes, and
 the closed case found by CAD number after a refresh. `npm run test:pathway` runs NOT STEMI (automatic closure, two audit
 events, nothing called a CAD cancellation, everything kept, read-only, searchable) and the repeat ECG request (pathway
-stays active, ECG 2 arrives, review continues).
+stays active, ECG 2 arrives, COMPLETE STEMI PATHWAY unavailable and refused by the platform, then available at once
+after the decision changes to CONFIRMED STEMI, and completed).
 
-Screenshots and the audit trail go to `scripts/out/`. The last runs passed 47 of 47 checks (acceptance), 15 of 15 (pathway) and 9 of 9
+Screenshots and the audit trail go to `scripts/out/`. The last runs passed 47 of 47 checks (acceptance), 18 of 18 (pathway) and 9 of 9
 (CAD edge cases) on Node 22. In the 0.1 runs (Node 22 and Node 24) the
 case reached the phone within about 1 second of Send, the decision reached the crew within about 50 ms, and no tone
 played after acknowledgement.
@@ -429,11 +435,12 @@ in [docs/open-decisions.md](docs/open-decisions.md).
   pathway closes (`Cardiologist decision: NOT STEMI`, `automatic following Cardiologist decision`), with two separate
   audit events. Crew: *NOT STEMI · PATHWAY CLOSED*, then Completed. Cardiologist: *NOT STEMI — PATHWAY CLOSED*, no
   decision controls. No cath-lab activation; the CAD incident is never described as cancelled.
-- **CONFIRMED STEMI** and **UNCLEAR / REQUEST REPEAT ECG** keep the pathway active, as before.
+- **CONFIRMED STEMI** and **UNCLEAR / REQUEST REPEAT ECG** keep the pathway active, as before. COMPLETE STEMI
+  PATHWAY is available only while the current decision is CONFIRMED STEMI (checked on the tablet and on the server).
 - **Status:** ACTIVE → CARDIOLOGIST REVIEWING → CONFIRMED STEMI (active) / REPEAT ECG REQUESTED (active) / NOT STEMI —
   PATHWAY CLOSED; a completed pathway shows STEMI PATHWAY COMPLETED (internal status `closed` for both).
 - No alarm for any of this: the alarm is for a new case only.
-- Tests: acceptance (47) updated; new `npm run test:pathway` (15).
+- Tests: acceptance (47) updated; new `npm run test:pathway` (18).
 
 ## 15. Changes in 0.3.0: handover and closing the case (superseded by 0.4.0)
 

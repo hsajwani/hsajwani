@@ -108,7 +108,8 @@ when it was taken and when the server received it.
 
 **Closing the STEMI pathway** (never the CAD incident, which belongs to ICCC / ACC and ePCR):
 - The crew's COMPLETE STEMI PATHWAY is a request, not an action, because it needs an immediate answer:
-  `POST /api/cases/close {cad}` (the case must have been sent) sets `status = 'closed'`, `closed_at`, `closed_by`,
+  `POST /api/cases/close {cad}` (the case must have been sent, and the cardiologist's latest decision must be CONFIRMED
+  STEMI; otherwise `409`) sets `status = 'closed'`, `closed_at`, `closed_by`,
   `closure_reason = 'STEMI pathway completed'`, `closure_source = 'crew'`, writes the audit event and pushes the record.
 - The cardiologist's `decision` with `k = 'not'` closes it in the same transaction: `closure_reason = 'Cardiologist
   decision: NOT STEMI'`, `closure_source = 'automatic following Cardiologist decision'`, `closed_by` the cardiologist,
