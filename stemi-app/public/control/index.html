@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Test console · Unified STEMI Platform</title>
+<link rel="stylesheet" href="/assets/shared/fonts/fonts.css">
+<style>
+/* The test console: what the prototype's review page put around the two devices (demonstration steps, simulation
+   controls, pathway timestamps, audit trail), on its own page. It is a testing tool, not part of the product. */
+:root{--bg:#eef2f4;--card:#fff;--fg:#14212b;--muted:#56666f;--line:#d3dbe0;--acc:#0b5f8a;--ok:#1d7a45;--warn:#9a5b00;--bad:#a1271c;--crew:#0b5f8a;--doc:#6b3fa0;--soft:#f5f8fa}
+@media (prefers-color-scheme:dark){:root{--bg:#0f171d;--card:#17232c;--fg:#e8eef2;--muted:#9fb0bc;--line:#2c3b46;--acc:#6cb8e6;--ok:#6fd39a;--warn:#f0b35a;--bad:#ff9c90;--crew:#6cb8e6;--doc:#c3a2ee;--soft:#1c2a34}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 "Public Sans","Atkinson Hyperlegible Next",system-ui,sans-serif}
+header{padding:18px 20px 8px;max-width:1500px;margin:0 auto;display:flex;flex-wrap:wrap;gap:8px 20px;align-items:baseline}
+h1{font:700 22px/1.2 "Atkinson Hyperlegible Next",system-ui;margin:0}
+header .cad{font:600 16px "Atkinson Hyperlegible Mono",monospace}
+header .test{font:600 12px "Atkinson Hyperlegible Mono",monospace;color:var(--bad)}
+header .sp{flex:1}
+header a,header button.lnk{color:var(--acc);background:none;border:0;font:inherit;cursor:pointer;padding:0;text-decoration:underline}
+main{max-width:1500px;margin:0 auto;padding:8px 20px 40px;display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr) minmax(280px,.8fr);gap:14px;align-items:start}
+@media (max-width:1100px){main{grid-template-columns:1fr}}
+section{background:var(--card);border:1px solid var(--line);border-radius:12px;min-width:0}
+section>h2{font:700 15px/1.2 "Atkinson Hyperlegible Next",system-ui;margin:0;padding:12px 14px;border-bottom:1px solid var(--line);display:flex;gap:10px;align-items:baseline}
+section>h2 small{font-weight:400;color:var(--muted);font-size:13px}
+.b{padding:12px 14px}
+ol.steps{list-style:none;margin:0;padding:0;display:grid;gap:2px}
+ol.steps li{display:grid;grid-template-columns:28px 104px minmax(0,1fr) 70px;gap:8px;align-items:center;padding:5px 6px;border-radius:7px}
+ol.steps li.done{background:var(--soft)}
+ol.steps li.cur{outline:2px solid var(--acc)}
+ol.steps .n{font:600 13px "Atkinson Hyperlegible Mono",monospace;text-align:center;color:var(--muted)}
+ol.steps .done .n{color:var(--ok)}
+.who{font:700 11px/1 "Atkinson Hyperlegible Mono",monospace;letter-spacing:.04em;text-transform:uppercase;padding:4px 6px;border-radius:5px;text-align:center}
+.who.crew{color:var(--crew);border:1.5px solid var(--crew)}.who.doc{color:var(--doc);border:1.5px solid var(--doc)}
+.tm{font:500 12.5px "Atkinson Hyperlegible Mono",monospace;color:var(--muted);text-align:right}
+table{width:100%;border-collapse:collapse;font-size:14px}
+td{padding:5px 4px;border-bottom:1px solid var(--line);vertical-align:top}
+td.v,td.d{font-family:"Atkinson Hyperlegible Mono",monospace;white-space:nowrap;text-align:right}
+td.d{color:var(--muted)}
+tr.sub td{font-weight:700;padding-top:12px;border-bottom:1.5px solid var(--fg)}
+tr.later td{color:var(--muted);font-style:italic}
+.pend{color:var(--muted)}
+.row{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:6px 0}
+.row>span{min-width:150px;font-weight:600;font-size:14px}
+.seg{display:inline-flex;border:1.5px solid var(--acc);border-radius:8px;overflow:hidden}
+.seg button{font:inherit;font-size:13.5px;padding:6px 10px;border:0;background:transparent;color:var(--acc);cursor:pointer}
+.seg button[aria-pressed=true]{background:var(--acc);color:var(--card)}
+.btn{font:600 14px/1.2 inherit;font-family:inherit;padding:9px 12px;border-radius:8px;border:1.5px solid var(--acc);background:transparent;color:var(--acc);cursor:pointer}
+.btn[disabled]{opacity:.4;cursor:default}
+.btn.p{background:var(--acc);color:var(--card)}
+.btn.bad{border-color:var(--bad);color:var(--bad)}
+.grp{font:700 11.5px "Atkinson Hyperlegible Mono",monospace;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);margin:14px 0 4px}
+.grp:first-child{margin-top:0}
+.note{font-size:13px;color:var(--muted);margin:4px 0 0}
+.pres{display:flex;gap:14px;flex-wrap:wrap;font-size:14px}
+.pres b{font-weight:700}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px;background:var(--muted)}
+.dot.up{background:var(--ok)}.dot.down{background:var(--bad)}
+ol.aud{list-style:none;margin:0;padding:0;max-height:560px;overflow:auto;font-size:13.5px}
+ol.aud li{display:grid;grid-template-columns:70px minmax(0,1fr);gap:8px;padding:5px 0;border-bottom:1px solid var(--line)}
+ol.aud li.view{color:var(--muted)}
+ol.aud small{display:block;color:var(--muted);font-size:12px}
+ol.aud .tm{text-align:left}
+.urls code{font:600 14px "Atkinson Hyperlegible Mono",monospace;background:var(--soft);padding:2px 6px;border-radius:5px;user-select:all}
+.wide{grid-column:1/-1}
+.live{font:600 12.5px "Atkinson Hyperlegible Mono",monospace}
+.live.off{color:var(--bad)}
+</style>
+<!--APP-->
+</head>
+<body>
+<header>
+  <h1>Test console</h1><span class="cad" id="cad">CAD #…</span><span class="live" id="live">connecting…</span>
+  <span class="test">FICTIONAL TEST DATA ONLY · NOT PART OF THE PRODUCT</span><span class="sp"></span>
+  <a href="/crew" target="_blank">Open crew MDT</a><button class="lnk" onclick="logout()">Log out</button>
+</header>
+<main>
+  <section>
+    <h2>First acceptance test <small>Hamad's 18 steps · each ticks itself when the platform records it</small></h2>
+    <div class="b"><ol class="steps" id="steps"></ol></div>
+  </section>
+  <section>
+    <h2>Pathway timestamps <small>recorded by the platform</small></h2>
+    <div class="b"><table id="tst"></table></div>
+  </section>
+  <section>
+    <h2>Test controls <small>stand-ins for CAD and the simulations</small></h2>
+    <div class="b" id="ctl">
+      <p class="grp">Devices</p>
+      <div class="pres" id="pres"></div>
+      <p class="note urls" id="urls"></p>
+      <p class="grp">Simulated CAD feed</p>
+      <div class="row"><button class="btn p" data-c="new-incident">New fictional CAD incident</button><button class="btn bad" data-c="reset">Delete all test data</button></div>
+      <p class="note">A new incident replaces the active test case on both screens (one active case at a time in this build: Q-69, Q-73 open).</p>
+      <p class="grp">Test ECGs and the simulated AI</p>
+      <div id="sim"></div>
+      <p class="note">Findings apply to test ECGs captured from now on; photo quality to the next photo the crew takes. The AI is a mock service with scripted results.</p>
+      <p class="grp">New case not acknowledged</p>
+      <div class="row"><button class="btn" data-c="reminder" id="b-rem">Reminder interval reached</button><button class="btn" data-c="escalate" id="b-esc">Escalation threshold reached</button></div>
+      <p class="note">Reminder and escalation times are governance configurable and not set, so the platform never reminds or escalates on its own. These buttons stand in for them.</p>
+    </div>
+  </section>
+  <section class="wide">
+    <h2>Audit trail <small>every event with time, user, action · CAD number above · newest first</small>
+      <span class="seg" id="audf" style="margin-left:auto"><button data-v="all">All events</button><button data-v="key">Pathway events only</button></span></h2>
+    <div class="b"><ol class="aud" id="aud"></ol></div>
+  </section>
+</main>
+<script src="/assets/shared/live.js"></script>
+<script>
+(()=>{
+'use strict';
+const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
+const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const p2=n=>String(n).padStart(2,'0');
+const hms=t=>{const d=new Date(t);return p2(d.getHours())+':'+p2(d.getMinutes())+':'+p2(d.getSeconds())};
+const dur=ms=>{ms=Math.max(0,ms);const s=Math.round(ms/1000),m=Math.floor(s/60);return m>=60?Math.floor(m/60)+':'+p2(m%60)+':'+p2(s%60):m+':'+p2(s%60)};
+let R=null,SIM={},UP=false,audf='all';
+
+/* Hamad's first acceptance test (brief of 4 Oct 2026) */
+const firstV=(k,i)=>{const a=R.pt[k];return a&&a.length>i?a[i]:null};
+const med=()=>{let t=null;Object.values(R.rec).forEach(r=>{if(r.group==='Treatments given')r.vers.forEach(v=>{if(!t||v.rcv<t)t=v.rcv})});return t};
+const docUp=()=>R.presence&&R.presence.doc&&R.presence.doc.up;
+const ack=()=>R.ack;
+const STEPS=[
+ ['crew','Open the crew interface',()=>R.presence&&R.presence.crew&&R.presence.crew.up?(R.presence.crew.at||true):null],
+ ['crew','Open a fictional CAD case',()=>R.path&&R.path.at],
+ ['crew','Upload test ECG 1',()=>R.ecgs[0]&&R.ecgs[0].imgs[0]&&R.ecgs[0].imgs[0].at],
+ ['crew','Enter clinical data',()=>R.sub&&firstV('age',0)&&R.sub.send],
+ ['crew','Press SEND',()=>R.sub&&R.sub.send],
+ ['doc','New case appears automatically',()=>R.alert&&R.alert.dlv],
+ ['doc','Audible alarm sounds',()=>R.alert&&R.alert.dlv],
+ ['doc','Press ACKNOWLEDGE & OPEN',()=>ack()],
+ ['doc','Alarm stops',()=>ack()],
+ ['crew','Status changes to acknowledged / reviewing',()=>ack()&&(R.opened||ack())],
+ ['crew','Update BP',()=>{const v=firstV('bp',1);return v&&v.rcv}],
+ ['crew','Add medication',()=>med()],
+ ['crew','Upload ECG 2',()=>R.ecgs[1]&&R.ecgs[1].rcv],
+ ['doc','All three updates appear without refresh or sound',()=>{const a=firstV('bp',1),m=med(),e=R.ecgs[1];return a&&m&&e&&ack()&&docUp()?Math.max(a.rcv,m,e.rcv):null}],
+ ['doc','Compare ECG 1 and ECG 2',()=>R.cmp],
+ ['doc','View AI interpretation',()=>{const e=R.ecgs[R.ecgs.length-1];return R.ecgs.length>1&&e.ai&&e.ai.done}],
+ ['doc','Select CONFIRMED STEMI',()=>{const d=R.dec.find(x=>x.k==='confirm');return d&&d.at}],
+ ['crew','Decision appears on the crew screen',()=>{const d=R.dec.find(x=>x.k==='confirm');return d&&d.dlv}]
+];
+function steps(){
+ let cur=-1;
+ $('#steps').innerHTML=STEPS.map(([w,t,f],i)=>{const d=R?f():null;if(!d&&cur<0)cur=i;return `<li class="${d?'done':''}${!d&&cur===i?' cur':''}"><span class="n">${d?'✓':i+1}</span><span class="who ${w}">${w==='crew'?'Crew · Mac':'Cardiologist · iPhone'}</span><span>${esc(t)}</span><span class="tm">${typeof d==='number'?hms(d):''}</span></li>`}).join('');
+}
+function tst(){
+ const rows=[],e1=R.ecgs[0],d=R.dec[0];
+ const row=(l,t,prev,cls)=>rows.push(`<tr class="${cls||''}"><td>${l}</td><td class="v">${t?hms(t):'<span class="pend">–</span>'}</td><td class="d">${t&&prev?'+'+dur(t-prev):''}</td></tr>`);
+ rows.push('<tr class="sub"><td colspan="3">Recorded now</td></tr>');
+ row('ECG acquisition (ECG 1)',e1&&e1.acq);
+ row('Crew Send',R.sub&&R.sub.send,e1&&e1.acq);
+ row('Server receipt',R.sub&&R.sub.rcv,R.sub&&R.sub.send);
+ row('Cardiologist alert sent',R.alert&&R.alert.at,R.sub&&R.sub.rcv);
+ row('Alert shown on the cardiologist’s phone · alarm starts',R.alert&&R.alert.dlv,R.alert&&R.alert.at);
+ row('Cardiologist acknowledgement · alarm stops',R.ack,R.alert&&R.alert.dlv);
+ row('Cardiologist opened ECG · reviewing',R.opened,R.ack);
+ row('Clinical decision',d&&d.at,R.opened);
+ row('Decision received on the crew screen',d&&d.dlv,d&&d.at);
+ row('Crew acknowledged the decision',d&&d.crewAck,d&&d.dlv);
+ if(e1&&d)rows.push(`<tr><td><b>ECG 1 acquisition to clinical decision</b></td><td class="v"></td><td class="d"><b>${dur(d.at-e1.acq)}</b></td></tr>`);
+ if(R.ecgs.length>1){rows.push('<tr class="sub"><td colspan="3">Serial ECGs</td></tr>');R.ecgs.slice(1).forEach(e=>{row(`ECG ${e.n} acquisition`,e.acq);row(`ECG ${e.n} received`,e.rcv,e.acq)})}
+ const an=R.ecgs.filter(e=>e.ai&&e.ai.done);
+ if(an.length){rows.push('<tr class="sub"><td colspan="3">AI analyses (simulated) · the same on both screens</td></tr>');an.forEach(e=>row(`ECG ${e.n} · ${{ok:'AI analysis completed',lim:'AI interpretation limited',wh:'AI interpretation limited',down:'AI interpretation unavailable'}[e.ai.st]}`,e.ai.done,e.rcv))}
+ if(R.dec.length>1){rows.push('<tr class="sub"><td colspan="3">Later decisions</td></tr>');R.dec.slice(1).forEach(x=>row({confirm:'STEMI confirmed',not:'Not STEMI',repeat:'Repeat ECG requested'}[x.k],x.at))}
+ rows.push('<tr class="sub"><td colspan="3">Next phase (hospital)</td></tr>');
+ ['Cath-lab activation','Hospital acknowledgement','Arrival at hospital'].forEach(l=>rows.push(`<tr class="later"><td>${l}</td><td class="v">not in this build</td><td></td></tr>`));
+ $('#tst').innerHTML=rows.join('');
+}
+function aud(){
+ const items=R.audit.filter(a=>audf==='all'||a.kind==='key').sort((a,b)=>b.t-a.t||b.i-a.i);
+ const ol=$('#aud'),st=ol.scrollTop;
+ ol.innerHTML=items.map(a=>`<li class="${a.kind==='view'?'view':''}"><span class="tm">${hms(a.t)}</span><span>${esc(a.text)}${a.who?`<small>${esc(a.who)}</small>`:''}</span></li>`).join('');
+ ol.scrollTop=st;
+ $$('#audf button').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.v===audf)));
+}
+const seg=(label,key,opts)=>`<div class="row"><span>${label}</span><span class="seg">${opts.map(([v,l])=>`<button data-k="${key}" data-v="${v}" aria-pressed="${String(SIM[key])===v}">${l}</button>`).join('')}</span></div>`;
+function sim(){
+ $('#sim').innerHTML=seg('Test ECG findings','find',[['border','Borderline, then evolving'],['clear','Clear STEMI pattern']])+
+  seg('Next photo','q',[['good','Good'],['glare','Glare'],['cut','Leads cut off']])+
+  seg('AI analysis','ai',[['ok','Completes'],['down','Unavailable'],['proc','Stays processing']])+
+  seg('Screen IDs on devices','ids',[['false','Hidden'],['true','Shown']]);
+}
+function pres(){
+ const p=R&&R.presence||{},f=(x,l)=>{const s=x&&x.up===true?'up':x&&x.up===false?'down':'';return `<span><span class="dot ${s}"></span><b>${l}</b> ${s==='up'?'connected':s==='down'?'offline since '+hms(x.at):'not connected yet'}</span>`};
+ $('#pres').innerHTML=f(p.crew,'Crew MDT')+f(p.doc,'Cardiologist phone');
+}
+function all(){if(!R)return;$('#cad').textContent='CAD #'+R.cad;steps();tst();aud();pres();sim();
+ const al=R.alert&&!R.ack;$('#b-rem').disabled=!al;$('#b-esc').disabled=!al}
+Live({view:'control',onMsg:m=>{
+ if(m.t==='snap'){R=m.rec;all()}
+ if(m.t==='cfg'){SIM=m.sim;sim()}
+ if(m.t==='net'){UP=m.up;const l=$('#live');l.textContent=m.up?'LIVE':'CONNECTION LOST';l.classList.toggle('off',!m.up)}
+}});
+fetch('/api/info').then(r=>r.json()).then(i=>{$('#urls').innerHTML=i.cardiologistUrls.length?`On the iPhone (same Wi-Fi), open ${i.cardiologistUrls.map(u=>`<code>${esc(u)}</code>`).join(' or ')}`:'No network address found: is this computer on Wi-Fi?'});
+document.addEventListener('click',async e=>{
+ const b=e.target.closest('button');if(!b)return;
+ if(b.dataset.k){const v=b.dataset.k==='ids'?b.dataset.v==='true':b.dataset.v;await fetch('/api/control/sim',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({[b.dataset.k]:v})});return}
+ if(b.closest('#audf')){audf=b.dataset.v;aud();return}
+ const c=b.dataset.c;if(!c)return;
+ if(c==='reset'&&!confirm('Delete every test case, image and audit event? The test users stay.'))return;
+ if(c==='new-incident'&&R&&R.path&&!confirm('Start a new fictional CAD incident? The current test case is closed on both screens.'))return;
+ await fetch('/api/control/'+c,{method:'POST'});
+});
+setInterval(()=>{if(R)steps()},2000);
+})();
+</script>
+</body>
+</html>

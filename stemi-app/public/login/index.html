@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Log in · Unified STEMI Platform (test)</title>
+<link rel="stylesheet" href="/assets/shared/fonts/fonts.css">
+<style>
+:root{--bg:#eef2f4;--card:#fff;--fg:#14212b;--muted:#53636f;--line:#cfd8de;--acc:#0b5f8a;--bad:#a1271c}
+@media (prefers-color-scheme:dark){:root{--bg:#0f171d;--card:#17232c;--fg:#e8eef2;--muted:#9fb0bc;--line:#2c3b46;--acc:#6cb8e6;--bad:#ff9c90}}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:grid;place-items:center;padding:16px;background:var(--bg);color:var(--fg);font:16px/1.45 "Atkinson Hyperlegible Next",system-ui,sans-serif}
+main{width:100%;max-width:420px;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:24px;display:grid;gap:14px}
+.app{font:600 12.5px/1.3 "Atkinson Hyperlegible Mono",monospace;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+h1{font-size:24px;margin:0;line-height:1.2}
+label{display:grid;gap:5px;font-weight:600;font-size:15px}
+input{font:inherit;font-size:17px;padding:12px;border:1.5px solid var(--line);border-radius:10px;background:transparent;color:inherit}
+button{font:700 18px/1.2 inherit;font-family:inherit;min-height:54px;border:0;border-radius:12px;background:var(--acc);color:#fff;cursor:pointer}
+@media (prefers-color-scheme:dark){button{color:#0f171d}}
+.err{color:var(--bad);font-weight:600;margin:0}
+.hint{font-size:14px;color:var(--muted);margin:0}
+.hint b{color:var(--fg)}
+.users{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.users button{min-height:44px;font-size:14.5px;background:transparent;color:var(--acc);border:1.5px solid var(--acc)}
+.test{font:600 12px/1.3 "Atkinson Hyperlegible Mono",monospace;color:var(--bad)}
+</style>
+</head>
+<body>
+<main>
+  <div class="app">National Ambulance · Unified STEMI Platform</div>
+  <h1>Log in</h1>
+  <p class="err" id="err" hidden></p>
+  <form id="f" class="users-form" style="display:grid;gap:12px">
+    <label>Email<input id="email" type="email" autocomplete="username" autocapitalize="none" required></label>
+    <label>Password<input id="pw" type="password" autocomplete="current-password" required></label>
+    <button type="submit">Log in</button>
+  </form>
+  <p class="hint">Test users: <b>crew@test.local</b> (crew MDT) and <b>cardio@test.local</b> (cardiologist). Fill in:</p>
+  <div class="users"><button type="button" data-e="crew@test.local">Crew</button><button type="button" data-e="cardio@test.local">Cardiologist</button></div>
+  <div class="test">TEST BUILD · FICTIONAL DATA ONLY · NO REAL PATIENT INFORMATION</div>
+</main>
+<script>
+const q=new URLSearchParams(location.search),err=document.getElementById('err');
+if(q.get('wrong')){err.hidden=false;err.textContent=`You are logged in as the ${q.get('wrong')} test user. Log in as the user for ${q.get('next')}.`}
+document.querySelectorAll('[data-e]').forEach(b=>b.onclick=()=>{document.getElementById('email').value=b.dataset.e;document.getElementById('pw').focus()});
+document.getElementById('f').onsubmit=async e=>{
+  e.preventDefault();err.hidden=true;
+  const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:document.getElementById('email').value,password:document.getElementById('pw').value})}).catch(()=>null);
+  if(!r){err.hidden=false;err.textContent='No connection to the server.';return}
+  const d=await r.json();
+  if(!r.ok){err.hidden=false;err.textContent=d.error||'Login failed';return}
+  const home=d.role==='crew'?'/crew':'/cardiologist',next=q.get('next');
+  location.href=next&&(next==='/control'||next===home)?next:home;
+};
+</script>
+</body>
+</html>

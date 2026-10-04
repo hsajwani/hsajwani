@@ -1,0 +1,7 @@
+/* Running as the real crew MDT application (not inside the review page): no device bezel; the approved
+   1180 × 820 landscape layout is scaled to fill the window. Nothing else changes visually. */
+html,body{margin:0;height:100%;background:#0f171d;overflow:hidden}
+.stage{padding:0}
+.device.land{width:1180px;height:820px;padding:0;border-radius:0;background:none;box-shadow:none}
+.device.land .screen{border-radius:0}
+.testbadge{position:fixed;left:50%;top:4px;transform:translateX(-50%);z-index:500;font:600 11px/1.2 system-ui,sans-serif;color:#fff;background:rgba(150,40,40,.85);padding:3px 7px;border-radius:5px;pointer-events:none;letter-spacing:.02em}

@@ -1,0 +1,31 @@
+/* Running as the real cardiologist application. On a phone the approved phone layout fills the screen (no device
+   frame, safe areas respected); on a larger screen the tablet or workstation layout is scaled to the window. */
+html,body{height:100%}
+body.app-phone{overflow:hidden;background:var(--t-bg)}
+body.app-phone .stage{height:100vh;height:100dvh}
+body.app-phone .device.dev-phone{position:fixed;inset:0;width:auto;height:auto;padding:0;border-radius:0;background:var(--t-bg);box-shadow:none;transform:none}
+body.app-phone .dev-phone .screen{width:100%;height:100%;border-radius:0;padding-bottom:env(safe-area-inset-bottom,0px)}
+/* the prototype drew a notch gap at the top of the phone; the real phone has its own */
+body.app-phone .dev-phone .tb{padding-top:env(safe-area-inset-top,0px);padding-left:env(safe-area-inset-left,0px)}
+body.app-phone .dev-phone .dr-h,body.app-phone .dev-phone .fs-h{padding-top:calc(env(safe-area-inset-top,0px) + 10px)}
+body.app-phone .dev-phone .dlg{border-radius:22px 22px 0 0;padding-bottom:calc(26px + env(safe-area-inset-bottom,0px))}
+.device.dev-tablet,.device.dev-ws{width:auto;height:auto;padding:0;border-radius:0;box-shadow:none;background:none}
+.dev-tablet .screen,.dev-ws .screen{border-radius:0}
+
+/* the start screen: one tap allows the alarm sound on this phone */
+.gate{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:24px;background:var(--t-bar,#16222b);color:var(--t-bar-fg,#fff);font-family:var(--f-ui,system-ui)}
+.gate[hidden]{display:none}
+.gate-in{max-width:420px;display:grid;gap:14px;text-align:left}
+.gate-app{font:600 13px/1.3 var(--f-mono,monospace);letter-spacing:.06em;text-transform:uppercase;opacity:.75}
+.gate h1{font-size:26px;line-height:1.15;margin:0}
+.gate p{margin:0;font-size:16px;line-height:1.4;opacity:.92}
+.gate button{min-height:64px;border:0;border-radius:14px;font:700 19px/1.2 var(--f-ui,system-ui);background:#fff;color:#111;cursor:pointer}
+.gate small{font-size:13.5px;line-height:1.4;opacity:.75}
+.gate .test{font:600 12px/1.3 var(--f-mono,monospace);color:#ffb4a8}
+
+/* the browser is holding the alarm sound back: say so loudly, never silently */
+.sndwarn{position:fixed;left:0;right:0;top:0;z-index:900;padding:calc(10px + env(safe-area-inset-top,0px)) 14px 10px;background:#b3261e;color:#fff;font:700 16px/1.3 var(--f-ui,system-ui);text-align:center;cursor:pointer}
+.sndwarn[hidden]{display:none}
+/* phone: the CAD number on the new-case alert stays on one line, on its own row under "Case", so it is never split */
+body.app-phone .nca .alert-c dl>dt:first-of-type{grid-column:1/-1;padding-top:0}
+body.app-phone .nca .alert-c dl>dd.nca-cad{grid-column:1/-1;margin-top:-8px;white-space:nowrap;font-size:min(22px,6.4vw)}
