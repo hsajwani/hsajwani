@@ -6,6 +6,7 @@ const cfg = require('./config');
 const live = require('./live');
 const seed = require('./seed');
 const AI = require('./ai');
+const CADN = require('../public/shared/cad.js');
 
 const HN = { A: 'PCI Hospital A', B: 'PCI Hospital B', C: 'PCI Hospital C' };
 const MDL = { age: 'Age', sex: 'Sex', complaint: 'Presenting complaint', onset: 'Symptom onset', bp: 'BP', hr: 'HR', spo2: 'SpO₂', gcs: 'GCS' };
@@ -237,6 +238,7 @@ function applyOps(user, ops) {
   const results = [];
   for (const o of ops) {
     if (!o || typeof o.id !== 'string' || typeof o.k !== 'string') { results.push({ id: o && o.id, ok: false, error: 'bad action' }); continue; }
+    if (!cad) { results.push({ id: o.id, ok: false, error: 'No case is open on the platform' }); continue; }
     if (o.cad && o.cad !== cad) { results.push({ id: o.id, ok: false, error: 'This case is no longer the active test case' }); continue; }
     const seen = D.get('SELECT received_at FROM ops WHERE op_id=?', o.id);
     if (seen) { results.push({ id: o.id, ok: true, dup: true, rcv: seen.received_at }); continue; }
@@ -258,6 +260,78 @@ function applyOps(user, ops) {
   }
   push();
   return results;
+}
+
+/* ---------- the case under the CAD number the crew entered manually ---------- */
+const casePublic = C => ({ cad: C.cad, active: !!C.active, submittedAt: C.server_received_at || null, unit: C.unit, openedAt: C.pathway_opened_at || C.created_at });
+/* is this CAD number valid, and is there already a case under it? (the tablet asks before the case is sent) */
+function checkCad(raw) {
+  const c = CADN.check(raw);
+  if (!c.ok) return { ok: false, cad: c.cad, error: c.error, detail: c.detail };
+  const C = caseRow(c.cad);
+  return { ok: true, cad: c.cad, exists: !!C, ...(C ? { existing: casePublic(C) } : {}) };
+}
+/* the active case changed: every screen but the crew tablets starts afresh (the tablet that made the change already holds it) */
+function announce(cad, toCrew) {
+  live.broadcast('init', { now: Date.now(), cad, epoch: D.epoch() }, toCrew ? null : c => c.role !== 'crew');
+  push();
+}
+/* create the case when the crew first sends it. The CAD number is the one the EMT typed, normalised; a second case under
+   the same number is never created and an existing case is never overwritten. Resending the same create (same tablet case
+   id) is harmless. → { status: 'created' | 'same' | 'exists' | 'invalid', ... } */
+function createCase(user, b, source) {
+  const c = CADN.check(b && b.cad);
+  if (!c.ok) return { status: 'invalid', cad: c.cad, error: c.error, detail: c.detail };
+  const cad = c.cad, cid = String((b && b.cid) || '').slice(0, 64) || null, rcv = Date.now();
+  const ex = caseRow(cad);
+  if (ex) {
+    if (cid && ex.created_cid === cid) return { status: 'same', cad };
+    return { status: 'exists', cad, existing: casePublic(ex) };
+  }
+  const crew = user.role === 'crew' ? user : D.get("SELECT * FROM users WHERE role='crew' ORDER BY id LIMIT 1");
+  const CREWT = userT(crew), UNIT = crew.unit, src = source || 'manual-crew';
+  const ok = t => (Number.isFinite(t) && t > rcv - 24 * 3600000 && t <= rcv + 60000 ? t : rcv);
+  const openedAt = ok(+b.openedAt), hist = (Array.isArray(b.hist) ? b.hist : []).slice(-10).map(h => ({ v: CADN.normalize(h && h.v), t: ok(+(h && h.t)) })).filter(h => h.v);
+  const enteredAt = hist.length ? hist[hist.length - 1].t : openedAt;
+  const how = src === 'manual-crew' ? 'CAD number entered manually by crew (not from dispatch)' : 'CAD number entered manually in the test console (demo case, not from dispatch)';
+  const W = writer(cad, crew);
+  D.tx(() => {
+    D.run('UPDATE cases SET active=0 WHERE active=1');
+    D.run(`INSERT INTO cases(cad,active,unit,emirate,crew_name,incident_type,created_at,pathway_opened_at,pathway_opened_by,cad_source,cad_entered_at,cad_entered_by,created_cid)
+           VALUES(?,1,?,?,?,?,?,?,?,?,?,?,?)`, cad, UNIT, crew.emirate || '', CREWT, 'STEMI pathway', rcv, openedAt, CREWT, src, enteredAt, CREWT, cid);
+    W.au(openedAt, `STEMI case opened by ${CREWT} (${UNIT}) — CAD #${cad} · ${how}`, CREWT, 'key');
+    hist.forEach((h, i) => { if (i > 0 && h.v !== hist[i - 1].v) W.au(h.t, `CAD number corrected by crew before sending: CAD #${hist[i - 1].v} → CAD #${h.v} · nothing had been sent`, CREWT, 'key'); });
+    W.au(rcv, `Case created on the platform under CAD #${cad} (CAD number checked: no existing case with this number)`, 'Platform', 'key');
+    W.flush();
+  });
+  announce(cad, src !== 'manual-crew');
+  return { status: 'created', cad };
+}
+/* CASE ALREADY EXISTS → OPEN EXISTING CASE: the existing case becomes the active case on the tablet; nothing is created */
+function openExisting(user, raw) {
+  const c = CADN.check(raw);
+  if (!c.ok) return { status: 'invalid', cad: c.cad, error: c.error, detail: c.detail };
+  const C = caseRow(c.cad);
+  if (!C) return { status: 'missing', cad: c.cad };
+  const t = Date.now(), W = writer(c.cad, user);
+  D.tx(() => {
+    D.run('UPDATE cases SET active=0 WHERE active=1 AND cad<>?', c.cad);
+    D.run('UPDATE cases SET active=1 WHERE cad=?', c.cad);
+    W.au(t, `Existing case CAD #${c.cad} opened on the ${user.unit || 'crew'} tablet by ${userT(user)} · the same CAD number was entered again; no second case created`, userT(user), 'key');
+    W.flush();
+  });
+  announce(c.cad, false);
+  return { status: 'opened', cad: c.cad, rec: snapshot(c.cad) };
+}
+/* the test console closes the active case (it stays in the database); the crew then opens the next case with its own CAD number */
+function closeActive() {
+  const cad = seed.activeCad();
+  if (!cad) return false;
+  const W = writer(cad, null);
+  D.run('UPDATE cases SET active=0 WHERE cad=?', cad);
+  W.au(Date.now(), `Case CAD #${cad} closed from the test console (kept in the database)`, 'Test console', 'key'); W.flush();
+  announce(null, true);
+  return true;
 }
 
 /* ---------- the AI service: starts once the ECG is stored, never delays the alert, never sounds ---------- */
@@ -341,6 +415,7 @@ function snapshot(cad) {
   if (!C) return null;
   const R = {
     cad, unit: C.unit, emirate: C.emirate, crew: C.crew_name,
+    cadEntry: { src: C.cad_source || 'simulated-feed', at: C.cad_entered_at, by: C.cad_entered_by },
     incident: { type: C.incident_type, disp: C.dispatched_at, atPt: C.at_patient_at },
     path: C.pathway_opened_at ? { at: C.pathway_opened_at, by: C.pathway_opened_by } : null,
     sub: C.server_received_at ? { send: C.submitted_at, rcv: C.server_received_at, late: !!C.delivered_late } : null,
@@ -392,19 +467,22 @@ function push() {
   if (pushQ) return;
   pushQ = setImmediate(() => {
     pushQ = null;
-    const cad = seed.activeCad(), rec = snapshot(cad), at = Date.now();
-    live.broadcast('snap', { rec, at });
+    const cad = seed.activeCad(), rec = cad ? snapshot(cad) : null, at = Date.now();
+    live.broadcast('snap', { rec, at, presence: live.presence() });
   });
 }
 
 /* ---------- a pre-filled fictional case for demonstrations (test console) ----------
-   Starts a new simulated CAD incident and sends it exactly as the crew tablet would: the pathway, ECG 1 (the sample
-   test image), the minimum dataset and aspirin go through the same crew actions, so the cardiologist gets the normal
-   NEW CARDIAC CASE alert and the mock AI analyses ECG 1. The crew can then add ECG 2 and update vital signs live. */
-function demoCase() {
+   The tester types the CAD number in the test console (it is checked and normalised like the crew's entry, and a
+   duplicate is refused). The case is then sent exactly as the crew tablet would: ECG 1 (the sample test image), the
+   minimum dataset and aspirin go through the same crew actions, so the cardiologist gets the normal NEW CARDIAC CASE
+   alert and the mock AI analyses ECG 1. The crew can then add ECG 2 and update vital signs live. */
+function demoCase(rawCad) {
   const fs = require('node:fs'), path = require('node:path'), crypto = require('node:crypto');
-  const cad = seed.newIncident();
   const crew = D.get("SELECT * FROM users WHERE role='crew' ORDER BY id LIMIT 1");
+  const r = createCase(crew, { cad: rawCad, openedAt: Date.now() - 5000 }, 'manual-test-console');
+  if (r.status !== 'created') return r;
+  const cad = r.cad;
   const buf = fs.readFileSync(path.join(cfg.ROOT, 'samples', 'test-ecg-1-borderline-anterior.jpg'));
   const imageId = D.uid('img'), file = imageId + '.jpg';
   fs.writeFileSync(path.join(cfg.IMAGE_DIR, file), buf);
@@ -424,17 +502,16 @@ function demoCase() {
   };
   const variant = D.sim().find === 'clear' ? 'clear' : 'border';
   applyOps(crew, [
-    { id: id('open'), cad, k: 'open', t: t - 4500, data: { cad } },
     { id: id('submit'), cad, k: 'submit', t: t - 1000, data: { sendAt: t - 1000, late: false, md, ev: [{ t: mdT, text: 'Minimum dataset entered' }],
       ecg: { n: 1, acq: t - 3000, variant, pri: 1, same: false, timeWhy: null, imgs: [{ i: 1, kind: 'full', q: 'file', at: t - 3000, imageId }] } } },
     { id: id('asp'), cad, k: 'rec', t: t - 500, data: { k: 'asp', label: 'Aspirin', group: 'Treatments given', v: `Given · 300 mg · ${hm(t - 500)}`, nv: false, at: t - 500, multi: false, ev: 'Aspirin documented' } }
   ]);
-  return cad;
+  return r;
 }
 
 function hello() {
   const cad = seed.activeCad();
-  return [['init', { now: Date.now(), cad, epoch: D.epoch() }], ['cfg', { sim: D.sim() }], ['snap', { rec: snapshot(cad), at: Date.now() }]];
+  return [['init', { now: Date.now(), cad, epoch: D.epoch() }], ['cfg', { sim: D.sim() }], ['snap', { rec: cad ? snapshot(cad) : null, at: Date.now(), presence: live.presence() }]];
 }
 
-module.exports = { applyOps, snapshot, push, hello, demoCase, reminder, escalate, aiResume, aiFinish, HN };
+module.exports = { applyOps, snapshot, push, hello, demoCase, checkCad, createCase, openExisting, closeActive, reminder, escalate, aiResume, aiFinish, HN };

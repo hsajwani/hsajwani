@@ -19,7 +19,6 @@ const live = require('./live');
 const platform = require('./platform');
 
 seed.ensureUsers();
-seed.activeCad();
 
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json',
   '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.svg': 'image/svg+xml', '.woff2': 'font/woff2', '.ico': 'image/x-icon', '.txt': 'text/plain; charset=utf-8' };
@@ -103,6 +102,26 @@ async function route(req, res) {
     return live.add(req, res, who, platform.hello);
   }
 
+  /* ---------- the case under the CAD number the crew entered manually ---------- */
+  if (p === '/api/cases/check' && req.method === 'GET') {
+    if (user.role !== 'crew') return send(res, 403, { error: 'Only the crew opens cases' });
+    return send(res, 200, platform.checkCad(url.searchParams.get('cad')));
+  }
+  if (p === '/api/cases' && req.method === 'POST') {
+    if (user.role !== 'crew') return send(res, 403, { error: 'Only the crew opens cases' });
+    const r = platform.createCase(user, await json(req));
+    if (r.status === 'invalid') return send(res, 400, { code: 'invalid', ...r });
+    if (r.status === 'exists') return send(res, 409, { code: 'exists', ...r });
+    return send(res, r.status === 'created' ? 201 : 200, { ok: true, ...r, rec: platform.snapshot(r.cad) });
+  }
+  if (p === '/api/cases/open' && req.method === 'POST') {
+    if (user.role !== 'crew') return send(res, 403, { error: 'Only the crew opens cases' });
+    const r = platform.openExisting(user, (await json(req)).cad);
+    if (r.status === 'invalid') return send(res, 400, { code: 'invalid', ...r });
+    if (r.status === 'missing') return send(res, 404, { code: 'missing', ...r, error: 'There is no case with this CAD number' });
+    return send(res, 200, { ok: true, ...r });
+  }
+
   /* ---------- actions from the devices ---------- */
   if (req.method === 'POST' && p === '/api/ops') {
     const b = await json(req);
@@ -119,6 +138,7 @@ async function route(req, res) {
     const buf = await readBody(req, cfg.MAX_IMAGE_BYTES);
     if (!buf.length) return send(res, 400, { error: 'Empty image' });
     const cad = seed.activeCad();
+    if (!cad) return send(res, 409, { error: 'No case is open on the platform' });
     if (url.searchParams.get('cad') && url.searchParams.get('cad') !== cad) return send(res, 409, { error: 'This case is no longer the active test case' });
     const id = D.uid('img'), file = `${id}${mime === 'image/png' ? '.png' : '.jpg'}`;
     const sha = crypto.createHash('sha256').update(buf).digest('hex');
@@ -148,18 +168,19 @@ async function route(req, res) {
       if (patch.ai && patch.ai !== 'proc') platform.aiResume();
       return send(res, 200, { sim });
     }
-    if (what === 'new-incident' || what === 'reset') {
-      if (what === 'reset') resetData();
-      const cad = seed.newIncident();
-      live.broadcast('init', { now: Date.now(), cad, epoch: D.epoch() });
+    if (what === 'reset') {
+      resetData();
+      D.bumpEpoch();
+      live.broadcast('init', { now: Date.now(), cad: null, epoch: D.epoch() });
       platform.push();
-      return send(res, 200, { cad });
+      return send(res, 200, { ok: true });
     }
+    if (what === 'close-case') return send(res, 200, { ok: platform.closeActive() });
     if (what === 'demo-case') {
-      const cad = platform.demoCase();
-      live.broadcast('init', { now: Date.now(), cad, epoch: D.epoch() });
-      platform.push();
-      return send(res, 200, { cad });
+      const r = platform.demoCase((await json(req)).cad);
+      if (r.status === 'invalid') return send(res, 400, { code: 'invalid', ...r, error: r.error + ' ' + r.detail });
+      if (r.status === 'exists') return send(res, 409, { code: 'exists', ...r, error: `CASE ALREADY EXISTS: CAD #${r.cad}. No second case was created.` });
+      return send(res, 200, { ok: true, cad: r.cad });
     }
     if (what === 'reminder') return send(res, 200, { ok: platform.reminder() });
     if (what === 'escalate') return send(res, 200, { ok: platform.escalate() });
@@ -204,7 +225,8 @@ server.listen(cfg.PORT, cfg.HOST, () => {
   console.log(` Test console:               http://localhost:${cfg.PORT}/control`);
   if (lan.length > 1) console.log(` Other addresses of this computer: ${lan.slice(1).map(a => `${a.address} (${a.name})`).join(', ')}`);
   console.log(`\n Test users: crew@test.local and cardio@test.local · password: ${process.env.TEST_USER_PASSWORD ? '(from .env)' : cfg.TEST_PASSWORD}`);
-  console.log(` Active case: CAD #${seed.activeCad()} · database: ${path.relative(cfg.ROOT, cfg.DB_FILE)} · AI: ${cfg.AI_PROVIDER} (simulated)`);
+  const act = seed.activeCad();
+  console.log(` Active case: ${act ? 'CAD #' + act : 'none (the crew enters the CAD number when opening the STEMI pathway)'} · database: ${path.relative(cfg.ROOT, cfg.DB_FILE)} · AI: ${cfg.AI_PROVIDER} (simulated)`);
   console.log(` The iPhone must be on the same Wi-Fi. Stop the server with Ctrl+C.\n${line}\n`);
 });
 

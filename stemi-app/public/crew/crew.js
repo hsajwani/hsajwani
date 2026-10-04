@@ -48,10 +48,11 @@ const nvChip=t=>`<span class="nvc">${IC.slash}${esc(t)}</span>`;
 /* the logged-in test user (crew@test.local): fictional */
 const AU=window.APP.user;
 const UNIT=AU.unit||'Ambulance', EMIRATE=AU.emirate||'', ME=AU.name, ROLE=AU.title;
-/* the active CAD incident, as the PDT shows it once the crew has responded (fictional) */
-/* the active incident comes from the server (the test console stands in for the CAD feed; Q-70 open) */
+/* the CAD number of this tablet's case. The EMT enters it manually from the MDT / dispatch information when opening the
+   STEMI pathway (no CAD integration in this phase, Q-70); CADN (shared/cad.js) normalises and checks it, as the server does.
+   CASE.srv is false while the case exists on this tablet only: the platform creates it under the CAD number at the first Send. */
 let CAD='',EPOCH='';
-const INC={get type(){return SRV&&SRV.incident?SRV.incident.type:'Chest pain / heart problem'},disp:()=>SRV&&SRV.incident?SRV.incident.disp:now(),atPt:()=>SRV&&SRV.incident?SRV.incident.atPt:now()};
+const CADN=window.CADN;
 const HOSP={
  A:{name:'PCI Hospital A',eta:18,doc:'Dr X'},
  B:{name:'PCI Hospital B',eta:26,doc:'Dr Z'},
@@ -160,7 +161,7 @@ const setT=(ms,fn)=>{const id=setTimeout(()=>{timers=timers.filter(x=>x!==id);fn
 const clearTimers=()=>{timers.forEach(clearTimeout);timers=[]};
 
 function newCase(){
-  return {openedAt:now(),savedAt:now(),idMode:'cad',cadLinked:CAD,idAt:now(),related:false,relBanner:false,
+  return {openedAt:now(),savedAt:now(),cad:'',cadAt:null,cadHist:[],cadEdit:{val:'',err:'',detail:'',busy:false},cadDup:null,srv:false,cid:'t'+rid()+rid(),related:false,relBanner:false,
     md:{age:null,sex:null,complaint:null,onset:null,bp:null,hr:null,spo2:null,gcs:null},mdDone:false,mdh:{},
     ecgs:[],draft:null,state:'DRAFT',waitFrom:null,alert:null,ack:null,opened:null,esc:[],rem:[],decs:[],dest:null,rec:{},events:[],failure:null,repeatAsked:false,repeatFor:null,cancelled:false,aiSel:null,aiNew:null};
 }
@@ -175,19 +176,25 @@ function sendOps(ops){
   LIVE.send(ops).then(r=>{(r.results||[]).forEach(x=>{if(!x.ok)toast(esc(x.error||'The server did not accept this entry'),true)})},
     ()=>{OUTQ.unshift(...ops);saveLocal()});
 }
+/* entries saved before the platform has created the case wait on the tablet until it has */
+const localOnly=()=>!!CASE&&CASE.srv===false;
 function flush(){
-  if(flushing||!OUTQ.length||!SC.online)return;
+  if(flushing||!OUTQ.length||!SC.online||localOnly())return;
   flushing=true;const q=OUTQ.splice(0);saveLocal();
   LIVE.send(q).then(r=>{(r.results||[]).forEach(x=>{if(!x.ok)toast(esc(x.error||'The server did not accept this entry'),true)})},()=>{OUTQ.unshift(...q)}).finally(()=>{flushing=false;saveLocal()});
 }
 const post=m=>{if(m.t==='op')sendOps([m.op]);else if(m.t==='ops')sendOps(m.ops)};
-function op(k,data,t){const o={id:'c'+rid()+'-'+(++opSeq),cad:CAD,k,data:data||{},t:t==null?now():t};if(SC.online&&!OUTQ.length&&!flushing)post({t:'op',op:o});else OUTQ.push(o);saveLocal();return o}
+function op(k,data,t){const o={id:'c'+rid()+'-'+(++opSeq),cad:CAD,k,data:data||{},t:t==null?now():t};if(SC.online&&!OUTQ.length&&!flushing&&!localOnly())post({t:'op',op:o});else OUTQ.push(o);saveLocal();return o}
 const delivered=id=>!!(id&&SRV&&SRV.ops&&SRV.ops[id]);
 const dlvAt=id=>SRV&&SRV.ops?SRV.ops[id]:null;
 const ev=(text,who,t)=>{CASE.events.push({t:t==null?now():t,text,who:who||ME})};
 const touch=()=>{if(!CASE)return;CASE.savedAt=now();if(!CASE.mdDone&&answered()===8){CASE.mdDone=true;CASE.mdAt=now();ev('Minimum dataset entered',ME)}};
 const answered=()=>CASE?MD.filter(f=>CASE.md[f.k]).length:0;
-const idText=()=>'CAD #'+CAD;
+const idText=()=>CAD?'CAD #'+CAD:'CAD number not entered';
+/* the CAD number can be corrected until the case is sent; after Send it is locked (an authorised, audited correction
+   after Send is not built in this phase). cadDup: the platform found a case under it, so it must be corrected or opened */
+const cadLocked=()=>!!CASE&&(CASE.srv!==false||(CASE.ecgs.length>0&&!CASE.cadDup));
+const focusCad=()=>setTimeout(()=>{const i=$('#cadin');if(i&&!i.disabled){i.focus();const n=i.value.length;try{i.setSelectionRange(n,n)}catch(_){}}},30);
 const lastEcg=()=>CASE&&CASE.ecgs[CASE.ecgs.length-1];
 /* several images per ECG: e.imgs=[{i,at,q,img}], e.pri = number of the Primary image, e.sel = the image shown large on C-05.
    An image keeps its number; a recapture takes the number of the image it replaces, and a new image takes the lowest free number. */
@@ -252,22 +259,23 @@ function topbar(){
 }
 function caseHeader(ws){
   const c=CASE;
-  const l1=`<span class="mono">CAD #${esc(CAD)}</span><span class="cadsrc">${G('done')}From the active incident</span>`;
+  const l1=c.cad?`<span class="mono">CAD #${esc(c.cad)}</span><span class="cadsrc">${G('done')}${cadLocked()?'Entered manually · locked after send':'Entered manually'}</span>${cadLocked()?'':'<button class="lnk" data-act="cad-edit">Correct</button>'}`
+    :`<span class="mono cad-none">CAD number not entered</span><button class="lnk" data-act="cad-edit">Enter CAD number</button>`;
   const l2=`<b>${esc(ptSummary())}</b>`;
   const add=ws?`<button class="btn btn-s" data-act="add-ecg">${IC.ecg}New ECG</button>`:'';
   return `<div class="ch"><div class="ch-id"><div class="ch-l1">${l1}</div><div class="ch-l2">${l2}</div></div>
     <div class="ch-st">${stateChip()}<span class="ch-clock mono" data-tick="caseclock">Open ${dur(now()-c.openedAt)}</span>${add}</div></div>`;
 }
 const lostBanner=()=>SC.online?'':`<div class="lostb" role="alert">${G('warn')}<div><b>CONNECTION LOST · Attempting to reconnect.</b><span>Statuses on this screen may not be current${lastSync?` (last update ${hms(lastSync)})`:''}. Everything you save stays on this tablet and is sent, in order, when the connection returns.</span></div></div>`;
-/* Hamad, 3 Oct 2026: Open STEMI pathway → capture or upload the ECG → minimum dataset → Send. The CAD step is already done. */
+/* Hamad, 4 Oct 2026: Open STEMI pathway → enter the CAD number → capture or upload the ECG → minimum dataset → Send */
 function stepper(cur){
   const c=CASE,n=answered(),cap=!!c.draft;
   const st=[
-   {k:'CAD',l:'CAD number',done:true,d:'From the active incident'},
+   {k:'CAD',l:'CAD number',done:!!c.cad,d:c.cad?`#${c.cad}${cadLocked()?' · locked':''}`:'Enter from the MDT'},
    {k:'C-04',l:'ECG',done:cap,d:cap?`ECG ${c.draft.n} captured${c.draft.imgs.length>1?` · ${c.draft.imgs.length} images`:''}`:'Not captured'},
    {k:'C-03',l:'Minimum dataset',done:n===8,d:`${n} of 8 answered`},
-   {k:'C-05',l:'Send',done:false,d:!cap?'Capture the ECG first':n<8?`${8-n} field${8-n>1?'s':''} still to answer`:'Ready to send'}];
-  return `<nav class="steps" aria-label="Case steps">${st.map((x,i)=>`<button class="step ${cur===x.k||(cur==='C-04'&&x.k==='C-04')?'cur':''} ${x.done?'done':''}" data-act="step" data-k="${x.k}" ${cur===x.k?'aria-current="step"':''}${x.k==='CAD'?' disabled':''}><span class="step-n">${x.done?G('done'):i+1}</span><span class="step-t"><b>${x.l}</b><small>${x.d}</small></span></button>`).join('')}</nav>`;
+   {k:'C-05',l:'Send',done:false,d:!c.cad?'Enter the CAD number first':!cap?'Capture the ECG first':n<8?`${8-n} field${8-n>1?'s':''} still to answer`:'Ready to send'}];
+  return `<nav class="steps" aria-label="Case steps">${st.map((x,i)=>`<button class="step ${cur===x.k||(cur==='C-04'&&x.k==='C-04')?'cur':''} ${x.done?'done':''}" data-act="step" data-k="${x.k}" ${cur===x.k?'aria-current="step"':''}${x.k==='CAD'&&cadLocked()?' disabled':''}><span class="step-n">${x.done?G('done'):i+1}</span><span class="step-t"><b>${x.l}</b><small>${x.d}</small></span></button>`).join('')}</nav>`;
 }
 const ab=(l,m,r)=>`<div class="ab"><div class="ab-l">${l||''}</div><div class="ab-m">${m||''}</div><div class="ab-r">${r||''}</div></div>`;
 const savedLine=()=>`<span class="saved">${G('done')}Saved on this tablet <span class="mono">${hms(CASE.savedAt)}</span></span><span>${ME} · ${UNIT}, filled in automatically</span>`;
@@ -277,7 +285,7 @@ const banner=(k,t,b)=>`<div class="banner banner-${k}">${G(k)}<div><b class="bt"
 /* ---------- C-01 ---------- */
 function liveState(){
   const c=CASE,e=lastEcg(),d=lastDec();
-  if(!e)return {k:'pend',t:'Draft, not sent',s:`${answered()} of 8 answered · ECG ${c.draft?'captured':'not captured'}`};
+  if(!e)return {k:'pend',t:'Draft, not sent',s:`${c.cad?'':'CAD number not entered · '}${answered()} of 8 answered · ECG ${c.draft?'captured':'not captured'}`};
   if(c.failure&&!c.failure.late)return {k:'fail',t:'ECG not delivered. Use the STEMI downtime route.',s:`Retrying automatically · attempt <span data-tick="attempt-n">${c.failure.attempts}</span>`};
   if(e.tx.stage==='check'||e.tx.stage==='up')return {k:'prog',t:`Uploading ECG ${e.n} · ${e.tx.pct||0}%`};
   if(d)return {k:d.k==='confirm'?'fail':'ack',t:`Decision received: ${DECL[d.k]}`,s:`${d.by} · ${hms(d.at)}`};
@@ -295,21 +303,22 @@ function vHome(){
     const st=liveState(),d=c.dest;
     const dest=!d||d.st==='finding'?'Not recommended yet':`${d.st==='rec'?'Recommended':'Confirmed'}: ${HOSP[d.hosp].name}`;
     card=`<article class="card ${st.k==='fail'?'fail':''}"><div class="card-l">
-      <div class="ch-l1"><span class="mono">CAD #${esc(CAD)}</span><span class="cadsrc">${G('done')}STEMI pathway open</span></div>
+      <div class="ch-l1"><span class="mono">${esc(idText())}</span><span class="cadsrc">${G('done')}${c.srv===false?'Draft on this tablet':'STEMI pathway open'}</span></div>
       <div><b>${esc(ptSummary())}</b></div>
       <div class="card-st k-${st.k}">${G(st.k)}<div><b>${st.t}</b>${st.s?`<small>${st.s}</small>`:''}</div></div>
       <dl class="card-f"><div><dt>Destination</dt><dd>${dest}</dd></div><div><dt>Record</dt><dd>${completeness()}</dd></div></dl></div>
-      <button class="btn btn-p btn-xl" data-act="open-case">${c.ecgs.length?'Open case':'Continue case'}</button></article>`;
+      <button class="btn btn-p btn-xl" data-act="open-case">${c.ecgs.length?'Open case':'Continue case'}</button></article>
+      <div class="newcase"><button class="btn btn-s btn-xl" data-act="new-case">${IC.ecg}New STEMI case</button></div>`;
   } else {
-    /* the active incident comes from CAD, as the PDT shows it: no case number is typed and no temporary ID is issued */
+    /* no CAD integration in this phase: the EMT enters the CAD number of the call after opening the pathway. No temporary ID */
     card=`<article class="card inc"><div class="card-l">
-      <div class="ch-l1"><span class="mono">CAD #${esc(CAD)}</span><span class="cadsrc">${G('done')}Active incident · from CAD</span></div>
-      <div><b>${INC.type}</b></div>
-      <dl class="card-f"><div><dt>Dispatched</dt><dd class="mono">${hm(INC.disp())}</dd></div><div><dt>At patient</dt><dd class="mono">${hm(INC.atPt())}</dd></div><div><dt>Unit</dt><dd>${UNIT}</dd></div></dl></div>
+      <div class="ch-l1"><span class="mono">New STEMI case</span></div>
+      <div><b>You enter the CAD number of this call from the MDT / dispatch information.</b></div>
+      <dl class="card-f"><div><dt>Unit</dt><dd>${UNIT}</dd></div><div><dt>Crew</dt><dd>${ME}</dd></div></dl></div>
       <button class="btn btn-p btn-xl" data-act="open-path">${IC.ecg}Open STEMI pathway</button></article>`;
   }
   return `<div class="home"><div class="home-main">
-    <h1 class="h1">${active?'My active cases':'Active incident'}</h1>
+    <h1 class="h1">${active?'My active cases':'New case'}</h1>
     ${!SC.online?banner('warn','No connection.','You can still open the STEMI pathway, capture the ECG and enter the minimum dataset. If sending fails you will be told at once.'):''}
     ${card}
    </div>
@@ -344,6 +353,30 @@ function mdRow(f){
   else val=`<button class="vbtn ${a?'set':''}" data-act="open" data-k="${f.k}">${a?fmtVal(f.k,a):'<span class="tap">Tap to enter</span>'}</button>`;
   const nvs=f.nv.map(n=>{const on=a&&a.nv===n;return `<button class="nvb ${on?'on':''}" data-act="nv" data-k="${f.k}" data-v="${n}" aria-pressed="${!!on}">${on?IC.slash:''}${n}</button>`}).join('');
   return `<div class="mr ${st==='pend'?'st-pend':''}">${G(st)}<div class="lab">${f.label}${f.sub?`<small>${f.sub}</small>`:''}</div><div class="val choice2">${val}</div><div class="nvs">${nvs}</div></div>`;
+}
+/* ---------- the CAD number, entered manually by the EMT ---------- */
+function vCad(){
+  const c=CASE,L=c.cadEdit,lock=cadLocked();
+  return `<div class="vbody"><div class="cadv">
+    <label class="cadv-lab" for="cadin">CAD NUMBER</label>
+    <div class="cadv-row"><span class="cadv-pre mono" aria-hidden="true">CAD #</span><input class="tin cadv-in mono" id="cadin" value="${esc(L.val)}" ${lock?'disabled':''} autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false" enterkeyhint="go" placeholder="${CADN.EXAMPLE}" aria-describedby="caderr cadhint"${L.err?' aria-invalid="true"':''}></div>
+    <div id="caderr" role="alert">${L.err?`<p class="cadv-err">${G('fail')}<span><b>${esc(L.err)}</b>${L.detail?`<small>${esc(L.detail)}</small>`:''}</span></p>`:''}</div>
+    <p class="cadv-hint" id="cadhint">${lock?`Locked: the case has been sent under <b class="mono">CAD #${esc(c.cad)}</b>.`:`Enter the CAD number of this call from the MDT / dispatch information, for example <b class="mono">${CADN.EXAMPLE}</b>. “CAD#” and spaces are removed automatically.`}</p>
+    <p class="cadv-src">${G('info')}<span>Entered manually by the crew, not received from dispatch. The platform checks that no case already exists under this number. You can correct it until the case is sent; after Send it is locked.</span></p>
+  </div></div>`+
+    ab(`<button class="btn btn-q" data-act="home">${IC.back}My cases</button>`,savedLine(),`<button class="btn btn-p btn-xl" data-act="cad-ok" ${lock||L.busy?'disabled':''}>${L.busy?'Checking…':c.draft?'Continue: check and send':'Continue: capture ECG'}</button>`);
+}
+/* the number is valid and has no case on the platform (or cannot be checked now: then it is checked again at Send) */
+function cadAccept(c,v,unchecked){
+  const prev=c.cad;
+  if(v!==prev){c.cadHist.push({v,t:now()});ev(prev?`CAD number corrected before sending: CAD #${prev} → CAD #${v}`:`CAD number entered manually: CAD #${v}`,ME);c.cadAt=now()}
+  c.cad=v;CAD=v;c.cadDup=null;c.cadEdit={val:v,err:'',detail:'',busy:false};
+  if(!c.srv)OUTQ.forEach(o=>{o.cad=v});
+  touch();saveLocal();
+  if(unchecked)toast(`<b>CAD #${esc(v)} saved.</b> No connection: the platform checks it for an existing case when you send.`,true);
+  /* corrected after the platform refused a retried Send: try again */
+  if(c.ecgs.length&&c.srv===false){view='WS';render();if(c.failure&&!c.failure.late)late();return}
+  view=c.draft?'C-05':'C-04';render();
 }
 function vMd(){
   const c=CASE;
@@ -400,7 +433,7 @@ function stripHtml(e){
       <p class="strip-note">Several photos of the same printout belong to this ECG. A new recording from the monitor is a new ECG with its own time.</p>`;
 }
 function vReview(){
-  const c=CASE,e=c.draft,s=selImg(e),q=QUAL[priImg(e).q],miss=MD.filter(f=>!c.md[f.k]),can=!miss.length;
+  const c=CASE,e=c.draft,s=selImg(e),q=QUAL[priImg(e).q],miss=MD.filter(f=>!c.md[f.k]),can=!miss.length&&!!c.cad;
   const first=e.n===1;
   return `<div class="vbody" data-keep="rv"><div class="rv">
     <div class="rv-img ${e.imgs.length>1?'multi':''}"><button class="imgbtn" data-act="zoom" aria-label="Zoom into ECG ${e.n}, image ${s.i}"><img src="${s.img}" alt="Captured ECG ${e.n}, image ${s.i}, as photographed"><span class="zoomhint">${IC.zoom}Zoom</span></button>
@@ -408,6 +441,7 @@ function vReview(){
       <div class="rv-time">ECG time <b class="mono">${hm(e.time||ecgAt(e))}</b> ${e.timeWhy?`(changed: ${esc(e.timeWhy)})`:e.imgs.length>1?'(first photo taken)':'(photo taken)'} <button class="lnk" data-act="ecg-time">Change</button></div>
       ${stripHtml(e)}</div>
     <div class="rv-side">
+      ${!c.cad?`<section class="todo"><h2 class="h2">${G('warn')}Enter the CAD number to send</h2><button class="btn btn-s" data-act="cad-edit">Enter CAD number</button></section>`:''}
       ${miss.length?`<section class="todo"><h2 class="h2">${G('warn')}Answer ${miss.length} more field${miss.length>1?'s':''} to send</h2>${miss.map(mdRow).join('')}</section>`:''}
       <section class="qc qc-${q.k}"><div class="qc-h">${G(q.g)}<div><div class="qc-lab">IMAGE CHECK ON THIS TABLET · PRIMARY IMAGE</div><div class="qc-res">${q.t}</div></div></div>
         ${q.body}<ul>${q.checks.map(([k,t])=>`<li>${G(k)}${t}</li>`).join('')}</ul>
@@ -415,7 +449,7 @@ function vReview(){
       <section class="sum"><h2 class="h2">${first?'Minimum dataset':'Minimum dataset, sent with ECG 1'}</h2><dl>${MD.map(sumRow).join('')}</dl></section>
     </div></div></div>`+
     ab(`<button class="btn btn-s" data-act="recapture">${IC.cam}Recapture</button>`,savedLine(),
-      `<div class="sendwrap"><button class="btn btn-p btn-xl" data-act="send" ${can?'':'disabled'}>${IC.send}Send to cardiologist</button><small>${can?(first?'Alerts the on-duty cardiologist of the recommended PCI hospital.':`Goes to ${c.alert?c.alert.who:'the cardiologist'} on this case.`):`Answer ${miss.length} more field${miss.length>1?'s':''} to send.`}</small></div>`);
+      `<div class="sendwrap"><button class="btn btn-p btn-xl" data-act="send" ${can?'':'disabled'}>${IC.send}Send to cardiologist</button><small>${can?(first?'Alerts the on-duty cardiologist of the recommended PCI hospital.':`Goes to ${c.alert?c.alert.who:'the cardiologist'} on this case.`):!c.cad?'Enter the CAD number to send.':`Answer ${miss.length} more field${miss.length>1?'s':''} to send.`}</small></div>`);
 }
 
 /* ---------- C-07 rail: the case's live status progression, driven by the shared record ---------- */
@@ -696,6 +730,20 @@ function layerHtml(){
       <div><label class="flab" for="etext">Details${L.why==='Other'?' (needed for Other)':' (optional)'}</label><input class="tin" id="etext" value="${esc(L.text)}" autocomplete="off"></div>`;
     return drawer('Change ECG time',b,`<span class="sp"></span><button class="btn btn-p btn-xl" data-act="esave" ${L.why&&(L.why!=='Other'||L.text.trim())?'':'disabled'}>Save time</button>`);
   }
+  if(L.t==='dup'){
+    const x=L.ex||{},c=CASE,hasDraft=!!(c&&c.srv===false&&(c.draft||answered()||c.ecgs.length));
+    return `<div class="scrim"></div><div class="dlg dup" role="alertdialog" aria-modal="true" aria-labelledby="dupq" aria-describedby="dupd"><h2 class="h2" id="dupq">${G('warn')}CASE ALREADY EXISTS</h2><p class="mono dup-cad">CAD #${esc(L.cad)}</p>
+    <p id="dupd">A case with this CAD number is already on the platform${x.unit?` (${esc(x.unit)}`:''}${x.submittedAt?`, sent ${hms(x.submittedAt)}`:x.unit?', not sent':''}${x.unit?')':''}${x.active===false?' · closed':''}. A second case is not created and the existing case is not changed.</p>
+    ${hasDraft?'<p>Opening the existing case replaces the unsent draft on this tablet. To keep the draft, correct the CAD number instead.</p>':''}
+    <div class="row"><button class="btn btn-q" data-act="dup-fix">Correct the CAD number</button><button class="btn btn-p btn-xl" data-act="dup-open">OPEN EXISTING CASE</button></div></div>`;
+  }
+  if(L.t==='newcase'){
+    const c=CASE,pend=OUTQ.length+PENDIMG.length,draft=!!(c&&c.srv===false&&(c.draft||answered()||c.cad));
+    return `<div class="scrim" data-act="close"></div><div class="dlg" role="dialog" aria-modal="true" aria-labelledby="nq"><h2 class="h2" id="nq">Open a new STEMI case?</h2>
+    ${pend?`<p><b>${pend} entr${pend>1?'ies':'y'} of ${esc(idText())} still waiting to be sent.</b> Wait for the connection to return before opening a new case.</p>`:c&&c.srv!==false?`<p>The current case <b class="mono">${esc(idText())}</b> stays on the platform as it is.</p>`:draft?`<p>The unsent draft on this tablet${c.cad?` (<b class="mono">${esc(idText())}</b>)`:''} is discarded. Nothing of it has been sent.</p>`:''}
+    <p>You will enter the CAD number of the new call from the MDT.</p>
+    <div class="row"><button class="btn btn-q" data-act="close">Cancel</button><button class="btn btn-p btn-xl" data-act="newcase-go" ${pend?'disabled':''}>Open new STEMI case</button></div></div>`;
+  }
   if(L.t==='same')return `<div class="scrim" data-act="close"></div><div class="dlg" role="dialog" aria-modal="true" aria-labelledby="dq"><h2 class="h2" id="dq">Is this a new patient?</h2><p>You already have an active case: <b class="mono">${idText()}</b> · ${esc(ptSummary())}.</p>
     <div class="col"><button class="btn btn-s btn-xl" data-act="same-ecg">Same patient: add an ECG to the open case</button><button class="btn btn-s btn-xl" data-act="same-new">New patient: open a new case</button></div><div class="row"><button class="btn btn-q" data-act="close">Cancel</button></div></div>`;
   if(L.t==='cancel')return `<div class="scrim" data-act="close"></div><div class="dlg" role="dialog" aria-modal="true" aria-labelledby="cq"><h2 class="h2" id="cq">Cancel this case?</h2><p>The case is kept as CANCELLED with your reason. Nothing is deleted.</p>
@@ -752,19 +800,21 @@ function recOk(L){
 const destOk=L=>!!L.pick&&!!L.why&&(L.why!=='Other'||!!L.text.trim());
 
 /* ---------- render ---------- */
-const VIEWS={'C-03':vMd,'C-04':vCam,'C-05':vReview,'WS':vWs};
+const VIEWS={'CAD':vCad,'C-03':vMd,'C-04':vCam,'C-05':vReview,'WS':vWs};
 function render(){
   if(CASE&&CASE.recap&&view!=='C-04')endRecap();
   const scr=$('#view'),keep={},same=lastView===view&&lastCase===CASE;lastView=view;lastCase=CASE;
+  const typing=document.activeElement&&document.activeElement.id==='cadin';
   if(same)$$('[data-keep]',scr).forEach(el=>keep[el.dataset.keep]=el.scrollTop);
   let h=topbar();
   if(view==='C-01'||!CASE)h+=`<main class="view">${idTag('C-01')}${vHome()}</main>`;
   else{
     h+=caseHeader(view==='WS')+failBar();
-    if(['C-03','C-05'].includes(view))h+=stepper(view);
-    h+=`<main class="view">${view==='WS'?'':idTag(view)}${VIEWS[view]()}</main>`;
+    if(['CAD','C-03','C-05'].includes(view))h+=stepper(view);
+    h+=`<main class="view">${view==='WS'||view==='CAD'?'':idTag(view)}${VIEWS[view]()}</main>`;
   }
   scr.innerHTML=h;
+  if(typing&&view==='CAD')focusCad();
   $$('[data-keep]',scr).forEach(el=>{if(keep[el.dataset.keep])el.scrollTop=keep[el.dataset.keep]});
   syncNote();
 }
@@ -867,10 +917,45 @@ function send(opts){
   setT(450,()=>{
     if(!SC.online){e.tx.stage='noconn';fail(e);return}
     e.tx.conAt=now();e.tx.stage='up';renderRail();
-    /* the images are uploaded and stored on the server first; the progress is the real upload */
-    uploadEcg(e).then(()=>{if(e.tx.stage!=='up')return;e.tx.upAt=now();e.tx.pct=100;renderRail();setT(250,()=>deliverEcg(e))},
-      ()=>{if(e.tx.stage==='up'){e.tx.stage='fail';fail(e)}});
+    /* the platform creates the case under the CAD number first (refused if a case already exists under it); then the
+       images are uploaded and stored on the server; the progress is the real upload */
+    ensureCase().then(ok=>{
+      if(!ok){unsend(e);return}
+      return uploadEcg(e).then(()=>{if(e.tx.stage!=='up')return;e.tx.upAt=now();e.tx.pct=100;renderRail();setT(250,()=>deliverEcg(e))});
+    }).catch(()=>{if(e.tx.stage==='up'){e.tx.stage='fail';fail(e)}});
   });
+}
+/* create the case on the platform under the CAD number the EMT entered. Resolves true when it exists (created now, or by an
+   earlier attempt of this tablet), false when the number must be corrected or the existing case opened; rejects without a
+   connection (the normal failure route then applies) */
+let creating=null;
+function ensureCase(){
+  const c=CASE;
+  if(!c||c.srv!==false)return Promise.resolve(true);
+  if(creating)return creating;
+  creating=LIVE.request('POST','/api/cases',{cad:c.cad,cid:c.cid,openedAt:c.openedAt,hist:c.cadHist}).then(x=>{
+    const b=x.body||{};
+    if(x.status===200||x.status===201){
+      c.srv=true;c.cadDup=null;c.cad=b.cad;CAD=b.cad;OUTQ.forEach(o=>{o.cad=b.cad});
+      if(CASE===c&&b.rec&&b.rec.cad===CAD)SRV=b.rec;
+      ev(`Case created on the platform under CAD #${b.cad} · no existing case with this number`,'Platform');
+      saveLocal();setT(0,()=>{pumpImgs();flush()});return true;
+    }
+    if(x.status===409&&b.code==='exists'){c.cadDup=true;layer={t:'dup',cad:b.cad,ex:b.existing};return false}
+    if(x.status===400){c.cadDup=true;c.cadEdit={val:c.cad,err:b.error||CADN.MSG,detail:b.detail||'',busy:false};layer=null;return false}
+    throw new Error('HTTP '+x.status);
+  }).finally(()=>{creating=null});
+  return creating;
+}
+/* the platform did not take the case under this CAD number: the ECG goes back to the tablet as the unsent draft, nothing lost */
+function unsend(e){
+  const c=CASE;if(!c)return;
+  const i=c.ecgs.indexOf(e);if(i>=0)c.ecgs.splice(i,1);
+  delete e.tx;delete e.aiR;c.draft=e;c.failure=null;
+  const dup=layer&&layer.t==='dup';
+  ev(`ECG ${e.n} not sent: ${dup?`CASE ALREADY EXISTS under CAD #${c.cad}`:'the CAD number needs correcting'}`,'Platform');
+  deriveState();saveLocal();
+  if(dup){view='C-05';render();renderLayer()}else{view='CAD';render();focusCad()}
 }
 function uploadImg(x,onP){
   if(x.imageId)return Promise.resolve();
@@ -883,7 +968,7 @@ async function uploadEcg(e){
 /* an image added after sending is uploaded, then its action is sent; without a connection both wait and go in order on reconnection */
 let PENDIMG=[],pumping=false;
 async function pumpImgs(){
-  if(pumping||!SC.online||!CASE)return;pumping=true;
+  if(pumping||!SC.online||!CASE||localOnly())return;pumping=true;
   try{
     while(PENDIMG.length&&SC.online){
       const p=PENDIMG[0],e=CASE.ecgs[p.n-1],x=e&&e.imgs.find(y=>y.i===p.i);
@@ -920,7 +1005,9 @@ let retrying=false;
 function late(){
   const c=CASE;if(!c||!c.failure||c.failure.late||retrying)return;
   const e=c.ecgs[c.failure.n-1];retrying=true;
-  uploadEcg(e).then(()=>{retrying=false;if(CASE!==c||c.failure.late)return;c.failure.late=now();
+  ensureCase().then(ok=>ok?uploadEcg(e).then(()=>true):false).then(ok=>{retrying=false;if(CASE!==c)return;
+    if(!ok){if(layer&&layer.t==='fail')layer=null;unsend(e);return}
+    if(c.failure.late)return;c.failure.late=now();
     e.tx.conAt=e.tx.conAt||now();e.tx.upAt=e.tx.upAt||now();e.tx.pct=100;e.tx.late=true;
     if(layer&&layer.t==='fail'){layer=null;renderLayer()}
     view='WS';render();deliverEcg(e,true)},()=>{retrying=false});
@@ -1000,12 +1087,55 @@ function act(a,el){
   switch(a){
   case 'home':view='C-01';render();break;
   case 'open-path':
-    clearTimers();CASE=newCase();ev(`STEMI pathway opened · CAD #${CAD} from the active incident`,ME);op('open',{cad:CAD});
-    view='C-04';render();break;
-  case 'open-case':view=c.ecgs.length?'WS':c.draft?'C-05':'C-04';focus='C-07';render();break;
+    /* the case starts on this tablet; the EMT enters the CAD number next. The platform creates the case under it at Send */
+    clearTimers();CASE=newCase();CAD='';SRV=null;OUTQ=[];PENDIMG=[];layer=null;$('#layer').innerHTML='';
+    ev('STEMI pathway opened on this tablet · CAD number to be entered by the crew',ME);
+    view='CAD';saveLocal();render();focusCad();break;
+  case 'new-case':layer={t:'newcase'};renderLayer();break;
+  case 'newcase-go':if(OUTQ.length||PENDIMG.length)break;layer=null;renderLayer();act('open-path',el);break;
+  case 'open-case':view=!c.cad?'CAD':c.ecgs.length?'WS':c.draft?'C-05':'C-04';focus='C-07';render();if(view==='CAD')focusCad();break;
+  case 'cad-edit':if(c&&!cadLocked()){view='CAD';render();focusCad()}break;
+  case 'cad-ok':{
+    if(!c||cadLocked()||c.cadEdit.busy)break;
+    const inp=$('#cadin');if(inp)c.cadEdit.val=inp.value;
+    const r=CADN.check(c.cadEdit.val);
+    /* an invalid number shows an inline message; nothing else on the case is touched */
+    if(!r.ok){c.cadEdit={...c.cadEdit,err:r.error,detail:r.detail};render();focusCad();break}
+    c.cadEdit.val=r.cad;
+    if(r.cad===c.cad&&!c.cadDup){cadAccept(c,r.cad);break}
+    if(!SC.online){cadAccept(c,r.cad,true);break}
+    c.cadEdit={...c.cadEdit,busy:true,err:'',detail:''};render();
+    LIVE.request('GET','/api/cases/check?cad='+encodeURIComponent(r.cad)).then(x=>{
+      c.cadEdit.busy=false;if(CASE!==c)return;
+      const b=x.body||{};
+      if(x.status!==200){cadAccept(c,r.cad,true);return}
+      if(!b.ok){c.cadEdit={...c.cadEdit,err:b.error||CADN.MSG,detail:b.detail||''};render();focusCad();return}
+      if(b.exists){render();layer={t:'dup',cad:b.cad,ex:b.existing};renderLayer();return}
+      cadAccept(c,b.cad);
+    },()=>{c.cadEdit.busy=false;if(CASE===c)cadAccept(c,r.cad,true)});
+    break;}
+  case 'dup-fix':{
+    const v=layer&&layer.cad;layer=null;renderLayer();if(!c)break;
+    c.cadEdit={val:v||c.cadEdit.val,err:`CASE ALREADY EXISTS under CAD #${v}.`,detail:'Check the CAD number on the MDT and correct it, or open the existing case.',busy:false};
+    view='CAD';render();focusCad();break;}
+  case 'dup-open':{
+    const v=layer&&layer.cad;if(!v)break;
+    if(!SC.online){toast('No connection: the existing case cannot be opened now.',true);break}
+    LIVE.request('POST','/api/cases/open',{cad:v}).then(x=>{
+      const b=x.body||{};
+      if(x.status!==200||!b.ok){toast(esc(b.error||'The existing case could not be opened.'),true);return}
+      /* the existing case replaces this tablet's unsent draft; nothing is created or overwritten on the platform */
+      clearTimers();layer=null;renderLayer();CASE=null;SRV=null;OUTQ=[];PENDIMG=[];CAD=b.cad;
+      try{localStorage.removeItem(LSK)}catch(_){}
+      if(b.rec&&b.rec.cad===CAD&&b.rec.path){SRV=b.rec;CASE=hydrate(SRV);applySnap()}
+      view=CASE&&CASE.ecgs.length?'WS':'C-01';render();saveLocal();
+      toast(`<b>Existing case CAD #${esc(b.cad)} opened.</b> No second case was created.`,true);
+    },()=>toast('No connection: the existing case cannot be opened now.',true));
+    break;}
   case 'show-note':break;
   case 'step':{
     const k=d.k;
+    if(k==='CAD'){if(!cadLocked()){view='CAD';render();focusCad()}break}
     if(k==='C-03'){view='C-03';render();break}
     if(k==='C-04'){view=c.draft&&c.draft.imgs.length>=MAXI?'C-05':c.draft?'C-05':'C-04';render();break}
     if(k==='C-05'){view=c.draft?'C-05':'C-04';render();break}
@@ -1054,7 +1184,9 @@ function act(a,el){
   case 'ecg-time':layer={t:'etime',tm:rmin(c.draft.time||ecgAt(c.draft)),why:null,text:''};renderLayer();break;
   case 'ewhy':layer.why=d.v;renderLayer();break;
   case 'esave':c.draft.time=layer.tm;c.draft.timeWhy=layer.why==='Other'?layer.text.trim():layer.why+(layer.text.trim()?': '+layer.text.trim():'');ev(`ECG ${c.draft.n} time changed to ${hm(layer.tm)} · reason: ${c.draft.timeWhy}`,ME);touch();layer=null;renderLayer();render();break;
-  case 'send':if(MD.every(f=>c.md[f.k]))send();break;
+  case 'send':
+    if(!c.cad){c.cadEdit={...c.cadEdit,err:CADN.MSG,detail:'The CAD number is empty.'};view='CAD';render();focusCad();break}
+    if(MD.every(f=>c.md[f.k]))send();break;
   case 'add-ecg':case 'repeat':
     if(c.draft){unsent();break}
     c.addTo=null;c.nextN=c.ecgs.length+1;view='C-04';render();break;
@@ -1161,15 +1293,19 @@ function cmd(k){
 /* ---------- messages from the live link to the platform server ---------- */
 function onMsg(m){
   switch(m.t){
-  case 'init':clearTimers();T0=m.T0;base=m.base;CAD=m.cad||CAD;EPOCH=m.epoch||'';SRV=null;OUTQ=[];PENDIMG=[];lastSync=null;CASE=null;layer=null;view='C-01';$('#layer').innerHTML='';SC={...SC0,ids:SC.ids,orient:SC.orient,online:true};
+  case 'init':clearTimers();T0=m.T0;base=m.base;CAD=m.cad||'';EPOCH=m.epoch||'';SRV=null;OUTQ=[];PENDIMG=[];lastSync=null;CASE=null;layer=null;view='C-01';$('#layer').innerHTML='';SC={...SC0,ids:SC.ids,orient:SC.orient,online:true};
     restoreLocal();render();fit();if(CASE)resumeSends();break;
   case 'clock':T0=m.T0;base=m.base;break;
   case 'cfg':{SIMV={...SIMV,...m.sim};SC.quality=SIMV.q;const ids=!!m.sim.ids;if(ids!==SC.ids){SC.ids=ids;render();if(layer)renderLayer()}if(view==='C-04')render();break}
-  case 'snap':
-    SRV=m.rec;lastSync=m.at;
+  case 'snap':{
+    const rec=m.rec;lastSync=m.at;
+    /* a case that is still on this tablet only (not sent yet) is not the platform's active case: ignore that one */
+    if(localOnly()){SRV=null;refreshAll();break}
+    if(!CASE&&rec&&!creating)CAD=rec.cad;
+    SRV=rec&&rec.cad===CAD?rec:null;
     /* a tablet that lost its own copy (another browser, cleared storage) rebuilds the case from the server's record */
-    if(!CASE&&SRV&&SRV.path&&SRV.cad===CAD){CASE=hydrate(SRV);if(CASE){view=CASE.ecgs.length?'WS':'C-01';render()}}
-    applySnap();saveLocal();break;
+    if(!CASE&&SRV&&SRV.path){CASE=hydrate(SRV);if(CASE){view=CASE.ecgs.length?'WS':'C-01';render()}}
+    applySnap();saveLocal();break;}
   case 'hb':lastSync=m.at;$$('[data-tick="sync"]').forEach(el=>el.textContent='Last update '+hms(lastSync));break;
   case 'net':{
     const was=SC.online;SC.online=!!m.up;
@@ -1189,7 +1325,7 @@ const LSK='stemi.crew.v1';
 let lastSaved='';
 function saveLocal(){
   try{
-    if(!CAD)return;
+    if(!CAD&&!CASE)return;
     const c=CASE?{...CASE,held:null}:null;
     const s=JSON.stringify({cad:CAD,epoch:EPOCH,user:AU.id,CASE:c,OUTQ,PENDIMG});
     if(s!==lastSaved){localStorage.setItem(LSK,s);lastSaved=s}
@@ -1198,9 +1334,13 @@ function saveLocal(){
 function restoreLocal(){
   try{
     const s=JSON.parse(localStorage.getItem(LSK)||'null');
-    if(!s||s.cad!==CAD||s.epoch!==EPOCH||s.user!==AU.id){localStorage.removeItem(LSK);return}
+    const mine=s&&s.epoch===EPOCH&&s.user===AU.id;
+    /* a case not yet created on the platform (not sent) is kept whatever the platform's active case is: its CAD number is the crew's */
+    const own=mine&&s.CASE&&s.CASE.srv===false;
+    if(!mine||(!own&&s.cad!==CAD)){localStorage.removeItem(LSK);return}
+    if(own)CAD=s.CASE.cad||'';
     CASE=s.CASE;OUTQ=s.OUTQ||[];PENDIMG=s.PENDIMG||[];
-    if(CASE){CASE.held=null;view=CASE.ecgs.length?'WS':'C-01'}
+    if(CASE){CASE.held=null;if(CASE.cadEdit)CASE.cadEdit.busy=false;view=CASE.ecgs.length?'WS':'C-01'}
   }catch(_){CASE=null}
 }
 /* an ECG that was being uploaded when the page closed is not silently forgotten: it goes back through the failure route and retries */
@@ -1212,6 +1352,7 @@ function resumeSends(){
 /* rebuild the crew's view of a case from the server's record (after Send everything is on the server) */
 function hydrate(S){
   const c=newCase();c.openedAt=S.path.at;c.savedAt=S.path.at;
+  c.srv=true;c.cad=S.cad;c.cadAt=S.cadEntry&&S.cadEntry.at;c.cadEdit.val=S.cad;CAD=S.cad;
   MD.forEach(f=>{const a=S.pt[f.k];if(a&&a.length){c.md[f.k]=a[a.length-1].raw;c.mdh[f.k]=a.map(x=>({a:x.raw,t:x.t,kind:x.kind,opId:x.op}))}});
   if(S.sub){c.mdDone=true;c.mdAt=S.sub.send;c.waitFrom=S.sub.rcv}
   c.ecgs=S.ecgs.map(s=>({n:s.n,acq:s.acq,v:s.variant,pri:s.pri,sel:s.pri,repFlag:1,
@@ -1253,7 +1394,10 @@ $('#layer').addEventListener('input',e=>{
   if(id==='dtext'){layer.text=e.target.value;const b=$('[data-act="dconfirm"]');if(b)b.disabled=!destOk(layer)}
   if(id==='etext'){layer.text=e.target.value;const b=$('[data-act="esave"]');if(b)b.disabled=!(layer.why&&(layer.why!=='Other'||layer.text.trim()))}
 });
-document.addEventListener('keydown',e=>{if(e.key==='Escape'&&layer&&layer.t!=='fail'&&layer.t!=='dec'){layer=null;renderLayer()}});
+/* the CAD number field keeps what is typed (a re-render or refresh does not lose it); Enter continues */
+$('#view').addEventListener('input',e=>{if(e.target.id==='cadin'&&CASE){CASE.cadEdit.val=e.target.value;CASE.savedAt=now();saveLocal()}});
+$('#view').addEventListener('keydown',e=>{if(e.target.id==='cadin'&&e.key==='Enter'){e.preventDefault();act('cad-ok',e.target)}});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'&&layer&&layer.t!=='fail'&&layer.t!=='dec'&&layer.t!=='dup'){layer=null;renderLayer()}});
 
 /* ---------- ticking clocks ---------- */
 setInterval(()=>{

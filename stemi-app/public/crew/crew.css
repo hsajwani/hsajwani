@@ -465,7 +465,7 @@ textarea.tin{resize:vertical}
 .zoom-h{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 12px 8px 20px;color:var(--t-cam-fg)}
 .zoom-b{flex:1;overflow:auto}
 .zoom-b img{display:block;width:1600px;max-width:none;height:auto}
-.fail{position:absolute;inset:0;background:var(--t-crit-fill);color:var(--t-on-crit);display:grid;place-items:center;text-align:center;border-radius:16px;padding:24px;overflow:auto}
+.fail:not(.card){position:absolute;inset:0;background:var(--t-crit-fill);color:var(--t-on-crit);display:grid;place-items:center;text-align:center;border-radius:16px;padding:24px;overflow:auto}
 .fail-in{max-width:900px;display:flex;flex-direction:column;align-items:center;gap:16px}
 .fail-id{font-size:16px;opacity:.9}
 .fail-ic{width:84px;height:84px;border-radius:50%;background:var(--t-on-crit);color:var(--t-crit-fill);display:grid;place-items:center}
@@ -651,3 +651,26 @@ body{overflow-x:hidden}
 .aimini .lnk{margin-left:auto}
 .device.port .airow{grid-template-columns:1fr;gap:1px}
 .device.port .aimeta img{width:96px;height:63px}
+
+/* ---------- CAD number, entered manually by the EMT (4 Oct 2026) ---------- */
+.cadv{max-width:760px;margin:0 auto;padding:28px 40px;display:flex;flex-direction:column;gap:14px}
+.cadv-lab{font:700 15px/1 var(--f-ui);letter-spacing:.08em;color:var(--t-muted)}
+.cadv-row{display:flex;align-items:center;gap:12px}
+.cadv-pre{font-size:30px;font-weight:700;color:var(--t-muted);white-space:nowrap}
+.cadv-in{font-family:var(--f-mono);font-size:32px;font-weight:700;min-height:72px;letter-spacing:.02em}
+.cadv-in[aria-invalid="true"]{border-color:var(--t-crit)}
+.cadv-in:disabled{background:var(--t-sunk);color:var(--t-muted)}
+.cadv-err{display:flex;gap:10px;align-items:flex-start;margin:0;color:var(--t-crit);font-size:17px}
+.cadv-err .g{width:24px;height:24px;flex:none}
+.cadv-err small{display:block;font-size:15px;color:var(--t-fg);margin-top:3px}
+.cadv-hint{margin:0;font-size:16px;line-height:1.45}
+.cadv-src{display:flex;gap:10px;align-items:flex-start;margin:0;font-size:15px;line-height:1.45;color:var(--t-muted)}
+.cadv-src .g{width:20px;height:20px;flex:none}
+.cad-none{color:var(--t-warn)}
+.ch-l1 .lnk{font-size:15px}
+.newcase{display:flex;justify-content:flex-start}
+.dlg.dup .h2{display:flex;gap:10px;align-items:center;color:var(--t-warn)}
+.dlg.dup .h2 .g{width:26px;height:26px}
+.dup-cad{font-size:24px;font-weight:700}
+.device.port .cadv{padding:20px 16px}
+.device.port .cadv-in{font-size:24px}

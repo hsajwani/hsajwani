@@ -28,8 +28,25 @@ platform is `server/platform.js`, writing to a database, and the two views talk 
 ## One case record, keyed by the CAD number
 
 The CAD number (for example `20261004-0123-1`) is the case identifier. It is the primary key of `cases`, and every other
-table carries it. There is no temporary STEMI ID (Q-44). One case is active at a time; the test console's
-*New fictional CAD incident* stands in for the CAD feed (how the CAD number reaches the tablet in V1 is Q-70).
+table carries it. There is no temporary STEMI ID (Q-44). One case is active at a time.
+
+**The EMT enters the CAD number manually** on the crew tablet (no CAD integration in this phase, Q-70):
+
+- `public/shared/cad.js` is the one rule for both the tablet and the server: remove spaces, drop a leading `CAD#`,
+  `cad#` or `#`, accept 13 digits typed without dashes, and require `YYYYMMDD-NNNN-N` with a valid month and day. The
+  canonical stored form is `20261004-0123-1` (the format the database already used); screens show `CAD #…`.
+- The draft stays on the tablet until the first **Send** (`CASE.srv === false`), with its CAD number, its corrections
+  (`cadHist`) and a tablet case id (`cid`). The tablet asks `GET /api/cases/check?cad=` when the number is entered
+  (connected), and the first Send calls `POST /api/cases {cad, cid, openedAt, hist}` before uploading the images:
+  `201` created, `200` the same tablet case again (a resend), `409 {code:'exists'}` CASE ALREADY EXISTS, `400` invalid.
+  Entries saved before the case exists wait on the tablet. The created case becomes the active case; the server
+  tells the other screens (`init`), and the cardiologist gets the normal alert when `submit` arrives.
+- `POST /api/cases/open {cad}` is OPEN EXISTING CASE: it makes the existing case active again and returns its record.
+  Nothing is created or overwritten.
+- After Send the tablet locks the number. A case that exists only on the tablet ignores the platform's active case
+  until it is sent, and survives a refresh (local storage) whatever the platform's active case is.
+- `cases.cad_source` (`manual-crew`, `manual-test-console`), `cad_entered_at`, `cad_entered_by` and `created_cid`
+  record how the number was entered. The first audit event says *CAD number entered manually by crew (not from dispatch)*.
 
 ## Data model
 
@@ -73,7 +90,7 @@ when it was taken and when the server received it.
 
 | From | Action (`k`) | What the server does |
 |---|---|---|
-| Crew | `open` | Records the STEMI pathway opened on the CAD case |
+| Crew | `open` | Kept for compatibility: the pathway is recorded when the case is created under the CAD number (`POST /api/cases`) |
 | Crew | `submit` | Stores ECG 1 and its images, the minimum dataset and the provisional destination (placeholder policy), alerts the on-duty cardiologist, starts the AI. The alert never waits for the AI |
 | Crew | `ecg` | Stores ECG 2, 3…, marks it NEW for the cardiologist (silent), starts its own AI analysis |
 | Crew | `img` | Adds an image to an ECG already sent (not a new ECG) |

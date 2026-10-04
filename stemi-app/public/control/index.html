@@ -65,6 +65,8 @@ ol.aud .tm{text-align:left}
 .wide{grid-column:1/-1}
 .live{font:600 12.5px "Atkinson Hyperlegible Mono",monospace}
 .live.off{color:var(--bad)}
+.cadin{flex:1;min-width:220px;font:600 15px "Atkinson Hyperlegible Mono",monospace;padding:8px 10px;border:1.5px solid var(--line);border-radius:8px;background:transparent;color:inherit}
+#demo-msg.err{color:var(--bad);font-weight:600}
 </style>
 <!--APP-->
 </head>
@@ -76,7 +78,7 @@ ol.aud .tm{text-align:left}
 </header>
 <main>
   <section>
-    <h2>First acceptance test <small>Hamad's 18 steps · each ticks itself when the platform records it</small></h2>
+    <h2>First acceptance test <small>Hamad's steps · each ticks itself when the platform records it</small></h2>
     <div class="b"><ol class="steps" id="steps"></ol></div>
   </section>
   <section>
@@ -84,14 +86,16 @@ ol.aud .tm{text-align:left}
     <div class="b"><table id="tst"></table></div>
   </section>
   <section>
-    <h2>Test controls <small>stand-ins for CAD and the simulations</small></h2>
+    <h2>Test controls <small>cases and the simulations</small></h2>
     <div class="b" id="ctl">
       <p class="grp">Devices</p>
       <div class="pres" id="pres"></div>
       <p class="note urls" id="urls"></p>
-      <p class="grp">Simulated CAD feed</p>
-      <div class="row"><button class="btn p" data-c="new-incident">New fictional CAD incident</button><button class="btn" data-c="demo-case">Pre-filled demo case (sent)</button><button class="btn bad" data-c="reset">Delete all test data</button></div>
-      <p class="note">A new incident replaces the active test case on both screens (one active case at a time in this build: Q-69, Q-73 open). The pre-filled demo case arrives already sent by the crew: ECG 1, minimum dataset, aspirin and the mock AI result. It raises the normal new-case alarm on the cardiologist's device; the crew can then add ECG 2 and update vital signs.</p>
+      <p class="grp">Cases</p>
+      <div class="row"><button class="btn p" data-c="close-case" id="b-close">Close the active case</button><button class="btn bad" data-c="reset">Delete all test data</button></div>
+      <p class="note">The crew enters the CAD number on the MDT when opening the STEMI pathway; nothing generates CAD numbers. One active case at a time in this build (Q-69, Q-73 open): closing it keeps it in the database, and the crew then opens the next case with <b>New STEMI case</b>.</p>
+      <div class="row"><input id="demo-cad" class="cadin" placeholder="CAD number, e.g. 20261004-0123-1" autocomplete="off" spellcheck="false" aria-label="CAD number for the demo case"><button class="btn" data-c="demo-case">Pre-filled demo case (sent)</button></div>
+      <p class="note" id="demo-msg">The pre-filled demo case arrives already sent under the CAD number you type here (checked like the crew's entry; an existing number is refused): ECG 1, minimum dataset, aspirin and the mock AI result. It raises the normal new-case alarm on the cardiologist's device; the crew can then add ECG 2 and update vital signs.</p>
       <p class="grp">Test ECGs and the simulated AI</p>
       <div id="sim"></div>
       <p class="note">Findings apply to test ECGs captured from now on; photo quality to the next photo the crew takes. The AI is a mock service with scripted results.</p>
@@ -115,16 +119,17 @@ const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;'
 const p2=n=>String(n).padStart(2,'0');
 const hms=t=>{const d=new Date(t);return p2(d.getHours())+':'+p2(d.getMinutes())+':'+p2(d.getSeconds())};
 const dur=ms=>{ms=Math.max(0,ms);const s=Math.round(ms/1000),m=Math.floor(s/60);return m>=60?Math.floor(m/60)+':'+p2(m%60)+':'+p2(s%60):m+':'+p2(s%60)};
-let R=null,SIM={},UP=false,audf='all';
+let R=null,P=null,SIM={},UP=false,audf='all';
 
 /* Hamad's first acceptance test (brief of 4 Oct 2026) */
 const firstV=(k,i)=>{const a=R.pt[k];return a&&a.length>i?a[i]:null};
 const med=()=>{let t=null;Object.values(R.rec).forEach(r=>{if(r.group==='Treatments given')r.vers.forEach(v=>{if(!t||v.rcv<t)t=v.rcv})});return t};
-const docUp=()=>R.presence&&R.presence.doc&&R.presence.doc.up;
+const docUp=()=>P&&P.doc&&P.doc.up;
 const ack=()=>R.ack;
 const STEPS=[
- ['crew','Open the crew interface',()=>R.presence&&R.presence.crew&&R.presence.crew.up?(R.presence.crew.at||true):null],
- ['crew','Open a fictional CAD case',()=>R.path&&R.path.at],
+ ['crew','Open the crew interface',()=>P&&P.crew&&P.crew.up?(P.crew.at||true):null],
+ ['crew','Open a new STEMI case',()=>R.path&&R.path.at],
+ ['crew','Enter the CAD number manually',()=>R.cadEntry&&R.cadEntry.src!=='simulated-feed'&&(R.cadEntry.at||true)],
  ['crew','Upload test ECG 1',()=>R.ecgs[0]&&R.ecgs[0].imgs[0]&&R.ecgs[0].imgs[0].at],
  ['crew','Enter clinical data',()=>R.sub&&firstV('age',0)&&R.sub.send],
  ['crew','Press SEND',()=>R.sub&&R.sub.send],
@@ -144,7 +149,7 @@ const STEPS=[
 ];
 function steps(){
  let cur=-1;
- $('#steps').innerHTML=STEPS.map(([w,t,f],i)=>{const d=R?f():null;if(!d&&cur<0)cur=i;return `<li class="${d?'done':''}${!d&&cur===i?' cur':''}"><span class="n">${d?'✓':i+1}</span><span class="who ${w}">${w==='crew'?'Crew · Mac':'Cardiologist · iPhone'}</span><span>${esc(t)}</span><span class="tm">${typeof d==='number'?hms(d):''}</span></li>`}).join('');
+ $('#steps').innerHTML=STEPS.map(([w,t,f],i)=>{const d=R?f():i===0&&P?STEPS[0][2]():null;if(!d&&cur<0)cur=i;return `<li class="${d?'done':''}${!d&&cur===i?' cur':''}"><span class="n">${d?'✓':i+1}</span><span class="who ${w}">${w==='crew'?'Crew · Mac':'Cardiologist · iPhone'}</span><span>${esc(t)}</span><span class="tm">${typeof d==='number'?hms(d):''}</span></li>`}).join('');
 }
 function tst(){
  const rows=[],e1=R.ecgs[0],d=R.dec[0];
@@ -184,13 +189,16 @@ function sim(){
   seg('Screen IDs on devices','ids',[['false','Hidden'],['true','Shown']]);
 }
 function pres(){
- const p=R&&R.presence||{},f=(x,l)=>{const s=x&&x.up===true?'up':x&&x.up===false?'down':'';return `<span><span class="dot ${s}"></span><b>${l}</b> ${s==='up'?'connected':s==='down'?'offline since '+hms(x.at):'not connected yet'}</span>`};
+ const p=P||{},f=(x,l)=>{const s=x&&x.up===true?'up':x&&x.up===false?'down':'';return `<span><span class="dot ${s}"></span><b>${l}</b> ${s==='up'?'connected':s==='down'?'offline since '+hms(x.at):'not connected yet'}</span>`};
  $('#pres').innerHTML=f(p.crew,'Crew MDT')+f(p.doc,'Cardiologist phone');
 }
-function all(){if(!R)return;$('#cad').textContent='CAD #'+R.cad;steps();tst();aud();pres();sim();
+function all(){
+ pres();sim();steps();$('#b-close').disabled=!R;
+ if(!R){$('#cad').textContent='No active case';$('#tst').innerHTML='<tr><td>No active case. The crew opens one on the MDT and enters its CAD number.</td></tr>';$('#aud').innerHTML='';$('#b-rem').disabled=$('#b-esc').disabled=true;return}
+ $('#cad').textContent='CAD #'+R.cad;tst();aud();
  const al=R.alert&&!R.ack;$('#b-rem').disabled=!al;$('#b-esc').disabled=!al}
 Live({view:'control',onMsg:m=>{
- if(m.t==='snap'){R=m.rec;all()}
+ if(m.t==='snap'){R=m.rec;P=m.presence||(R&&R.presence)||P;all()}
  if(m.t==='cfg'){SIM=m.sim;sim()}
  if(m.t==='net'){UP=m.up;const l=$('#live');l.textContent=m.up?'LIVE':'CONNECTION LOST';l.classList.toggle('off',!m.up)}
 }});
@@ -201,7 +209,15 @@ document.addEventListener('click',async e=>{
  if(b.closest('#audf')){audf=b.dataset.v;aud();return}
  const c=b.dataset.c;if(!c)return;
  if(c==='reset'&&!confirm('Delete every test case, image and audit event? The test users stay.'))return;
- if((c==='new-incident'||c==='demo-case')&&R&&R.path&&!confirm('Start a new fictional CAD incident? The current test case is closed on both screens.'))return;
+ if(c==='close-case'&&!confirm('Close the active case CAD #'+(R&&R.cad)+'? It stays in the database; both screens leave it.'))return;
+ if(c==='demo-case'){
+  if(R&&R.path&&!confirm('Send a pre-filled demo case? The active case CAD #'+R.cad+' is closed on both screens.'))return;
+  const r=await fetch('/api/control/demo-case',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cad:$('#demo-cad').value})});
+  const b=await r.json().catch(()=>({})),msg=$('#demo-msg');
+  msg.classList.toggle('err',!r.ok);msg.textContent=r.ok?'Demo case sent under CAD #'+b.cad+'.':(b.error||'The demo case was not created.');
+  if(r.ok)$('#demo-cad').value='';
+  return;
+ }
  await fetch('/api/control/'+c,{method:'POST'});
 });
 setInterval(()=>{if(R)steps()},2000);

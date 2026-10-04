@@ -1,5 +1,6 @@
-/* Test users and the simulated CAD incident. Every name, unit and number here is fictional.
-   In this build the test console stands in for the CAD feed: how the CAD number reaches the tablet in V1 is still open (Q-70). */
+/* Test users. Every name and unit here is fictional.
+   There is no simulated CAD feed any more: the crew (EMT) enters the CAD number manually when opening the STEMI pathway,
+   and the case is created under that number (Q-70: CAD integration is a later phase). */
 const D = require('./db');
 const cfg = require('./config');
 
@@ -21,37 +22,10 @@ function ensureUsers() {
   }
 }
 
-const p2 = n => String(n).padStart(2, '0');
-/* CAD#YYYYMMDD-NNNN-1, the format of the example in the brief. The day's first incident is NNNN 0123 (CAD#20261004-0123-1
-   on 4 October 2026, the brief's example); later ones are random and fictional */
-function newCad() {
-  const d = new Date();
-  const day = `${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}`;
-  if (!D.get('SELECT cad FROM cases WHERE cad=?', `${day}-0123-1`)) return `${day}-0123-1`;
-  for (;;) {
-    const cad = `${day}-${String(Math.floor(Math.random() * 9000) + 100).padStart(4, '0')}-1`;
-    if (!D.get('SELECT cad FROM cases WHERE cad=?', cad)) return cad;
-  }
-}
-
-/* a new simulated incident from CAD: chest pain, dispatched 11 minutes ago, crew at patient 3 minutes ago */
-function newIncident() {
-  const crew = D.get("SELECT * FROM users WHERE role='crew' ORDER BY id LIMIT 1");
-  const t = Date.now(), cad = newCad(), crewT = `${crew.name}, ${crew.title}`;
-  D.tx(() => {
-    D.run('UPDATE cases SET active=0 WHERE active=1');
-    D.run(`INSERT INTO cases(cad,active,unit,emirate,crew_name,incident_type,dispatched_at,at_patient_at,created_at)
-           VALUES(?,1,?,?,?,?,?,?,?)`, cad, crew.unit, crew.emirate, crewT, 'Chest pain / heart problem', t - 11 * 60000 - 20000, t - 3 * 60000 - 5000, t);
-    D.run('INSERT INTO audit_events(cad,at,actor,role,action,kind) VALUES(?,?,?,?,?,?)', cad, t - 11 * 60000 - 20000, 'CAD (simulated feed)', 'cad-feed', `CAD ${cad} dispatched to ${crew.unit}`, 'key');
-    D.run('INSERT INTO audit_events(cad,at,actor,role,action,kind) VALUES(?,?,?,?,?,?)', cad, t - 3 * 60000 - 5000, 'CAD (crew status button, simulated)', 'cad-feed', `${crew.unit} at patient`, 'key');
-  });
-  D.bumpEpoch();
-  return cad;
-}
-
+/* the active case (one at a time in this build: Q-69, Q-73), or null when none is open */
 function activeCad() {
   const r = D.get('SELECT cad FROM cases WHERE active=1 ORDER BY created_at DESC LIMIT 1');
-  return r ? r.cad : newIncident();
+  return r ? r.cad : null;
 }
 
-module.exports = { ensureUsers, newIncident, activeCad, USERS };
+module.exports = { ensureUsers, activeCad, USERS };

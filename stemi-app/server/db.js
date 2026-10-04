@@ -9,8 +9,15 @@ const cfg = require('./config');
 const db = new DatabaseSync(cfg.DB_FILE);
 db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
 db.exec(fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8'));
-/* a database made by v0.1 has no audit role column: add it, keeping every existing event */
-if (!db.prepare('PRAGMA table_info(audit_events)').all().some(c => c.name === 'role')) db.exec('ALTER TABLE audit_events ADD COLUMN role TEXT');
+/* columns added after v0.1: a database made by an earlier version gets them on start, keeping every existing row */
+function addColumn(table, col, type) {
+  if (!db.prepare(`PRAGMA table_info(${table})`).all().some(c => c.name === col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`);
+}
+addColumn('audit_events', 'role', 'TEXT');
+addColumn('cases', 'cad_source', 'TEXT');
+addColumn('cases', 'cad_entered_at', 'INTEGER');
+addColumn('cases', 'cad_entered_by', 'TEXT');
+addColumn('cases', 'created_cid', 'TEXT');
 
 const cache = new Map();
 const st = sql => { let s = cache.get(sql); if (!s) { s = db.prepare(sql); cache.set(sql, s); } return s; };

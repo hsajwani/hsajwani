@@ -14,9 +14,14 @@ CREATE TABLE IF NOT EXISTS users (
   emirate       TEXT
 );
 
--- one row per CAD case; the CAD number is the operational case identifier (Q-44)
+-- one row per CAD case; the CAD number is the operational case identifier (Q-44).
+-- The crew (EMT) enters the CAD number manually; it is stored normalised (YYYYMMDD-NNNN-N, see public/shared/cad.js).
 CREATE TABLE IF NOT EXISTS cases (
   cad                 TEXT PRIMARY KEY,
+  cad_source          TEXT,             -- manual-crew | manual-test-console (demo) | NULL: simulated CAD feed (v0.1 cases)
+  cad_entered_at      INTEGER,          -- when the crew confirmed the CAD number on the tablet
+  cad_entered_by      TEXT,
+  created_cid         TEXT,             -- the tablet's id for this case, so a resent "create" is not taken for a duplicate
   active              INTEGER NOT NULL DEFAULT 1,
   unit                TEXT NOT NULL,
   emirate             TEXT NOT NULL,

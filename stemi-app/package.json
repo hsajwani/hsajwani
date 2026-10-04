@@ -1,6 +1,6 @@
 {
   "name": "stemi-unified-platform-test",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "private": true,
   "description": "Unified STEMI Platform: first functional crew ↔ cardiologist multi-device test build. Fictional test data only.",
   "license": "UNLICENSED",
@@ -9,6 +9,7 @@
     "start": "node --disable-warning=ExperimentalWarning server/index.js",
     "dev": "node --watch --disable-warning=ExperimentalWarning server/index.js",
     "reset": "node --disable-warning=ExperimentalWarning scripts/reset.js",
-    "test:acceptance": "node --disable-warning=ExperimentalWarning scripts/acceptance.js"
+    "test:acceptance": "node --disable-warning=ExperimentalWarning scripts/acceptance.js",
+    "test:cad": "node --disable-warning=ExperimentalWarning scripts/cad-entry-test.js"
   }
 }

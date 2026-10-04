@@ -654,14 +654,15 @@ function cmd(k){
 /* ---------- the link to the platform ---------- */
 function onSnap(rec,at){
  R=rec;NET.last=at;
- if(R){UNIT=R.unit;EMIRATE=R.emirate;CREWT=R.crew;CREW=String(R.crew||'').split(',')[0]}
+ /* the CAD number comes with the case record: exactly as the crew entered it (normalised by the platform) */
+ if(R){CAD=R.cad;UNIT=R.unit;EMIRATE=R.emirate;CREWT=R.crew;CREW=String(R.crew||'').split(',')[0]}
  render();
  /* the alert has reached this device and is on screen: the platform starts the alarm from this moment */
  if(alertOn()&&!R.alert.dlv&&!U.alertShown&&NET.up&&op('shown'))U.alertShown=true;
 }
 function onMsg(m){
  switch(m.t){
-  case 'init':{clearTimers();T0=m.T0;base=m.base;CAD=m.cad||CAD;EPOCH=m.epoch||'';R=null;U=newU();layer=null;lastSig='';lastScr='';NET.last=null;NET.up=true;$('#layer').innerHTML='';const al=$('#alertl');al.innerHTML='';al._h='';render();break}
+  case 'init':{clearTimers();T0=m.T0;base=m.base;CAD=m.cad||'';EPOCH=m.epoch||'';R=null;U=newU();layer=null;lastSig='';lastScr='';NET.last=null;NET.up=true;$('#layer').innerHTML='';const al=$('#alertl');al.innerHTML='';al._h='';render();break}
   case 'clock':T0=m.T0;base=m.base;break;
   case 'cfg':{
    const ids=!!m.sim.ids;

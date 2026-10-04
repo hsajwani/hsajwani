@@ -26,7 +26,7 @@
         set(true);
       });
       es.addEventListener('cfg', e => { seen(); onMsg({ t: 'cfg', sim: JSON.parse(e.data).sim }); });
-      es.addEventListener('snap', e => { seen(); const d = JSON.parse(e.data); set(true); onMsg({ t: 'snap', rec: d.rec, at: d.at }); });
+      es.addEventListener('snap', e => { seen(); const d = JSON.parse(e.data); set(true); onMsg({ t: 'snap', rec: d.rec, at: d.at, presence: d.presence }); });
       es.addEventListener('hb', e => { seen(); set(true); onMsg({ t: 'hb', at: JSON.parse(e.data).at }); });
       es.onerror = () => {
         set(false);
@@ -64,8 +64,18 @@
       });
     }
 
+    /* a JSON request that needs the server's answer at once (checking or creating the case under the CAD number).
+       Resolves { status, body }; rejects when the server cannot be reached */
+    function request(method, url, body) {
+      return fetch(url, { method, headers: body ? { 'Content-Type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined, cache: 'no-store' })
+        .then(r => {
+          if (r.status === 401) { location.href = '/login?next=' + encodeURIComponent(location.pathname); throw new Error('login'); }
+          return r.json().catch(() => ({})).then(b => ({ status: r.status, body: b }));
+        });
+    }
+
     connect();
-    return { send, upload, isUp: () => up, cad: () => cad, epoch: () => epoch };
+    return { send, upload, request, isUp: () => up, cad: () => cad, epoch: () => epoch };
   }
 
   window.Live = Live;

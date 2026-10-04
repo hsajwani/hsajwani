@@ -44,8 +44,9 @@ function add(req, res, user, hello) {
   setPresence(c.role, true);
 }
 
-function broadcast(event, dataFn) {
-  for (const c of clients) write(c, event, typeof dataFn === 'function' ? dataFn(c) : dataFn);
+/* to every open screen, or only to those the filter accepts (by role) */
+function broadcast(event, dataFn, filter) {
+  for (const c of clients) if (!filter || filter(c)) write(c, event, typeof dataFn === 'function' ? dataFn(c) : dataFn);
 }
 
 setInterval(() => broadcast('hb', { at: Date.now() }), cfg.HEARTBEAT_MS).unref();
