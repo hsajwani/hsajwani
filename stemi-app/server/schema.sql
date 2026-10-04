@@ -22,11 +22,14 @@ CREATE TABLE IF NOT EXISTS cases (
   cad_entered_at      INTEGER,          -- when the crew confirmed the CAD number on the tablet
   cad_entered_by      TEXT,
   created_cid         TEXT,             -- the tablet's id for this case, so a resent "create" is not taken for a duplicate
-  status              TEXT,             -- NULL while open; 'closed' once the crew completed the handover (shown as HANDOVER COMPLETED)
-  handover_opened_at  INTEGER,
-  closed_at           INTEGER,          -- handover completed and case closed: the case is read-only from then on
-  closed_by           TEXT,
+  -- the STEMI pathway's own closure (never the operational CAD incident, which belongs to ICCC / ePCR)
+  status              TEXT,             -- NULL while the pathway is active; 'closed' once closed (read-only from then on)
+  handover_opened_at  INTEGER,          -- the case summary page was first opened (column name kept from 0.3.0)
+  closed_at           INTEGER,
+  closed_by           TEXT,             -- the crew user, or the cardiologist whose NOT STEMI decision closed it
   closed_user_id      TEXT,
+  closure_reason      TEXT,             -- 'STEMI pathway completed' | 'Cardiologist decision: NOT STEMI'
+  closure_source      TEXT,             -- 'crew' | 'automatic following Cardiologist decision'
   active              INTEGER NOT NULL DEFAULT 1,
   unit                TEXT NOT NULL,
   emirate             TEXT NOT NULL,
@@ -125,6 +128,8 @@ CREATE TABLE IF NOT EXISTS etas (
   departed_at INTEGER, at INTEGER NOT NULL, received_at INTEGER NOT NULL, set_by TEXT, why TEXT
 );
 
+-- arrivals, handovers, final_vitals: the 0.3.0 handover documentation. No longer used (handover belongs to ICCC / ePCR,
+-- not to the STEMI pathway); kept so that existing test databases still open, and nothing written earlier is lost.
 -- arrival at the receiving hospital. A correction before closure is a new row; the latest row is the current one
 CREATE TABLE IF NOT EXISTS arrivals (
   id TEXT PRIMARY KEY, cad TEXT NOT NULL REFERENCES cases(cad), hospital TEXT NOT NULL, arrived_at INTEGER NOT NULL,

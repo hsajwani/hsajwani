@@ -1,6 +1,6 @@
 # Unified STEMI Platform · crew ↔ cardiologist test build
 
-**Version 0.3.0 · 4 October 2026 · built from the approved round-3 prototype (v0.2, "Connected crew and cardiologist")**
+**Version 0.4.0 · 4 October 2026 · built from the approved round-3 prototype (v0.2, "Connected crew and cardiologist")**
 
 > **TEST BUILD · FICTIONAL DATA ONLY.** Use only fictional patients, simulated CAD numbers, simulated ECG images and the
 > two test users. Never enter real patient information: this build runs over plain HTTP on a local Wi-Fi network and
@@ -20,8 +20,9 @@ When the crew presses **Send to cardiologist**, the case is created under that C
 the same number), the case and ECG are stored on the server, the case appears on the
 iPhone by itself, and the new-case alarm sounds until **ACKNOWLEDGE & OPEN**. Every later update (vital signs,
 medication, ECG 2, AI result) arrives silently, marked NEW with its time. The cardiologist's decision appears on the
-crew screen straight away. The crew then marks transport and arrival, completes the **Handover** page and presses
-**COMPLETE HANDOVER & CLOSE CASE**: the case closes, stays stored and auditable, and is read-only for everyone.
+crew screen straight away. **NOT STEMI closes the STEMI pathway automatically**; otherwise the crew closes it from the
+**Case summary** with **COMPLETE STEMI PATHWAY**. A closed pathway stays stored, auditable and read-only. Only the STEMI
+pathway closes: the CAD incident belongs to ICCC / ACC and ePCR and is never closed or cancelled here.
 Refreshing either page loses nothing.
 
 ---
@@ -89,7 +90,7 @@ Tip: add the page to the Home Screen only after the test works in Safari; Safari
 
 ---
 
-## 2. The acceptance test (19 steps, then the handover)
+## 2. The acceptance test (19 steps, then closing the STEMI pathway)
 
 The two sample ECG images are in `samples/`. They are generated test images, marked *FICTIONAL TEST ECG · NOT A PATIENT*.
 Use a fictional CAD number, for example `20261004-0123-1`.
@@ -116,18 +117,20 @@ Use a fictional CAD number, for example `20261004-0123-1`.
 | 18 | iPhone | **Decide** → **CONFIRMED STEMI** → **Confirm STEMI** | The decision recorded with Dr X's name and time |
 | 19 | Mac | Nothing; watch | **CONFIRMED STEMI** takes over the crew screen at once; press **Acknowledge** |
 
-**Then the rest of the case, to closure:**
+**Then closing the STEMI pathway** (the STEMI platform asks for no handover or ePCR documentation):
 
 | # | Device | Do this | You should see |
 |---|---|---|---|
-| 20 | Mac | Destination card → **Accept PCI Hospital A**, then **Transport and handover → Start transport** (the existing *Departed scene*) | Status **TRANSPORTING**; the iPhone shows a TRANSPORTING band, silently |
-| 21 | Mac | **Mark arrived** | Arrival time recorded, status **ARRIVED**, the **Handover** page opens (also reachable any time from **Handover** at the top of the case) |
-| 22 | Mac | Check the page: case summary, ECGs with thumbnails and AI, treatments in time order, timeline, the cardiologist's decision (read-only) | *Complete the following before closing this case:* lists what is missing; the close button is disabled |
-| 23 | Mac | Receiving hospital: **Change** if needed. **Final vitals at handover**: **Update** any value, then **Confirm final vitals** | Each update is a new reading; earlier ones are kept |
-| 24 | Mac | **Enter transfer of care**: **Handover now**, area (Emergency Department, Cath Lab, Resuscitation, Cardiac Unit, Other + text), receiving clinician name and role, crew clinician (filled in), notes → **Save** | The missing list empties; **COMPLETE HANDOVER & CLOSE CASE** becomes available |
-| 25 | Mac | **COMPLETE HANDOVER & CLOSE CASE** → **COMPLETE HANDOVER** in the confirmation | Back on **My cases**: the case is no longer active and is listed under **Completed cases** |
-| 26 | iPhone | Nothing; watch | **HANDOVER COMPLETED** with receiving hospital, arrival and handover times, no sound; no decision buttons. The case stays under **Completed** in the review queue and opens read-only |
-| 27 | Mac | Refresh, then **Completed cases** → find by CAD number → **View** | The case is still closed, with all handover information, read-only |
+| 20 | Mac | After CONFIRMED STEMI, nothing closes by itself: press **Case summary** at the top of the case | The STEMI pathway only: CAD number, status, the cardiologist's acknowledgement and decision (read-only), ECGs and serial ECGs with their AI interpretations, the STEMI timeline |
+| 21 | Mac | **COMPLETE STEMI PATHWAY** → **COMPLETE** in *COMPLETE STEMI PATHWAY? … CAD #…* | Back on **My cases**: the case is under **Completed cases**, read-only |
+| 22 | iPhone | Nothing; watch | **STEMI PATHWAY COMPLETED**, no sound, no decision buttons; under **Completed**, searchable by CAD number |
+| 23 | Mac | Refresh, then **Completed cases** → find by CAD number → **View** | Still closed, everything kept, read-only |
+
+**NOT STEMI** (try it with a new CAD number): on the iPhone **Decide → NOT STEMI**, pick a reason, **Confirm NOT
+STEMI**. The crew sees at once **NOT STEMI · PATHWAY CLOSED** with the cardiologist and time; after **Acknowledge** the
+case is under **Completed cases**. The iPhone shows **NOT STEMI — PATHWAY CLOSED** and no decision controls. No cath-lab
+activation, no sound. **UNCLEAR / REQUEST REPEAT ECG** keeps the pathway active: the crew sees the request and sends
+ECG 2, and the review continues.
 
 The CAD number appears on the iPhone in the new-case alert, the case header, the ECG review screen and the timeline
 (**Timeline** button), always as `CAD #20261004-0123-1`.
@@ -263,10 +266,10 @@ Never put real secrets or real patient data in `.env`. It is excluded from git.
 
 - One SQLite file: `data/stemi-test.db`. ECG images are stored as files in `data/images/`, each with its SHA-256 hash
   in the database. The `data/` folder is never committed.
-- Handover: `arrivals` (receiving hospital and arrival time), `handovers` (transfer of care) and `final_vitals` (which
-  latest values were confirmed at handover). A correction before closure is a new row; the latest row counts. The
-  closure is on `cases`: `status = 'closed'`, `closed_at`, `closed_by`. Final vital signs themselves stay rows in
-  `observations` (BP, HR, SpO₂, GCS) and `treatments` (RR, pain score).
+- The STEMI pathway's closure is on `cases`: `status = 'closed'`, `closed_at`, `closed_by`, `closure_reason`
+  (`STEMI pathway completed` or `Cardiologist decision: NOT STEMI`) and `closure_source` (`crew` or `automatic following
+  Cardiologist decision`). No separate closure record. The 0.3.0 handover tables (`arrivals`, `handovers`,
+  `final_vitals`) are no longer used and are kept only so that existing test databases still open.
 - `cases` records how the CAD number was entered: `cad_source` (`manual-crew`, or `manual-test-console` for the demo
   case), `cad_entered_at`, `cad_entered_by`. A database made by an earlier version gets these columns on start.
 - The tables follow the case: `cases`, `patient_details`, `observations`, `treatments`, `ecgs`, `ecg_images`,
@@ -316,7 +319,8 @@ stemi-app/
 │   └── shared/                live link, CAD number rule (cad.js, also used by the server), fictional ECG image generator, fonts
 ├── samples/                   fictional test ECG images for upload
 └── scripts/
-    ├── acceptance.js          automated test with two browsers: 19 steps, CAD number checks, transport → handover → closure (needs Playwright)
+    ├── acceptance.js          automated test with two browsers: 19 steps, CAD number checks, CONFIRMED STEMI stays active, COMPLETE STEMI PATHWAY (needs Playwright)
+    ├── pathway-test.js        NOT STEMI closes the pathway automatically; a repeat ECG request keeps it active
     ├── cad-entry-test.js      CAD number edge cases: offline entry, duplicate found at Send, correction
     ├── make-sample-ecgs.js    regenerates the sample ECG images
     └── reset.js               deletes the test data
@@ -334,6 +338,7 @@ offline entries, the audit trail and script errors. It uses its own temporary da
 ```bash
 npm install --no-save playwright && npx playwright install chromium   # once; not needed to run the app
 npm run test:acceptance
+npm run test:pathway
 npm run test:cad
 ```
 
@@ -344,12 +349,13 @@ server, as is a blank number) and OPEN EXISTING CASE opens the case unchanged. `
 entered offline that turns out to exist at Send (the ECG and minimum dataset stay as the draft), its correction, and
 the correction in the audit trail.
 
-It then runs the whole lifecycle: start transport, mark arrived, the handover page and its missing-items list, final
-vitals, transfer of care (including *Other* needing text), the confirmation, closure, the cardiologist's silent
-HANDOVER COMPLETED and read-only view, the platform refusing changes to a closed case, and the closed case found by
-CAD number after a refresh.
+It then checks that CONFIRMED STEMI keeps the pathway active, and completes it from the Case summary (no handover
+fields), with the cardiologist's silent STEMI PATHWAY COMPLETED, read-only screens, the platform refusing changes, and
+the closed case found by CAD number after a refresh. `npm run test:pathway` runs NOT STEMI (automatic closure, two audit
+events, nothing called a CAD cancellation, everything kept, read-only, searchable) and the repeat ECG request (pathway
+stays active, ECG 2 arrives, review continues).
 
-Screenshots and the audit trail go to `scripts/out/`. The last runs passed 53 of 53 checks (acceptance) and 9 of 9
+Screenshots and the audit trail go to `scripts/out/`. The last runs passed 47 of 47 checks (acceptance), 15 of 15 (pathway) and 9 of 9
 (CAD edge cases) on Node 22. In the 0.1 runs (Node 22 and Node 24) the
 case reached the phone within about 1 second of Send, the decision reached the crew within about 50 ms, and no tone
 played after acknowledgement.
@@ -383,10 +389,9 @@ played after acknowledgement.
 - **The CAD number is typed by the EMT.** It is checked for format and for an existing case, not against dispatch
   (no CAD integration yet, Q-70). After Send it is locked: the authorised, audited correction is a later phase.
 - **The duplicate check needs the connection.** A CAD number entered offline is checked when the case is sent.
-- **Closing needs the connection** and all entries sent; arrival, transfer of care and final vitals can be saved
-  offline and are sent on reconnection.
-- **No amendment after closure.** A closed case cannot be reopened or corrected in this phase; that needs an
-  authorised amendment workflow. The receiving hospital is chosen from the placeholder hospitals A, B and C.
+- **Completing the STEMI pathway needs the connection** and all entries sent.
+- **No amendment after closure.** A closed STEMI pathway cannot be reopened or corrected in this phase; that needs an
+  authorised amendment workflow.
 - **The destination** is always the placeholder *PCI Hospital A*; the deterministic destination policy engine is not
   built.
 - **The simulated AI does not read images.** For an uploaded file it returns the scripted test findings and says so.
@@ -410,7 +415,27 @@ The build uses the round-3 prototype's working defaults wherever a decision is s
 per CAD incident, Q-69, and how the CAD number reaches the tablet, Q-70). Each one is listed with its working default
 in [docs/open-decisions.md](docs/open-decisions.md).
 
-## 14. Changes in 0.3.0: handover and closing the case
+## 14. Changes in 0.4.0: the STEMI pathway closes; no handover documentation
+
+- **System boundaries:** ICCC / ACC manages the operational incident and ePCR the patient care record; this platform
+  manages only the STEMI pathway. The 0.3.0 handover requirements (receiving hospital, arrival and handover times,
+  receiving area and clinician, final vitals) and the Transport and handover section are removed.
+- **Case summary** (was *Handover*): the STEMI pathway only, from the shared record: CAD number, status, cardiologist
+  acknowledgement and decision, ECGs and serial ECGs with AI interpretations, STEMI timeline. Nothing to fill in.
+- **COMPLETE STEMI PATHWAY** at the bottom, with *COMPLETE STEMI PATHWAY? … CAD #… · CANCEL / COMPLETE*: records the
+  time, the crew user, `closure_reason = STEMI pathway completed`, `closure_source = crew`; the case moves to Completed
+  and is read-only.
+- **NOT STEMI closes the pathway automatically**: the decision is saved with the cardiologist and time, then the
+  pathway closes (`Cardiologist decision: NOT STEMI`, `automatic following Cardiologist decision`), with two separate
+  audit events. Crew: *NOT STEMI · PATHWAY CLOSED*, then Completed. Cardiologist: *NOT STEMI — PATHWAY CLOSED*, no
+  decision controls. No cath-lab activation; the CAD incident is never described as cancelled.
+- **CONFIRMED STEMI** and **UNCLEAR / REQUEST REPEAT ECG** keep the pathway active, as before.
+- **Status:** ACTIVE → CARDIOLOGIST REVIEWING → CONFIRMED STEMI (active) / REPEAT ECG REQUESTED (active) / NOT STEMI —
+  PATHWAY CLOSED; a completed pathway shows STEMI PATHWAY COMPLETED (internal status `closed` for both).
+- No alarm for any of this: the alarm is for a new case only.
+- Tests: acceptance (47) updated; new `npm run test:pathway` (15).
+
+## 15. Changes in 0.3.0: handover and closing the case (superseded by 0.4.0)
 
 - **Lifecycle:** ACTIVE (draft) → ECG SUBMITTED (*awaiting cardiologist*) → CARDIOLOGIST REVIEWING (*under review*) →
   DECISION RECEIVED (*the decision*) → **TRANSPORTING** → **ARRIVED** → **HANDOVER IN PROGRESS** → **HANDOVER COMPLETED**
@@ -435,7 +460,7 @@ in [docs/open-decisions.md](docs/open-decisions.md).
 - **Test console:** lifecycle steps and timestamps; *Close the active case* is renamed *Take the active case off the
   screens* (it is not a handover).
 
-## 15. Changes in 0.2.0: the EMT enters the CAD number
+## 16. Changes in 0.2.0: the EMT enters the CAD number
 
 - **Crew:** Open STEMI pathway → **CAD NUMBER** (entered manually from the MDT) → ECG → minimum dataset → Send →
   continue documenting. The CAD number stays at the top of the workspace; **Correct** changes it until Send, then it
@@ -453,7 +478,7 @@ in [docs/open-decisions.md](docs/open-decisions.md).
   the intended red border.
 - Acceptance test updated to 19 steps with the CAD checks; new `npm run test:cad`.
 
-## 16. Changes in 0.1.1
+## 17. Changes in 0.1.1
 
 - Every audit event now also records the **role** (`crew`, `cardiologist`, `system`, `cad-feed`). A database made by
   0.1 gets the new column on the next start; existing events are kept (their role is left empty).
@@ -464,7 +489,7 @@ in [docs/open-decisions.md](docs/open-decisions.md).
 - Kept as approved, not changed: the third decision is labelled **UNCLEAR / REQUEST REPEAT ECG** on the phone (the
   prototype's wording); it is the brief's REQUEST REPEAT ECG option.
 
-## 17. What changed from the approved prototype
+## 18. What changed from the approved prototype
 
 The screens, wording and workflow are the prototype's. These changes were needed to make it work on real devices:
 

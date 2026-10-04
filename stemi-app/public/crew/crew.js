@@ -146,8 +146,7 @@ const REC=[
   {id:'fmc',label:'First medical contact',q:'Q-03',ev:'First medical contact recorded',opts:[
     {l:'Set time',tpick:1,sum:L=>hm(L.tm)}]}
  ]},
- {g:'Transport',items:[{id:'dst',label:'Destination and ETA',auto:'dest'}]},
- {g:'Handover',items:[{id:'ho',label:'Handover information',later:'Completed at handover'}]}
+ {g:'Transport',items:[{id:'dst',label:'Destination and ETA',auto:'dest'}]}
 ];
 const RECK=Object.fromEntries(REC.flatMap(g=>g.items).map(i=>[i.id,i]));
 
@@ -184,7 +183,7 @@ function flush(){
   LIVE.send(q).then(r=>{(r.results||[]).forEach(x=>{if(!x.ok)toast(esc(x.error||'The server did not accept this entry'),true)})},()=>{OUTQ.unshift(...q)}).finally(()=>{flushing=false;saveLocal()});
 }
 const post=m=>{if(m.t==='op')sendOps([m.op]);else if(m.t==='ops')sendOps(m.ops)};
-function op(k,data,t){if(CASE&&CASE.life&&CASE.life.closed){toast('This case is closed (handover completed): it is read-only.',true);return {id:''}}const o={id:'c'+rid()+'-'+(++opSeq),cad:CAD,k,data:data||{},t:t==null?now():t};if(SC.online&&!OUTQ.length&&!flushing&&!localOnly())post({t:'op',op:o});else OUTQ.push(o);saveLocal();return o}
+function op(k,data,t){if(CASE&&CASE.life&&CASE.life.closed&&k!=='decrcv'&&k!=='decack'){toast('This STEMI pathway is closed: it is read-only.',true);return {id:''}}const o={id:'c'+rid()+'-'+(++opSeq),cad:CAD,k,data:data||{},t:t==null?now():t};if(SC.online&&!OUTQ.length&&!flushing&&!localOnly())post({t:'op',op:o});else OUTQ.push(o);saveLocal();return o}
 const delivered=id=>!!(id&&SRV&&SRV.ops&&SRV.ops[id]);
 const dlvAt=id=>SRV&&SRV.ops?SRV.ops[id]:null;
 const ev=(text,who,t)=>{CASE.events.push({t:t==null?now():t,text,who:who||ME})};
@@ -241,10 +240,10 @@ const guideSVG=()=>{
 
 /* ---------- rendering helpers ---------- */
 const idTag=id=>SC.ids&&id?`<button class="idtag" data-note="${id}" title="Open the spec for ${id}">${id}</button>`:'';
-const STATECLS={'TRANSPORTING':'review','ARRIVED':'review','HANDOVER IN PROGRESS':'await','HANDOVER COMPLETED':'done','DRAFT':'draft','TRANSMITTING':'tx','AWAITING CARDIOLOGIST':'await','UNDER REVIEW':'review','TRANSMISSION FAILED':'failed','DOWNTIME CASE':'downtime','CANCELLED':'cancelled','CONFIRMED STEMI':'conf','NOT STEMI':'review','REPEAT ECG REQUESTED':'await'};
+const STATECLS={'NOT STEMI — PATHWAY CLOSED':'done','STEMI PATHWAY COMPLETED':'done','DRAFT':'draft','TRANSMITTING':'tx','AWAITING CARDIOLOGIST':'await','UNDER REVIEW':'review','TRANSMISSION FAILED':'failed','DOWNTIME CASE':'downtime','CANCELLED':'cancelled','CONFIRMED STEMI':'conf','NOT STEMI':'review','REPEAT ECG REQUESTED':'await'};
 function stateChip(){
   const s=CASE.state, k=STATECLS[s]||'draft';
-  const gl=s==='HANDOVER COMPLETED'?G('done'):s==='TRANSPORTING'||s==='ARRIVED'||s==='HANDOVER IN PROGRESS'?G('ack'):s==='TRANSMITTING'?G('prog'):s==='UNDER REVIEW'?G('ack'):s==='TRANSMISSION FAILED'?G('fail'):s==='DOWNTIME CASE'?G('warn'):s==='AWAITING CARDIOLOGIST'?G('pend'):s==='NOT STEMI'?G('done'):s==='REPEAT ECG REQUESTED'?G('info'):'';
+  const gl=STATECLS[s]==='done'&&s!=='NOT STEMI'?G('done'):s==='TRANSMITTING'?G('prog'):s==='UNDER REVIEW'?G('ack'):s==='TRANSMISSION FAILED'?G('fail'):s==='DOWNTIME CASE'?G('warn'):s==='AWAITING CARDIOLOGIST'?G('pend'):s==='NOT STEMI'?G('done'):s==='REPEAT ECG REQUESTED'?G('info'):'';
   return `<span class="chip st-${k}">${gl}${s}</span>`;
 }
 /* LIVE — CONNECTED with the time of the last update from the platform, or CONNECTION LOST */
@@ -262,7 +261,7 @@ function caseHeader(ws){
   const l1=c.cad?`<span class="mono">CAD #${esc(c.cad)}</span><span class="cadsrc">${G('done')}${cadLocked()?'Entered manually · locked after send':'Entered manually'}</span>${cadLocked()?'':'<button class="lnk" data-act="cad-edit">Correct</button>'}`
     :`<span class="mono cad-none">CAD number not entered</span><button class="lnk" data-act="cad-edit">Enter CAD number</button>`;
   const l2=`<b>${esc(ptSummary())}</b>`;
-  const add=ws?`<button class="btn btn-s" data-act="handover">Handover</button><button class="btn btn-s" data-act="add-ecg">${IC.ecg}New ECG</button>`:'';
+  const add=ws?`<button class="btn btn-s" data-act="handover">Case summary</button><button class="btn btn-s" data-act="add-ecg">${IC.ecg}New ECG</button>`:'';
   return `<div class="ch"><div class="ch-id"><div class="ch-l1">${l1}</div><div class="ch-l2">${l2}</div></div>
     <div class="ch-st">${stateChip()}<span class="ch-clock mono" data-tick="caseclock">Open ${dur(now()-c.openedAt)}</span>${add}</div></div>`;
 }
@@ -499,11 +498,9 @@ function railRows(){
   else R('pend','CARDIOLOGIST REVIEWING',c.ack?'Opening the ECG':'','',c.ack?'cur':'');
   if(d)R(d.k==='confirm'?'fail':'done','DECISION RECEIVED',`<b>${DECL[d.k]}</b> · ${esc(d.by)}${d.crewAck?` · you acknowledged ${hms(d.crewAck)}`:' · <button class="lnk" data-act="show-dec">Show decision</button>'}`,hms(d.at),d.k==='confirm'?'kdec':'');
   else R('pend','DECISION RECEIVED',c.opened?'It will appear full screen.':'');
-  /* then the journey: transport, arrival, handover (Hamad, 4 Oct 2026) */
-  if(e1.tx.rcvAt){const Lf=c.life||{},dep=c.eta&&c.eta.dep;
-    R(dep?'done':'pend','TRANSPORTING',dep?`Departed scene · ETA ${c.eta.min} min`:'',dep?hms(dep):'');
-    R(Lf.arr?'done':'pend','ARRIVED',Lf.arr?esc(HOSP[Lf.arr.hosp].name):'',Lf.arr?hms(Lf.arr.at):'');
-    R(Lf.closed?'done':Lf.arr?'prog':'pend','HANDOVER COMPLETED',Lf.closed?'Case closed · read-only':Lf.arr?'<button class="lnk" data-act="handover">Open handover</button>':'',Lf.closed?hms(Lf.closed.at):'',Lf.arr&&!Lf.closed?'cur':'');}
+  /* then the STEMI pathway closes: automatically on NOT STEMI, or with COMPLETE STEMI PATHWAY (Hamad, 4 Oct 2026) */
+  if(e1.tx.rcvAt){const Z=c.life&&c.life.closed;
+    R(Z?'done':'pend','STEMI PATHWAY CLOSED',Z?`${Z.kind==='not-stemi'?'Automatically, after NOT STEMI':'Completed by the crew'} · read-only`:d&&d.k==='confirm'?'<button class="lnk" data-act="handover">Case summary · complete the STEMI pathway</button>':'',Z?hms(Z.at):'');}
   return rows.join('');
 }
 /* the rail points to the AI ECG interpretation (C-07d); the interpretation itself is in the main column */
@@ -547,7 +544,6 @@ function recRow(it){
   if(it.auto){const d=CASE.dest;
     if(d&&d.st==='conf'){v=`<span class="v">${HOSP[d.hosp].name} · ${CASE.eta?`departed ${hm(CASE.eta.dep)} · ETA ${CASE.eta.min} min`:`ETA ${HOSP[d.hosp].eta} min once departed`}</span>`;g='done';dl=`<span class="dl ok">From the destination card, confirmed ${hms(d.at)}</span>`}
     else v=`<span class="nye">Filled in when you confirm the destination</span>`;}
-  else if(it.id==='ho'){const H=CASE.life&&CASE.life.ho;v=H?`<span class="v">Transfer of care recorded <span class="mono">${hm(H.saved)}</span></span>`:`<span class="nye">${it.later}</span>`;g=H?'done':'pend'}
   else if(it.later)v=`<span class="nye">${it.later}</span>`;
   else if(r){
     v=r.nv?nvChip(r.sum):`<span class="v">${esc(r.sum)}</span>`;
@@ -555,8 +551,7 @@ function recRow(it){
     if(it.multi&&r.count>1)v+=`<span class="nye">${r.count} entries sent; latest shown</span>`;
     g=dlGlyph(r.opId);dl=dlState(r.opId);
   } else v=`<span class="nye">Not yet entered</span>`;
-  if(it.id==='ho')btn=`<button class="btn btn-q" data-act="handover">Open handover</button>`;
-  else if(!it.auto&&!it.later)btn=`<button class="btn btn-s" data-act="rec" data-id="${it.id}">${r?(it.multi?'Add':'Change'):'Enter'}</button>`;
+  if(!it.auto&&!it.later)btn=`<button class="btn btn-s" data-act="rec" data-id="${it.id}">${r?(it.multi?'Add':'Change'):'Enter'}</button>`;
   else if(it.auto&&!(CASE.dest&&CASE.dest.st==='conf'))btn=`<button class="btn btn-q" data-act="to-dest">Go to destination</button>`;
   return `<div class="rr">${G(g)}<div class="rr-l">${it.label}${it.q?`<span class="qref">${it.q}</span>`:''}</div><div class="rr-v">${v}${dl}</div>${btn||'<span></span>'}</div>`;
 }
@@ -641,113 +636,72 @@ function vWs(){
   const rd=lastDec();
   const rep=c.repeatAsked&&!c.repeatSent?`<div class="rep">${G('warn')}<div class="rep-t"><b>${rd&&rd.k==='repeat'?`${esc(rd.by)} requests a repeat ECG.`:'Please obtain and submit a repeat ECG when possible.'}</b><span>${rd&&rd.k==='repeat'?(rd.reasons.length?esc(rd.reasons.join(', ')):'')+(rd.instr?' · '+esc(rd.instr):'')+(rd.within?` · within ${rd.within} min`:''):`The server check found ECG ${c.repeatFor}: ${QUAL[priImg(c.ecgs[c.repeatFor-1]).q].issue}. It went to the cardiologist as it is.`}</span></div><button class="btn btn-s" data-act="repeat">${IC.cam}Capture repeat ECG</button></div>`:'';
   return `<div class="ws"><aside class="rail" data-keep="rail" aria-label="Case status">${railHtml()}</aside>
-    <div class="wmain" data-keep="wmain">${lostBanner()}${decBanner()}${rep}${destHtml()}${trHtml()}${vitHtml()}${ecgsHtml()}${aiSecHtml()}${recHtml()}</div></div>`;
+    <div class="wmain" data-keep="wmain">${lostBanner()}${decBanner()}${rep}${destHtml()}${vitHtml()}${ecgsHtml()}${aiSecHtml()}${recHtml()}</div></div>`;
 }
 
-/* ---------- transport, arrival and handover (Hamad, 4 Oct 2026) ----------
-   Decision → TRANSPORTING (the existing "Departed scene") → ARRIVED → HANDOVER → COMPLETE HANDOVER & CLOSE CASE.
-   Everything stays in the same CAD case; the handover page reads the shared case record, so nothing is re-entered */
-function trHtml(){
-  const c=CASE,e1=c.ecgs[0];if(!e1||!e1.tx.rcvAt)return '';
-  const L=c.life||{},dep=c.eta&&c.eta.dep,conf=c.dest&&c.dest.st==='conf';
-  const st=(done,lab,sub,btn)=>`<div class="rr">${G(done?'done':'pend')}<div class="rr-l">${lab}</div><div class="rr-v"><span class="${done?'v':'nye'}">${sub}</span></div>${btn||'<span></span>'}</div>`;
-  return `<section class="rec" id="r-tr"><div class="rec-h"><h2 class="h2">Transport and handover</h2>${stateChip()}</div>
-   <div class="rg">${st(!!dep,'Transporting',dep?`Departed scene <span class="mono">${hm(dep)}</span> · ETA ${c.eta.min} min`:conf?'Not started':'Confirm the destination first, then start transport',dep?'':`<button class="btn btn-s" data-act="depart" ${conf?'':'disabled'}>Start transport</button>`)}
-   ${st(!!L.arr,'Arrived',L.arr?`${esc(HOSP[L.arr.hosp].name)} · <span class="mono">${hms(L.arr.at)}</span>`:'Not yet',L.arr?'':`<button class="btn btn-s" data-act="mark-arrived">Mark arrived</button>`)}
-   ${st(false,'Handover',L.ho?'In progress':L.arr?'Ready to complete':'After arrival',`<button class="btn btn-p" data-act="handover">Open handover</button>`)}</div></section>`;
-}
-const HAREAS=['Emergency Department','Cath Lab','Resuscitation','Cardiac Unit','Other'];
-const sPt=(S,k)=>lastOf(S.pt[k]);
-const sRaw=(S,k)=>{const x=sPt(S,k);return x?x.raw:null};
-const FVL=[['bp','BP','md'],['hr','HR','md'],['spo2','SpO₂','md'],['rr','RR','rec'],['gcs','GCS','md'],['pain','Pain score','rec']];
+/* ---------- CASE SUMMARY and COMPLETE STEMI PATHWAY (Hamad, 4 Oct 2026) ----------
+   The STEMI platform covers the STEMI pathway only: ICCC / ACC owns the operational incident and ePCR the patient care
+   record, so nothing here asks for handover documentation. The summary shows what the pathway already holds, read from
+   the shared case record. The pathway closes with COMPLETE STEMI PATHWAY, or automatically when the cardiologist decides
+   NOT STEMI. The CAD incident itself is never closed or cancelled here. */
+const sRaw=(S,k)=>{const x=lastOf(S.pt[k]);return x?x.raw:null};
+const closedLabel=Z=>Z.kind==='not-stemi'?'NOT STEMI — PATHWAY CLOSED':'STEMI PATHWAY COMPLETED';
 function lifeState(S){
-  const A=lastOf(S.arr),d=lastOf(S.dec),dep=S.eta.some(x=>x.dep);
-  return S.closed?'HANDOVER COMPLETED':A&&(lastOf(S.ho)||S.hopen||lastOf(S.fv))?'HANDOVER IN PROGRESS':A?'ARRIVED':d&&dep?'TRANSPORTING':d?'DECISION RECEIVED':S.opened?'CARDIOLOGIST REVIEWING':S.sub?'ECG SUBMITTED':'ACTIVE';
+  const d=lastOf(S.dec);
+  return S.closed?closedLabel(S.closed):d?DECL[d.k]:S.opened?'CARDIOLOGIST REVIEWING':S.ack?'CARDIOLOGIST ACKNOWLEDGED':S.sub?'AWAITING CARDIOLOGIST':'ACTIVE';
 }
-/* the handover page: a summary of the whole case from the shared record. ro: a completed case, read-only */
+/* the case summary: a summary of the STEMI pathway from the shared record. ro: a closed case, read-only */
 function hoPage(S,ro){
-  const A=lastOf(S.arr),H=lastOf(S.ho),F=lastOf(S.fv),d=lastOf(S.dec),E=S.ecgs,LE=lastOf(E),D0=lastOf(S.dest),dep=S.eta.find(x=>x.dep),et=lastOf(S.eta);
-  const hosp=A?A.hosp:D0?D0.hosp:null,hn=k=>k?HOSP[k].name:'Not set';
-  const age=sRaw(S,'age'),sex=sRaw(S,'sex'),cp=sRaw(S,'complaint'),on=sRaw(S,'onset');
-  const pt=[age?(age.nv?'Age unknown':`${age.est?'≈ ':''}${age.v} y`):null,sex?(sex.nv?'Sex unknown':sex.v):null].filter(Boolean).join(' · ')||'Not recorded';
-  const state=lifeState(S),btn=(act,l,cls,extra)=>ro?'':`<button class="btn ${cls||'btn-s'}" data-act="${act}"${extra||''}>${l}</button>`;
-  const row=(g,l,v,b)=>`<div class="rr">${G(g)}<div class="rr-l">${l}</div><div class="rr-v">${v}</div>${b||'<span></span>'}</div>`;
-  const val=(v,t)=>v?`<span class="v">${v}${t?` <small class="mono">${t}</small>`:''}</span>`:'<span class="nye">Not entered</span>';
+  const d=lastOf(S.dec),E=S.ecgs,LE=lastOf(E),Z=S.closed;
+  const age=sRaw(S,'age'),sex=sRaw(S,'sex'),cp=sRaw(S,'complaint');
+  const pt=[age?(age.nv?'Age unknown':`${age.est?'≈ ':''}${age.v} y`):null,sex?(sex.nv?'Sex unknown':sex.v):null,cp?complaintShort(cp):null].filter(Boolean).join(' · ')||'Not recorded';
+  const state=lifeState(S);
+  const row=(g,l,v)=>`<div class="rr">${G(g)}<div class="rr-l">${l}</div><div class="rr-v">${v}</div><span></span></div>`;
+  const val=v=>v?`<span class="v">${v}</span>`:'<span class="nye">Not yet</span>';
   const fact=(l,v)=>`<div><dt>${l}</dt><dd>${v}</dd></div>`;
-  /* top */
-  const top=`<section class="hotop"><dl class="card-f">${fact('CAD number',`<span class="mono">CAD #${esc(S.cad)}</span>`)}${fact('Patient',esc(pt))}${fact('Ambulance unit',esc(S.unit))}${fact('Receiving hospital',hn(hosp))}${fact('Case status',`<span class="chip st-${STATECLS[state]||'review'}">${state}</span>`)}${fact('Cardiologist decision',d?DECL[d.k]:'None recorded')}${fact('Arrival time',A?`<span class="mono">${hms(A.at)}</span>`:'Not yet')}</dl></section>`;
-  const closed=S.closed?`<div class="decb decb-not" role="status"><div class="decb-l">HANDOVER COMPLETED</div><div class="decb-t"><b>Case closed · read-only</b><span>${esc(S.closed.by)} · <span class="mono">${hms(S.closed.at)}</span></span><small>Nothing in this case can be changed. A correction would need an authorised amendment (not built in this phase).</small></div></div>`:'';
-  const dec=d?`<div class="decb decb-${d.k}"><div class="decb-l">CARDIOLOGIST DECISION</div><div class="decb-t"><b>${DECL[d.k]}</b><span>${esc(d.byT||d.by)} · <span class="mono">${hms(d.at)}</span> · on ECG ${d.on}</span><small>Read-only: the cardiologist's decision cannot be changed from the handover page.</small></div></div>`
-    :`<div class="decb decb-not"><div class="decb-l">CARDIOLOGIST DECISION</div><div class="decb-t"><b>No decision recorded</b></div></div>`;
-  /* arrival */
-  const arr=`<section class="rec" id="h-arr"><div class="rec-h"><h2 class="h2">Arrival at receiving hospital</h2></div><div class="rg">
-    ${row(hosp?'done':'pend','Receiving hospital',`<span class="v">${hn(hosp)}</span>${A?'':D0?`<span class="nye">From the destination (${D0.st==='rec'?'recommended':'confirmed'}); confirmed when you mark arrival</span>`:''}`,A?btn('arr-edit','Change'):'')}
-    ${row(A?'done':'pend','Arrival time',A?`<span class="v mono">${hms(A.at)}</span>${S.arr.length>1?`<span class="hist">Earlier: ${S.arr.slice(0,-1).reverse().map(x=>`${hn(x.hosp)} <span class="mono">${hm(x.at)}</span>`).join(' · ')}</span>`:''}`:'<span class="nye">Not yet</span>',A?btn('arr-edit','Correct'):btn('arrive-now','MARK ARRIVED NOW','btn-p'))}</div></section>`;
-  /* transfer of care */
-  const area=H&&H.area?(H.area==='Other'?`Other: ${H.other}`:H.area):'';
-  const toc=`<section class="rec" id="h-toc"><div class="rec-h"><h2 class="h2">Transfer of care</h2>${btn('ho-edit',H?'Change details':'Enter transfer of care','btn-p')}</div><div class="rg">
-    ${row(H&&H.at?'done':'pend','Handover time',val(H&&H.at?`<span class="mono">${hms(H.at)}</span>`:''))}
-    ${row(A?'done':'pend','Receiving hospital',val(A?hn(A.hosp):''))}
-    ${row(area?'done':'pend','Receiving area / department',area?`<span class="v">${esc(area)}</span>`:'<span class="nye">Not entered (optional)</span>')}
-    ${row(H&&H.name?'done':'pend','Receiving clinician',val(H&&H.name?esc(H.name):''))}
-    ${row(H&&H.role?'done':'pend','Receiving clinician role',val(H&&H.role?esc(H.role):''))}
-    ${row(H&&H.crew?'done':'pend','Crew clinician completing handover',val(H&&H.crew?esc(H.crew):''))}
-    ${row(H&&H.notes?'done':'pend','Handover notes',H&&H.notes?`<span class="v">${esc(H.notes)}</span>`:'<span class="nye">None (optional)</span>')}
-    ${H&&S.ho.length>1?`<p class="rec-sub">${S.ho.length} versions saved; the latest is shown. Earlier versions are kept in the case.</p>`:''}</div></section>`;
-  /* final vitals */
-  const V=S.vit||{},chg=Math.max(0,...Object.values(V).map(x=>x.rcv||0)),fvOk=F&&F.rcv>=chg;
-  const fvAct=k=>ro?'':FVL.find(x=>x[0]===k)[2]==='md'?`<button class="btn btn-s" data-act="mdup" data-k="${k}">Update</button>`:`<button class="btn btn-s" data-act="rec" data-id="${k}">${V[k]?'Update':'Enter'}</button>`;
-  const fv=`<section class="rec" id="h-fv"><div class="rec-h"><h2 class="h2">Final vitals at handover</h2><span class="chip ${fvOk?'chip-i':'chip-n'}">${fvOk?`Confirmed ${hm(F.at)}`:F?'Changed since confirmed':'Not confirmed'}</span></div>
-    <p class="rec-sub">The latest recorded values are shown. An update is a new reading; earlier readings are kept. RR and pain score are optional.</p>
-    <div class="rg">${FVL.map(([k,l])=>row(V[k]?'done':'pend',l,V[k]?(V[k].nv?nvChip(V[k].v):`<span class="v">${esc(V[k].v)}${V[k].t?` <small class="mono">${hm(V[k].t)}</small>`:''}</span>`):'<span class="nye">Not entered</span>',fvAct(k))).join('')}
-    ${ro?'':`<div class="rr"><span></span><div class="rr-l"></div><div class="rr-v">${F?`<span class="dl ${fvOk?'ok':''}">Last confirmed ${hms(F.at)} by ${esc(F.by)}</span>`:''}</div><button class="btn btn-p" data-act="fv-confirm">${fvOk?'Confirm again':'Confirm final vitals'}</button></div>`}</div></section>`;
-  /* case summary */
-  const aiL=LE&&LE.ai,aiTxt=!aiL?'Not available':aiL.st==='proc'?'Processing':aiL.st==='down'?'AI interpretation unavailable':aiL.st==='wh'?'Not suitable for interpretation':aiL.imp||'';
-  const tx=[];Object.entries(S.rec).forEach(([k,r])=>{if(r.group==='Treatments given')r.vers.forEach(v=>tx.push({t:v.t||v.rcv,txt:`${r.label}: ${v.v}`}))});tx.sort((a,b)=>a.t-b.t);
-  const sum=`<section class="rec" id="h-sum"><div class="rec-h"><h2 class="h2">Case summary</h2></div><div class="rg">
-    ${row('info','Presenting complaint',val(cp?esc(complaintShort(cp)+(cp.det?' · '+cp.det:'')):''))}
-    ${row('info','Symptom onset',val(on?(on.nv?'Unknown':`${hm(on.v)}${on.approx?' (approximate)':''}`):''))}
-    ${row('info','Initial ECG',val(E[0]?`ECG 1 · acquired <span class="mono">${hm(E[0].acq)}</span>`:''))}
-    ${row('info','Latest ECG',val(LE?`ECG ${LE.n} · acquired <span class="mono">${hm(LE.acq)}</span>`:''))}
+  const closed=Z?`<div class="decb ${Z.kind==='not-stemi'?'decb-not':'decb-not'}" role="status"><div class="decb-l">STEMI PATHWAY CLOSED</div><div class="decb-t"><b>${closedLabel(Z)}</b><span>${Z.kind==='not-stemi'?`Closed automatically after the cardiologist's NOT STEMI decision · ${esc(Z.by)}`:`Completed by ${esc(Z.by)}`} · <span class="mono">${hms(Z.at)}</span></span><small>Read-only. Only the STEMI pathway is closed: the CAD incident continues as normal in ICCC / ACC and ePCR.</small></div></div>`:'';
+  const top=`<section class="hotop"><dl class="card-f">${fact('CAD number',`<span class="mono">CAD #${esc(S.cad)}</span>`)}${fact('Patient',esc(pt))}${fact('Ambulance unit',esc(S.unit))}${fact('STEMI pathway status',`<span class="chip st-${STATECLS[state]||'review'}">${state}</span>`)}${fact('ECGs',String(E.length))}</dl></section>`;
+  const dec=d?`<div class="decb decb-${d.k}"><div class="decb-l">CARDIOLOGIST DECISION</div><div class="decb-t"><b>${DECL[d.k]}</b><span>${esc(d.byT||d.by)} · <span class="mono">${hms(d.at)}</span> · on ECG ${d.on}</span><small>Read-only: the cardiologist's decision cannot be changed here.</small></div></div>`
+    :`<div class="decb decb-not"><div class="decb-l">CARDIOLOGIST DECISION</div><div class="decb-t"><b>Awaited</b></div></div>`;
+  /* the STEMI pathway in brief */
+  const path=`<section class="rec" id="h-sum"><div class="rec-h"><h2 class="h2">STEMI pathway</h2></div><div class="rg">
+    ${row(S.sub?'done':'pend','Case sent',val(S.sub?`<span class="mono">${hms(S.sub.send)}</span> · received <span class="mono">${hms(S.sub.rcv)}</span>`:''))}
+    ${row(S.alert?'done':'pend','Cardiologist alerted',val(S.alert?`${esc(S.alert.who)} · <span class="mono">${hms(S.alert.at)}</span>`:''))}
+    ${row(S.ack?'ack':'pend','Cardiologist acknowledgement',val(S.ack?`${esc(S.alert?S.alert.who:'Cardiologist')} · <span class="mono">${hms(S.ack)}</span>`:''))}
     ${row(d?'done':'pend','Cardiologist decision',val(d?`${DECL[d.k]} · ${esc(d.by)} · <span class="mono">${hms(d.at)}</span>`:''))}
-    ${row('info',`AI interpretation · ECG ${LE?LE.n:''}`,`<span class="v">${esc(aiTxt)}</span><span class="hist">AI interpretation is decision support. The Cardiologist makes the final STEMI decision.</span>`)}
-    ${row('info','Destination',val(D0?`${hn(D0.hosp)} · ${D0.st==='rec'?'recommended':'confirmed'}`:''))}
-    ${row('info','ETA / arrival',val([dep?`Departed ${hm(dep.dep)} · ETA ${et.min} min`:'',A?`Arrived ${hm(A.at)}`:''].filter(Boolean).join(' · ')))}
+    ${row(LE&&LE.ai&&LE.ai.st!=='proc'?'done':'pend',`AI interpretation · ECG ${LE?LE.n:''}`,`<span class="v">${esc(LE&&LE.ai?(LE.ai.imp||aiStLine(LE.ai)):'Not available')}</span><span class="hist">AI interpretation is decision support. The Cardiologist makes the final STEMI decision.</span>`)}
+    ${row(Z?'done':'pend','STEMI pathway closed',val(Z?`${closedLabel(Z)} · <span class="mono">${hms(Z.at)}</span>`:''))}
     </div></section>`;
-  /* ECGs */
-  const ecg=`<section class="rec" id="h-ecg"><div class="rec-h"><h2 class="h2">ECGs</h2></div>
+  /* ECGs and serial ECGs, each with its own AI interpretation */
+  const ecg=`<section class="rec" id="h-ecg"><div class="rec-h"><h2 class="h2">ECGs${E.length>1?' · serial':''}</h2></div>
     <p class="aids"><b>AI interpretation is decision support. The Cardiologist makes the final STEMI decision.</b></p>
     <div class="hoecgs">${E.map(e=>{const x=e.imgs.find(i=>i.i===e.pri)||e.imgs[0],a=e.ai,ds=S.dec.filter(z=>z.on===e.n);
-      return `<div class="ecard hoecg"><button class="imgbtn" data-act="ho-img" data-n="${e.n}" aria-label="Open ECG ${e.n}"><img src="${x.url}" alt="ECG ${e.n}, primary image"></button><div class="hoecg-t"><b class="mono">ECG ${e.n} — ${hm(e.acq)}</b><span>${e.imgs.length} image${e.imgs.length>1?'s':''} · received <span class="mono">${hm(e.rcv)}</span></span><span>AI: ${esc(aiStLine(a))}${a&&a.imp?` · ${esc(a.imp)}`:''}</span>${ds.map(z=>`<span class="k-dec-${z.k}"><b>${DECL[z.k]}</b> · ${esc(z.by)} · <span class="mono">${hm(z.at)}</span></span>`).join('')}<button class="btn btn-q" data-act="ho-img" data-n="${e.n}">Open ECG</button></div></div>`}).join('')}</div></section>`;
-  /* treatments, chronological (each saved entry once) */
-  const trt=`<section class="rec" id="h-tx"><div class="rec-h"><h2 class="h2">Treatments and medications</h2></div>
-    ${tx.length?`<ol class="hotl">${tx.map(x=>`<li><span class="tm mono">${hm(x.t)}</span><span>${esc(x.txt)}</span></li>`).join('')}</ol>`:'<p class="rec-sub">None recorded.</p>'}</section>`;
-  /* compact timeline of the major events, from the audit trail */
-  const MAJ=/STEMI case opened|ECG \d+ acquired|Case submitted|Cardiologist alerted|Cardiologist acknowledged|STEMI confirmed|Not STEMI recorded|repeat ECG requested|ECG \d+ received by the server|Transport started|Arrived at the receiving|Arrival corrected|Final vitals at handover confirmed|Transfer of care details|Handover completed|closed by/;
-  const tl=`<section class="rec" id="h-tl"><div class="rec-h"><h2 class="h2">Handover timeline</h2></div>
+      return `<div class="ecard hoecg"><button class="imgbtn" data-act="ho-img" data-n="${e.n}" aria-label="Open ECG ${e.n}"><img src="${x.url}" alt="ECG ${e.n}, primary image"></button><div class="hoecg-t"><b class="mono">ECG ${e.n} — ${hm(e.acq)}</b><span>${e.imgs.length} image${e.imgs.length>1?'s':''} · received <span class="mono">${hm(e.rcv)}</span></span><span>AI: ${esc(aiStLine(a))}${a&&a.imp?` · ${esc(a.imp)}`:''}</span>${a&&a.ser?`<span>Compared with ECG ${a.ser.vs}: ${esc(a.ser.h)}</span>`:''}${ds.map(z=>`<span class="k-dec-${z.k}"><b>${DECL[z.k]}</b> · ${esc(z.by)} · <span class="mono">${hm(z.at)}</span></span>`).join('')}<button class="btn btn-q" data-act="ho-img" data-n="${e.n}">Open ECG</button></div></div>`}).join('')}</div></section>`;
+  /* the STEMI-specific timeline, from the audit trail */
+  const MAJ=/STEMI case opened|ECG \d+ acquired|Case submitted|Cardiologist alerted|Cardiologist acknowledged|STEMI confirmed|Cardiologist decision: NOT STEMI|repeat ECG requested|ECG \d+ received by the server|AI analysis completed|STEMI pathway (completed|automatically closed)/;
+  const tl=`<section class="rec" id="h-tl"><div class="rec-h"><h2 class="h2">STEMI timeline</h2></div>
     <ol class="hotl">${S.audit.filter(a=>a.kind==='key'&&MAJ.test(a.text)).map(a=>`<li><span class="tm mono">${hms(a.t)}</span><span>${esc(a.text.split(' · ')[0])}</span></li>`).join('')}</ol></section>`;
-  const miss=!ro&&S.hoMissing&&S.hoMissing.length?`<section class="todo homiss" id="h-miss"><h2 class="h2">${G('warn')}Complete the following before closing this case:</h2><ul>${S.hoMissing.map(m=>`<li>${esc(m)}</li>`).join('')}</ul></section>`:'';
-  return closed+top+dec+arr+toc+fv+sum+ecg+trt+tl+miss;
+  return closed+top+dec+path+ecg+tl;
 }
 function vHo(){
   const S=SRV,c=CASE;
-  if(!S||!S.sub)return `<div class="vbody"><div class="cadv"><p class="cadv-hint">The handover page is available once the case has been sent.</p></div></div>`+ab(`<button class="btn btn-q" data-act="ho-back">${IC.back}Back to the case</button>`,'','');
-  if(S.closed)return `<div class="vbody ho" data-keep="ho">${hoPage(S,true)}</div>`+ab(`<button class="btn btn-q" data-act="home">${IC.back}My cases</button>`,'<span>Completed case · read-only</span>','');
+  if(!S||!S.sub)return `<div class="vbody"><div class="cadv"><p class="cadv-hint">The case summary is available once the case has been sent.</p></div></div>`+ab(`<button class="btn btn-q" data-act="ho-back">${IC.back}Back to the case</button>`,'','');
+  if(S.closed)return `<div class="vbody ho" data-keep="ho">${hoPage(S,true)}</div>`+ab(`<button class="btn btn-q" data-act="home">${IC.back}My cases</button>`,'<span>STEMI pathway closed · read-only</span>','');
   if(!S.hopen&&!c.hopenSent){c.hopenSent=1;setT(0,()=>op('hopen'))}
-  const can=!S.hoMissing.length&&SC.online&&!OUTQ.length;
+  const can=SC.online&&!OUTQ.length;
   return `<div class="vbody ho" data-keep="ho">${hoPage(S,false)}</div>`+
-    ab(`<button class="btn btn-q" data-act="ho-back">${IC.back}Back to the case</button>`,`<span>${S.hoMissing.length?`${S.hoMissing.length} item${S.hoMissing.length>1?'s':''} to complete`:!SC.online?'No connection: closing needs the platform':OUTQ.length?'Sending your latest entries…':'Ready to close'}</span>`,
-      `<button class="btn btn-p btn-xl" data-act="ho-complete" ${can?'':'disabled'}>COMPLETE HANDOVER &amp; CLOSE CASE</button>`);
+    ab(`<button class="btn btn-q" data-act="ho-back">${IC.back}Back to the case</button>`,`<span>${!SC.online?'No connection: completing needs the platform':OUTQ.length?'Sending your latest entries…':'No further documentation is needed here'}</span>`,
+      `<button class="btn btn-p btn-xl" data-act="ho-complete" ${can?'':'disabled'}>COMPLETE STEMI PATHWAY</button>`);
 }
 /* a completed case from the history list: the same summary, read-only */
 let HREC=null,HLIST=null,HQ='',histT=null;
 function vHist(){
-  return `<div class="vbody ho" data-keep="hist">${HREC?hoPage(HREC,true):'<p class="rec-sub">Loading…</p>'}</div>`+ab(`<button class="btn btn-q" data-act="hist-back">${IC.back}Back to my cases</button>`,`<span>Completed case · read-only</span>`,'');
+  return `<div class="vbody ho" data-keep="hist">${HREC?hoPage(HREC,true):'<p class="rec-sub">Loading…</p>'}</div>`+ab(`<button class="btn btn-q" data-act="hist-back">${IC.back}Back to my cases</button>`,`<span>STEMI pathway closed · read-only</span>`,'');
 }
 function histRows(){
   if(HLIST===null)return '<li class="nye">Loading…</li>';
   if(!HLIST.length)return `<li class="nye">${HQ?'No completed case matches this CAD number.':'No completed cases yet.'}</li>`;
-  return HLIST.map(x=>`<li><span class="mono"><b>CAD #${esc(x.cad)}</b></span><span>${esc(x.unit||'')}${x.hosp?' · '+esc(x.hosp):''}${x.dec?' · '+DECL[x.dec]:''}</span><span class="mono">Completed ${hm(x.closedAt)}</span><button class="btn btn-s" data-act="hist-open" data-cad="${esc(x.cad)}">View</button></li>`).join('');
+  return HLIST.map(x=>`<li><span class="mono"><b>CAD #${esc(x.cad)}</b></span><span>${esc(x.unit||'')}${x.dec?' · '+DECL[x.dec]:''} · ${x.kind==='not-stemi'?'Pathway closed (NOT STEMI)':'Pathway completed'}</span><span class="mono">Closed ${hm(x.closedAt)}</span><button class="btn btn-s" data-act="hist-open" data-cad="${esc(x.cad)}">View</button></li>`).join('');
 }
 function histHtml(){
   return `<section class="hist"><h2 class="h2">Completed cases</h2><input class="tin" id="histq" value="${esc(HQ)}" placeholder="Find by CAD number" autocomplete="off" spellcheck="false" aria-label="Find a completed case by CAD number"><ul class="hist-l">${histRows()}</ul></section>`;
@@ -853,28 +807,11 @@ function layerHtml(){
       <div><label class="flab" for="etext">Details${L.why==='Other'?' (needed for Other)':' (optional)'}</label><input class="tin" id="etext" value="${esc(L.text)}" autocomplete="off"></div>`;
     return drawer('Change ECG time',b,`<span class="sp"></span><button class="btn btn-p btn-xl" data-act="esave" ${L.why&&(L.why!=='Other'||L.text.trim())?'':'disabled'}>Save time</button>`);
   }
-  if(L.t==='arr'){
-    const b=`<div><label class="flab">Receiving hospital</label><div class="olist">${Object.keys(HOSP).map(k=>`<button class="cbtn ${L.hosp===k?'on':''}" data-act="arr-hosp" data-v="${k}">${L.hosp===k?IC.check:''}${HOSP[k].name}</button>`).join('')}</div></div>
-      <div><label class="flab">Arrival time</label>${tpanel(L,[['Now',0],['5 min ago',5],['10 min ago',10],['15 min ago',15]])}</div>
-      <p class="rec-sub">A correction is added; the earlier arrival time stays in the case.</p>`;
-    return drawer('Arrival at receiving hospital',b,`<span class="sp"></span><button class="btn btn-p btn-xl" data-act="arr-save" ${L.hosp?'':'disabled'}>Save arrival</button>`);
-  }
-  if(L.t==='ho'){
-    const A=CASE.life&&CASE.life.arr;
-    const b=`<p class="rec-sub">Receiving hospital: <b>${A?HOSP[A.hosp].name:'not set: mark arrival first'}</b></p>
-      <div><label class="flab">Handover time</label><div class="tadj"><span><b class="mono">${L.at?hm(L.at):'Not set'}</b></span><button class="btn btn-s" data-act="ho-now">Handover now</button><button class="btn btn-q" data-act="ho-at" data-d="-5">−5 min</button><button class="btn btn-q" data-act="ho-at" data-d="5">+5 min</button></div></div>
-      <div><label class="flab">Receiving area / department</label><div class="chips">${HAREAS.map(a=>`<button class="cbtn ${L.area===a?'on':''}" data-act="ho-area" data-v="${a}" aria-pressed="${L.area===a}">${L.area===a?IC.check:''}${a}</button>`).join('')}</div>${L.area==='Other'?`<input class="tin" id="hoother" value="${esc(L.other)}" placeholder="Describe the area (required for Other)" autocomplete="off">`:''}</div>
-      <div><label class="flab" for="honame">Receiving clinician name</label><input class="tin" id="honame" value="${esc(L.name)}" autocomplete="off"></div>
-      <div><label class="flab" for="horole">Receiving clinician role</label><input class="tin" id="horole" value="${esc(L.role)}" autocomplete="off" placeholder="For example: ED physician, cath lab nurse"></div>
-      <div><label class="flab" for="hocrew">Crew clinician completing handover</label><input class="tin" id="hocrew" value="${esc(L.crew)}" autocomplete="off"></div>
-      <div><label class="flab" for="honotes">Handover notes (optional)</label><textarea class="tin" id="honotes" rows="3">${esc(L.notes)}</textarea></div>`;
-    return drawer('Transfer of care',b,`<span class="sp"></span><button class="btn btn-p btn-xl" data-act="ho-save" ${L.area==='Other'&&!L.other.trim()?'disabled':''}>Save</button>`,true);
-  }
-  if(L.t==='hoconfirm')return `<div class="scrim" data-act="close"></div><div class="dlg" role="alertdialog" aria-modal="true" aria-labelledby="hcq"><h2 class="h2" id="hcq">COMPLETE HANDOVER?</h2>
-    <p>This will close the active STEMI case <b class="mono">${esc(idText())}</b>. It then becomes read-only.</p><p>Confirm that:</p>
-    <ul class="hoconf"><li>Patient has arrived at the receiving hospital</li><li>Transfer of care has been completed</li><li>Receiving clinician details are recorded</li><li>Final observations have been documented</li></ul>
+  if(L.t==='hoconfirm')return `<div class="scrim" data-act="close"></div><div class="dlg" role="alertdialog" aria-modal="true" aria-labelledby="hcq"><h2 class="h2" id="hcq">COMPLETE STEMI PATHWAY?</h2>
+    <p>This will close the STEMI pathway for:</p><p class="mono dup-cad">${esc(idText())}</p>
+    <p>The STEMI case will remain available as read-only. The CAD incident itself is not changed.</p>
     ${L.err?`<p class="err" role="alert">${G('warn')}${esc(L.err)}</p>`:''}
-    <div class="row"><button class="btn btn-q" data-act="close">CANCEL</button><button class="btn btn-p btn-xl" data-act="ho-close" ${L.busy?'disabled':''}>${L.busy?'Closing…':'COMPLETE HANDOVER'}</button></div></div>`;
+    <div class="row"><button class="btn btn-q" data-act="close">CANCEL</button><button class="btn btn-p btn-xl" data-act="ho-close" ${L.busy?'disabled':''}>${L.busy?'Completing…':'COMPLETE'}</button></div></div>`;
   if(L.t==='hoimg')return `<div class="zoom" role="dialog" aria-modal="true" aria-label="ECG"><div class="zoom-h"><b>${esc(L.label)}</b><button class="icon-btn" data-act="close" aria-label="Close">${IC.close}</button></div><div class="zoom-b"><img src="${L.url}" alt="${esc(L.label)}"></div></div>`;
   if(L.t==='dup'){
     const x=L.ex||{},c=CASE,hasDraft=!!(c&&c.srv===false&&(c.draft||answered()||c.ecgs.length));
@@ -926,7 +863,7 @@ function decLayer(L){
   const h=CASE.dest&&CASE.dest.hosp?HOSP[CASE.dest.hosp].name:'the receiving PCI hospital';
   let body='';
   if(d.k==='confirm')body=`<p class="decv-p">Continue to <b>${h}</b>${CASE.dest&&CASE.dest.st==='conf'?' (destination confirmed)':' (recommended destination)'}.</p>${d.note?`<p class="decv-p">Note from ${esc(d.by)}: ${esc(d.note)}</p>`:''}<p class="decv-s">Hospital and cath-lab steps are the next design phase and are not shown here.</p>`;
-  if(d.k==='not')body=`${d.reason?`<p class="decv-p">Reason: ${esc(d.reason)}</p>`:''}${d.adv?`<p class="decv-p">Advice: ${esc(d.adv)}</p>`:''}<p class="decv-s">Continue standard care. The case stays open, and you can still send a new ECG.</p>`;
+  if(d.k==='not')body=`<p class="decv-p"><b>PATHWAY CLOSED</b></p>${d.reason?`<p class="decv-p">Reason: ${esc(d.reason)}</p>`:''}${d.adv?`<p class="decv-p">Advice: ${esc(d.adv)}</p>`:''}<p class="decv-s">The STEMI pathway closed automatically and is now read-only, under Completed cases. No cath-lab activation. The CAD incident itself is not changed: continue standard care.</p>`;
   if(d.k==='repeat')body=`${d.reasons.length?`<p class="decv-p">${esc(d.reasons.join(', '))}</p>`:''}${d.instr?`<p class="decv-p">Instruction: ${esc(d.instr)}</p>`:''}${d.within?`<p class="decv-p">Within ${d.within} min</p>`:''}<p class="decv-s">Capture a new recording from the monitor. It is sent as ECG ${CASE.ecgs.length+1}.</p>`;
   return `<div class="decv decv-${d.k}" role="alertdialog" aria-modal="true" aria-labelledby="dvt">${idTag('C-09')}<div class="decv-in">
     <div class="decv-id mono">${idText()} · decision on ECG ${d.on}</div>
@@ -1163,14 +1100,10 @@ function late(){
 /* ---------- reading the shared record: what the platform and the cardiologist did reaches the crew here ---------- */
 function deriveState(){
   const c=CASE;if(!c)return;const d=lastDec(),e1=c.ecgs[0],L=c.life||{};
-  /* the journey after the decision maps onto the existing states: TRANSPORTING → ARRIVED → HANDOVER IN PROGRESS →
-     HANDOVER COMPLETED (internal status: closed) */
+  /* the STEMI pathway closes on NOT STEMI (automatically) or with COMPLETE STEMI PATHWAY (internal status: closed) */
   if(c.cancelled)c.state='CANCELLED';
-  else if(L.closed)c.state='HANDOVER COMPLETED';
+  else if(L.closed)c.state=L.closed.kind==='not-stemi'?'NOT STEMI — PATHWAY CLOSED':'STEMI PATHWAY COMPLETED';
   else if(c.failure&&!c.failure.late)c.state='TRANSMISSION FAILED';
-  else if(L.arr&&(L.ho||L.hopen||L.fv))c.state='HANDOVER IN PROGRESS';
-  else if(L.arr)c.state='ARRIVED';
-  else if(d&&c.eta&&c.eta.dep)c.state='TRANSPORTING';
   else if(d)c.state=d.k==='confirm'?'CONFIRMED STEMI':d.k==='not'?'NOT STEMI':(c.ecgs.some(x=>x.tx.rcvAt>d.at)?'UNDER REVIEW':'REPEAT ECG REQUESTED');
   else if(c.ack)c.state='UNDER REVIEW';
   else if(e1&&e1.tx.rcvAt)c.state=e1.tx.late?'DOWNTIME CASE':'AWAITING CARDIOLOGIST';
@@ -1178,7 +1111,7 @@ function deriveState(){
   else c.state='DRAFT';
 }
 const lastOf=a=>a&&a.length?a[a.length-1]:null;
-const lifeOf=S=>({arr:lastOf(S.arr),ho:lastOf(S.ho),fv:lastOf(S.fv),hopen:S.hopen||null,closed:S.closed||null});
+const lifeOf=S=>({hopen:S.hopen||null,closed:S.closed||null});
 function applySnap(){
   const c=CASE,S=SRV;if(c&&S){const was=c.life&&c.life.closed;c.life=lifeOf(S);
     /* closed (handover completed): the case is read-only and leaves the active list */
@@ -1256,30 +1189,17 @@ function act(a,el){
   /* ---------- transport, arrival, handover ---------- */
   case 'handover':if(!c||!c.ecgs.length)break;view='HO';render();break;
   case 'ho-back':view='WS';render();break;
-  case 'mark-arrived':case 'arrive-now':{
-    const h=(c.life&&c.life.arr&&c.life.arr.hosp)||(c.dest&&c.dest.hosp)||'A',t=now();
-    op('arrive',{hosp:h,at:t},t);ev(`Arrived at ${HOSP[h].name}`,ME);toast(`Arrival recorded: ${HOSP[h].name} · ${hm(t)}`);view='HO';render();break;}
-  case 'arr-edit':{const A=c.life&&c.life.arr;layer={t:'arr',hosp:A?A.hosp:(c.dest&&c.dest.hosp)||null,tm:A?A.at:rmin(now())};renderLayer();break;}
-  case 'arr-hosp':layer.hosp=d.v;renderLayer();break;
-  case 'arr-save':if(!layer.hosp)break;op('arrive',{hosp:layer.hosp,at:layer.tm});ev(`Arrival corrected: ${HOSP[layer.hosp].name} · ${hm(layer.tm)}`,ME);layer=null;renderLayer();break;
-  case 'ho-edit':{const H=c.life&&c.life.ho;layer={t:'ho',at:H&&H.at?H.at:now(),area:H?H.area:null,other:(H&&H.other)||'',name:(H&&H.name)||'',role:(H&&H.role)||'',crew:(H&&H.crew)||`${ME}, ${ROLE} · ${UNIT}`,notes:(H&&H.notes)||''};renderLayer();break;}
-  case 'ho-now':layer.at=now();renderLayer();break;
-  case 'ho-at':layer.at=Math.min(now(),(layer.at||now())+Number(d.d)*MIN);renderLayer();break;
-  case 'ho-area':layer.area=layer.area===d.v?null:d.v;renderLayer();break;
-  case 'ho-save':{const L=layer;if(L.area==='Other'&&!L.other.trim())break;
-    op('ho',{at:L.at,area:L.area,other:L.other,name:L.name,role:L.role,crew:L.crew,notes:L.notes});ev('Transfer of care details saved',ME);layer=null;renderLayer();break;}
-  case 'fv-confirm':op('fv');ev('Final vitals at handover confirmed',ME);toast('Final vitals at handover confirmed.');break;
   case 'ho-img':{const S=view==='HIST'?HREC:SRV,e=S&&S.ecgs[Number(d.n)-1];if(!e)break;const x=e.imgs.find(i=>i.i===e.pri)||e.imgs[0];
     layer={t:'hoimg',url:x.url,label:`ECG ${e.n} · acquired ${hm(e.acq)} · primary image`};renderLayer();break;}
-  case 'ho-complete':if(!SRV||SRV.hoMissing.length){toast('Complete the items listed on the page first.',true);break}layer={t:'hoconfirm'};renderLayer();break;
+  case 'ho-complete':if(!SRV||!SRV.sub||SRV.closed)break;layer={t:'hoconfirm'};renderLayer();break;
   case 'ho-close':{
     if(!SC.online||OUTQ.length){layer.err='Waiting for the connection and for your latest entries to be sent. Try again in a moment.';renderLayer();break}
     layer.busy=true;layer.err='';renderLayer();
     LIVE.request('POST','/api/cases/close',{cad:CAD}).then(x=>{const b=x.body||{};
       if(x.status===200&&b.ok){layer=null;renderLayer();c.life={...c.life,closed:{at:now(),by:`${ME}, ${ROLE}`}};deriveState();view='C-01';HLIST=null;render();
-        toast(`<b>Handover completed.</b> Case CAD #${esc(b.cad)} is closed and read-only.`,true);return}
-      layer={t:'hoconfirm',err:b.missing?'Complete first: '+b.missing.join(', '):(b.error||'The case could not be closed.')};renderLayer();
-    },()=>{layer={t:'hoconfirm',err:'No connection: the case could not be closed. Try again.'};renderLayer()});
+        toast(`<b>STEMI pathway completed.</b> CAD #${esc(b.cad)} is now under Completed cases, read-only.`,true);return}
+      layer={t:'hoconfirm',err:b.missing?b.missing.join(', '):(b.error||'The STEMI pathway could not be completed.')};renderLayer();
+    },()=>{layer={t:'hoconfirm',err:'No connection: the STEMI pathway could not be completed. Try again.'};renderLayer()});
     break;}
   case 'hist-open':{const cad=d.cad;HREC=null;view='HIST';render();
     LIVE.request('GET','/api/cases/view?cad='+encodeURIComponent(cad)).then(x=>{if(x.status===200){HREC=x.body.rec;if(view==='HIST')render()}else toast('This completed case could not be opened.',true)},()=>toast('No connection.',true));break;}
@@ -1386,6 +1306,7 @@ function act(a,el){
     const x=c.decs.find(z=>z.id===layer.id);if(x&&!x.crewAck){x.crewAck=now();op('decack',{id:x.id},x.crewAck);ev(`Decision acknowledged: ${DECL[x.k]}`,ME)}
     layer=null;
     if(a==='dec-ack-rep'){c.held=null;renderLayer();act('repeat',el);break}
+    if(c.life&&c.life.closed){view='C-01';c.held=null;render();renderLayer();break}
     view='WS';render();layer=c.held||null;c.held=null;renderLayer();break;}
   case 'dest-accept':{const h=c.dest.hosp;c.dest={...c.dest,st:'conf',at:now(),by:ME};op('dest',{hosp:h,st:'conf'});ev(`Destination confirmed: ${HOSP[h].name} · by ${ME} · ACC notified`,ME);renderMain();renderRail();toast(`Destination confirmed: ${HOSP[h].name}. ACC notified.`);break}
   case 'dest-change':layer={t:'dest',pick:null,why:null,text:''};renderLayer();break;
@@ -1398,7 +1319,7 @@ function act(a,el){
     ev(`Destination changed: ${HOSP[prev].name} to ${HOSP[L.pick].name} · reason: ${why}`,ME);
     if(c.eta){c.eta={...c.eta,min:HOSP[L.pick].eta,upd:now()};op('eta',{min:c.eta.min,why:'upd'})}
     layer=null;renderLayer();render();toast(`Destination changed to ${HOSP[L.pick].name}. ACC notified.`);break;}
-  case 'depart':{const h=HOSP[c.dest.hosp];c.eta={dep:now(),min:h.eta,upd:null};op('eta',{min:h.eta,dep:c.eta.dep,why:'dep'});ev(`Transport started (departed scene) · ETA ${h.eta} min`,ME);deriveState();if(view==='HO')render();else{renderMain();renderRail()}break}
+  case 'depart':{const h=HOSP[c.dest.hosp];c.eta={dep:now(),min:h.eta,upd:null};op('eta',{min:h.eta,dep:c.eta.dep,why:'dep'});ev(`Departed scene · ETA ${h.eta} min`,ME);renderMain();renderRail();break}
   case 'eta':layer={t:'eta',min:c.eta.min};renderLayer();break;
   case 'eta-step':layer.min=Math.max(1,layer.min+Number(d.m));renderLayer();break;
   case 'eta-save':c.eta={...c.eta,min:layer.min,upd:now()};op('eta',{min:layer.min,why:'upd'});ev(`ETA updated: ${layer.min} min`,ME);layer=null;renderLayer();renderMain();break;
@@ -1581,7 +1502,6 @@ $('#layer').addEventListener('input',e=>{
   if(id==='rdose')layer.dose=e.target.value;
   if(id==='rtext'){layer.text=e.target.value;const b=$('[data-act="rsave"]');if(b)b.disabled=!recOk(layer)}
   if(id==='dtext'){layer.text=e.target.value;const b=$('[data-act="dconfirm"]');if(b)b.disabled=!destOk(layer)}
-  if(['honame','horole','hocrew','honotes','hoother'].includes(id)){layer[{honame:'name',horole:'role',hocrew:'crew',honotes:'notes',hoother:'other'}[id]]=e.target.value;if(id==='hoother'){const b=$('[data-act="ho-save"]');if(b)b.disabled=!layer.other.trim()}}
   if(id==='etext'){layer.text=e.target.value;const b=$('[data-act="esave"]');if(b)b.disabled=!(layer.why&&(layer.why!=='Other'||layer.text.trim()))}
 });
 /* the CAD number field keeps what is typed (a re-render or refresh does not lose it); Enter continues */

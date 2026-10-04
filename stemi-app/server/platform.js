@@ -136,38 +136,9 @@ function crewOp(user, o, cad, rcv, W) {
       W.au(rcv, txt, CREWT, 'key'); W.upd(rcv, 'eta', txt, {});
       break;
     }
-    /* ---------- arrival, transfer of care, final vitals: the handover belongs to the same CAD case ---------- */
-    case 'arrive': {
-      if (!C.server_received_at || !HN[d.hosp]) break;
-      const at = sane(d.at, t, rcv), prev = latestArrival(cad);
-      D.run('INSERT INTO arrivals(id,cad,hospital,arrived_at,kind,received_at,set_by,op_id) VALUES(?,?,?,?,?,?,?,?)', D.uid('a'), cad, d.hosp, at, prev ? 'correct' : 'mark', rcv, CREWT, o.id);
-      if (prev) W.au(rcv, `Arrival corrected by crew: ${HN[d.hosp]} at ${hms(at)} · previous ${HN[prev.hospital]} at ${hms(prev.arrived_at)} kept`, CREWT, 'key');
-      else W.au(at, `Arrived at the receiving hospital: ${HN[d.hosp]} · receiving hospital confirmed`, CREWT, 'key');
-      W.upd(rcv, 'arr', prev ? `Arrival corrected: ${HN[d.hosp]} · ${hm(at)}` : `Arrived at ${HN[d.hosp]} · ${hm(at)}`, {});
+    case 'hopen': /* the case summary page was opened (recorded once) */
+      if (C.server_received_at && !C.handover_opened_at) { D.run('UPDATE cases SET handover_opened_at=? WHERE cad=?', t, cad); W.au(t, `Case summary opened by ${CREWT}`, CREWT, 'evt'); }
       break;
-    }
-    case 'hopen':
-      if (C.server_received_at && !C.handover_opened_at) { D.run('UPDATE cases SET handover_opened_at=? WHERE cad=?', t, cad); W.au(t, `Handover page opened by ${CREWT}`, CREWT, 'evt'); }
-      break;
-    case 'ho': {
-      if (!C.server_received_at) break;
-      const clip = (x, n) => String(x == null ? '' : x).trim().slice(0, n);
-      const area = AREAS.includes(d.area) ? d.area : null, other = area === 'Other' ? clip(d.other, 120) : null;
-      if (area === 'Other' && !other) throw Object.assign(new Error('Describe the receiving area or department (Other)'), { status: 400 });
-      const arr = latestArrival(cad), prev = latestHandover(cad), at = d.at ? sane(d.at, t, rcv) : null;
-      const name = clip(d.name, 120), role = clip(d.role, 120), crewC = clip(d.crew, 160), notes = clip(d.notes, 2000);
-      D.run(`INSERT INTO handovers(id,cad,handover_at,hospital,area,area_other,clinician_name,clinician_role,crew_clinician,notes,saved_at,received_at,saved_by,op_id)
-             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, D.uid('h'), cad, at, arr ? arr.hospital : null, area, other, name, role, crewC, notes, t, rcv, CREWT, o.id);
-      W.au(rcv, `Transfer of care details ${prev ? 'updated' : 'recorded'} by crew: ${area ? (other || area) : 'receiving area not given'} · receiving clinician ${name || 'not entered'}${role ? ` (${role})` : ''} · handover time ${at ? hms(at) : 'not set'} · crew clinician ${crewC || 'not entered'}${notes ? ' · notes added' : ''}${prev ? ' · previous details kept' : ''}`, CREWT, 'key');
-      break;
-    }
-    case 'fv': {
-      if (!C.server_received_at) break;
-      const v = latestVitals(cad), txt = `Final vitals at handover confirmed: ${fvText(v)}`;
-      D.run('INSERT INTO final_vitals(id,cad,values_json,confirmed_at,received_at,confirmed_by,op_id) VALUES(?,?,?,?,?,?,?)', D.uid('f'), cad, J(v), t, rcv, CREWT, o.id);
-      W.au(rcv, txt, CREWT, 'key'); W.upd(rcv, 'fv', txt, {});
-      break;
-    }
     case 'decrcv': {
       const x = D.get('SELECT * FROM decisions WHERE id=? AND cad=?', d.id, cad);
       if (x && !x.delivered_at) { D.run('UPDATE decisions SET delivered_at=? WHERE id=?', rcv, x.id); W.au(rcv, `Decision delivered to the ${UNIT} tablet and shown to the crew`, 'Platform', 'key'); }
@@ -246,10 +217,16 @@ function docOp(user, o, cad, rcv, W) {
       D.run(`INSERT INTO decisions(id,cad,kind,on_ecg,also_json,reason,note,advice,reasons_json,instruction,within_min,ai_feedback,decided_at,received_at,decided_by,decided_by_title,user_id)
              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         D.uid('x'), cad, d.k, d.on, J(d.also || []), d.reason || '', d.note || '', d.adv || '', J(d.reasons || []), d.instr || '', d.within || null, d.ai || null, t, rcv, DOCN, DOCT, user.id);
-      const lab = { confirm: 'STEMI confirmed', not: 'Not STEMI recorded', repeat: 'Unclear: repeat ECG requested' }[d.k];
+      const lab = { confirm: 'STEMI confirmed', not: 'Cardiologist decision: NOT STEMI —', repeat: 'Unclear: repeat ECG requested' }[d.k];
       const rs = d.reasons || [];
-      W.au(t, `${lab} by ${DOCN} on ECG ${d.on}${d.reason ? ' · reason: ' + d.reason : ''}${rs.length ? ' · ' + rs.join(', ') : ''}${d.note ? ' · note: ' + d.note : ''}`, DOCT, 'key');
+      W.au(t, `${lab} ${d.k === 'not' ? DOCT : 'by ' + DOCN} on ECG ${d.on}${d.reason ? ' · reason: ' + d.reason : ''}${rs.length ? ' · ' + rs.join(', ') : ''}${d.note ? ' · note: ' + d.note : ''}`, DOCT, 'key');
       if (d.ai) W.au(t, `AI report feedback from ${DOCN}: ${d.ai}`, DOCT, 'view');
+      /* NOT STEMI ends the STEMI pathway at once: no cath-lab activation, no crew step. The CAD incident is not touched */
+      if (d.k === 'not') {
+        markClosed(cad, t, DOCT, user.id, CLOSE_NOT);
+        W.au(t, `STEMI pathway automatically closed following Cardiologist NOT STEMI decision — CAD #${cad} · the CAD incident itself is not changed`, 'Platform', 'key');
+        W.upd(t, 'closed', 'NOT STEMI — PATHWAY CLOSED', {});
+      }
       break;
     }
     case 'call':
@@ -275,7 +252,8 @@ function applyOps(user, ops) {
     const seen = D.get('SELECT received_at FROM ops WHERE op_id=?', o.id);
     if (seen) { results.push({ id: o.id, ok: true, dup: true, rcv: seen.received_at }); continue; }
     /* a closed case (handover completed) is read-only: only viewing it is still recorded */
-    if (caseRow(cad).closed_at && !['viewed', 'seen', 'compare'].includes(o.k)) { results.push({ id: o.id, ok: false, error: 'This case is closed (handover completed): it is read-only' }); continue; }
+    /* a closed STEMI pathway is read-only: only viewing it, and the crew confirming it has seen the decision, are recorded */
+    if (caseRow(cad).closed_at && !['viewed', 'seen', 'compare', 'decrcv', 'decack'].includes(o.k)) { results.push({ id: o.id, ok: false, error: 'This STEMI pathway is closed: it is read-only' }); continue; }
     const rcv = Date.now(), W = writer(cad, user);
     try {
       D.tx(() => {
@@ -296,68 +274,39 @@ function applyOps(user, ops) {
   return results;
 }
 
-/* ---------- handover: arrival, transfer of care, final vitals, closure ---------- */
-const AREAS = ['Emergency Department', 'Cath Lab', 'Resuscitation', 'Cardiac Unit', 'Other'];
-/* a time from the tablet, within the last day and not in the future; otherwise the action's time */
-const sane = (x, t, rcv) => (Number.isFinite(+x) && +x > rcv - 24 * 3600000 && +x <= rcv + 60000 ? +x : t);
-const latestArrival = cad => D.get('SELECT * FROM arrivals WHERE cad=? ORDER BY received_at DESC, rowid DESC LIMIT 1', cad);
-const latestHandover = cad => D.get('SELECT * FROM handovers WHERE cad=? ORDER BY received_at DESC, rowid DESC LIMIT 1', cad);
-const latestFv = cad => D.get('SELECT * FROM final_vitals WHERE cad=? ORDER BY received_at DESC, rowid DESC LIMIT 1', cad);
-/* the latest recorded value of each final vital sign: BP, HR, SpO2, GCS (minimum dataset and its updates), RR and pain
-   (record items). Nothing is copied: these are the existing rows */
-const FV = [['bp', 'BP', 'md'], ['hr', 'HR', 'md'], ['spo2', 'SpO₂', 'md'], ['rr', 'RR', 'rec'], ['gcs', 'GCS', 'md'], ['pain', 'Pain', 'rec']];
-function latestVitals(cad) {
-  const out = {};
-  for (const [k, , src] of FV) {
-    const r = src === 'md'
-      ? D.get('SELECT value_text, taken_at, received_at, 0 AS nv FROM observations WHERE cad=? AND field=? ORDER BY received_at DESC, rowid DESC LIMIT 1', cad, k)
-      : D.get('SELECT value_text, taken_at, received_at, not_obtained AS nv FROM treatments WHERE cad=? AND item_key=? ORDER BY received_at DESC, rowid DESC LIMIT 1', cad, k);
-    if (r) out[k] = { v: r.value_text, nv: !!r.nv, t: r.taken_at, rcv: r.received_at };
-  }
-  return out;
+/* ---------- closing the STEMI pathway (never the operational CAD incident: ICCC / ACC and ePCR own that) ----------
+   Two ways: the crew presses COMPLETE STEMI PATHWAY, or the cardiologist's NOT STEMI decision closes it automatically.
+   Either way the whole case stays stored, moves to Completed and is read-only. No handover documentation is asked for:
+   arrival, transfer of care and final observations belong to ICCC / ePCR. */
+const CLOSE_CREW = { reason: 'STEMI pathway completed', source: 'crew' };
+const CLOSE_NOT = { reason: 'Cardiologist decision: NOT STEMI', source: 'automatic following Cardiologist decision' };
+/* inside a transaction: mark the pathway closed */
+function markClosed(cad, t, byT, userId, why) {
+  D.run("UPDATE cases SET status='closed', closed_at=?, closed_by=?, closed_user_id=?, closure_reason=?, closure_source=? WHERE cad=?", t, byT, userId, why.reason, why.source, cad);
 }
-const fvText = v => FV.map(([k, l]) => `${l} ${v[k] ? `${v[k].v}${v[k].t && !v[k].nv ? ` (${hm(v[k].t)})` : ''}` : 'not entered'}`).join(' · ');
-/* what must be recorded before the crew can close the case (a field that is not clinically applicable is not required:
-   RR and pain are optional; BP, HR, SpO2 and GCS always have a value or a Not obtained / Unable to obtain status) */
-function handoverMissing(cad) {
-  const C = caseRow(cad), A = latestArrival(cad), H = latestHandover(cad), F = latestFv(cad), miss = [];
-  if (!C || !C.server_received_at) return ['The case has not been sent yet'];
-  if (!A) miss.push('Receiving hospital', 'Arrival time (MARK ARRIVED)');
-  if (!H || !H.handover_at) miss.push('Handover time');
-  else if (A && H.handover_at < A.arrived_at) miss.push('Handover time (it is before the arrival time)');
-  if (!H || !H.clinician_name) miss.push('Receiving clinician name');
-  if (!H || !H.clinician_role) miss.push('Receiving clinician role');
-  if (!H || !H.crew_clinician) miss.push('Crew clinician completing handover');
-  const v = latestVitals(cad), changed = Math.max(0, ...Object.values(v).map(x => x.rcv || 0));
-  if (!F) miss.push('Final vitals at handover (confirm them)');
-  else if (F.received_at < changed) miss.push('Final vitals at handover (changed since confirmed: confirm again)');
-  return miss;
-}
-/* COMPLETE HANDOVER & CLOSE CASE. Refused until every required item is recorded; afterwards the case is read-only */
 function closeCase(user, rawCad) {
   const cad = seed.activeCad(), C = caseRow(cad);
   if (!C || (rawCad && CADN.normalize(rawCad) !== cad)) return { status: 'notactive' };
   if (C.closed_at) return { status: 'closed', cad, already: true };
-  const missing = handoverMissing(cad);
-  if (missing.length) return { status: 'incomplete', cad, missing };
-  const t = Date.now(), A = latestArrival(cad), H = latestHandover(cad), CREWT = userT(user), W = writer(cad, user);
-  const area = H.area ? (H.area_other || H.area) : '';
+  if (!C.server_received_at) return { status: 'incomplete', cad, missing: ['The case has not been sent yet'] };
+  const t = Date.now(), CREWT = userT(user), W = writer(cad, user);
   D.tx(() => {
-    D.run("UPDATE cases SET status='closed', closed_at=?, closed_by=?, closed_user_id=? WHERE cad=?", t, CREWT, user.id, cad);
-    W.au(t, `Handover completed by ${CREWT} (${C.unit}) · ${HN[A.hospital]}${area ? ', ' + area : ''} · receiving clinician ${H.clinician_name} (${H.clinician_role}) · arrival ${hms(A.arrived_at)} · handover ${hms(H.handover_at)}`, CREWT, 'key');
-    W.au(t, `Case CAD #${cad} closed by ${CREWT} · read-only from now on`, CREWT, 'key');
-    W.upd(t, 'closed', `HANDOVER COMPLETED · ${HN[A.hospital]} · arrived ${hm(A.arrived_at)} · handover ${hm(H.handover_at)}`, {});
+    markClosed(cad, t, CREWT, user.id, CLOSE_CREW);
+    W.au(t, `STEMI pathway completed and closed by ${CREWT} (${C.unit}) — CAD #${cad} · the CAD incident itself is not changed`, CREWT, 'key');
+    W.upd(t, 'closed', 'STEMI PATHWAY COMPLETED · closed by the crew', {});
     W.flush();
   });
   push();
   return { status: 'closed', cad };
 }
+/* not-stemi | completed */
+const closedKind = C => (C.closure_reason === CLOSE_NOT.reason ? 'not-stemi' : 'completed');
 /* completed cases, found by CAD number (part of it is enough); newest first */
 function listClosed(q) {
   const n = CADN.normalize(q).replace(/[^0-9A-Z-]/g, '');
-  return D.all('SELECT cad, unit, closed_at, closed_by FROM cases WHERE closed_at IS NOT NULL AND cad LIKE ? ORDER BY closed_at DESC LIMIT 50', `%${n}%`).map(r => {
-    const a = latestArrival(r.cad), d = D.get('SELECT kind FROM decisions WHERE cad=? ORDER BY decided_at DESC, rowid DESC LIMIT 1', r.cad);
-    return { cad: r.cad, unit: r.unit, closedAt: r.closed_at, closedBy: r.closed_by, hosp: a ? HN[a.hospital] : null, dec: d ? d.kind : null };
+  return D.all('SELECT cad, unit, closed_at, closed_by, closure_reason FROM cases WHERE closed_at IS NOT NULL AND cad LIKE ? ORDER BY closed_at DESC LIMIT 50', `%${n}%`).map(r => {
+    const d = D.get('SELECT kind FROM decisions WHERE cad=? ORDER BY decided_at DESC, rowid DESC LIMIT 1', r.cad);
+    return { cad: r.cad, unit: r.unit, closedAt: r.closed_at, closedBy: r.closed_by, kind: closedKind(r), dec: d ? d.kind : null };
   });
 }
 /* a completed case, read-only, for the history view */
@@ -562,14 +511,9 @@ function snapshot(cad) {
   R.upd = D.all('SELECT rowid, * FROM case_updates WHERE cad=? ORDER BY at, rowid', cad).map(u => ({ id: u.id, at: u.at, kind: u.kind, text: u.text, ref: P(u.ref_json) || {}, seen: u.seen_at }));
   R.audit = D.all('SELECT * FROM audit_events WHERE cad=? ORDER BY at, id', cad).map((a, i) => ({ t: a.at, text: a.action, who: a.actor || '', role: a.role || '', kind: a.kind, i }));
   D.all('SELECT op_id, received_at FROM ops WHERE cad=?', cad).forEach(o => { R.ops[o.op_id] = o.received_at; });
-  /* handover: every saved version is kept; the screens use the latest */
-  R.arr = D.all('SELECT rowid, * FROM arrivals WHERE cad=? ORDER BY received_at, rowid', cad).map(a => ({ id: a.id, hosp: a.hospital, at: a.arrived_at, kind: a.kind, rcv: a.received_at, by: a.set_by, op: a.op_id }));
-  R.ho = D.all('SELECT rowid, * FROM handovers WHERE cad=? ORDER BY received_at, rowid', cad).map(h => ({ id: h.id, at: h.handover_at, hosp: h.hospital, area: h.area, other: h.area_other, name: h.clinician_name, role: h.clinician_role, crew: h.crew_clinician, notes: h.notes, saved: h.saved_at, rcv: h.received_at, by: h.saved_by, op: h.op_id }));
-  R.fv = D.all('SELECT rowid, * FROM final_vitals WHERE cad=? ORDER BY received_at, rowid', cad).map(f => ({ id: f.id, v: P(f.values_json), at: f.confirmed_at, rcv: f.received_at, by: f.confirmed_by, op: f.op_id }));
-  R.vit = latestVitals(cad);
+  /* the STEMI pathway's closure (the CAD incident itself is never closed here) */
   R.hopen = C.handover_opened_at || null;
-  R.closed = C.closed_at ? { at: C.closed_at, by: C.closed_by } : null;
-  R.hoMissing = C.closed_at ? [] : handoverMissing(cad);
+  R.closed = C.closed_at ? { at: C.closed_at, by: C.closed_by, reason: C.closure_reason || CLOSE_CREW.reason, source: C.closure_source || 'crew', kind: closedKind(C) } : null;
   return R;
 }
 
@@ -626,4 +570,4 @@ function hello() {
   return [['init', { now: Date.now(), cad, epoch: D.epoch() }], ['cfg', { sim: D.sim() }], ['snap', { rec: cad ? snapshot(cad) : null, at: Date.now(), presence: live.presence() }]];
 }
 
-module.exports = { applyOps, snapshot, push, hello, demoCase, checkCad, createCase, openExisting, closeActive, closeCase, listClosed, viewClosed, AREAS, reminder, escalate, aiResume, aiFinish, HN };
+module.exports = { applyOps, snapshot, push, hello, demoCase, checkCad, createCase, openExisting, closeActive, closeCase, listClosed, viewClosed, reminder, escalate, aiResume, aiFinish, HN };

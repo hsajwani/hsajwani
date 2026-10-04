@@ -94,7 +94,7 @@ const lastDec=()=>R.dec.length?R.dec[R.dec.length-1]:null;
 /* ACKNOWLEDGE & OPEN is shown at once on this device; the platform's record follows within milliseconds */
 const ackAt=()=>R&&(R.ack||U.ackAt)||null;
 const acked=()=>!!ackAt();
-/* handover completed: the case is closed and read-only, and never alarms */
+/* the STEMI pathway is closed (NOT STEMI, or completed by the crew): read-only, and never alarms */
 const closed=()=>!!(R&&R.closed);
 const alertOn=()=>!!(R&&R.alert&&!acked()&&!closed());
 /* a completed case opened from the history list (HV) is shown in place of the live record, which waits in RL */
@@ -146,9 +146,9 @@ function topbar(){
  return `<header class="tb"><nav class="tb-nav" aria-label="Main">${nav.map(([k,ic,l,on])=>`<button data-act="nav" data-k="${k}"${on?' aria-current="page"':''}>${ic}<span>${l}</span></button>`).join('')}</nav><span class="tb-app">Unified STEMI Platform</span><span class="sp">${idTag(scrId())}</span><span class="tb-me">${ME}<small>Cardiologist · ${HN.A}</small></span><span class="tb-duty"><i></i>On duty</span>${netHtml()}<span class="tb-clock mono" data-tick="clock">${hm(now())}</span></header>`;
 }
 const lostBand=()=>NET.up?'':`<div class="pband pb-amb lostband" role="alert">${G('warn')}<b class="t">CONNECTION LOST · Attempting to reconnect</b><span class="sub">What you see may no longer be current${NET.last?` · last update ${hms(NET.last)}`:''}</span><span class="sub">A decision cannot be sent until the connection returns</span></div>`;
-const STATEC={'HANDOVER COMPLETED':['c-ok','done'],'AWAITING CARDIOLOGIST':['c-neutral','pend'],'UNDER REVIEW':['c-acc','ack'],'CONFIRMED STEMI':['c-red',''],'NOT STEMI':['c-neutral','done'],'REPEAT ECG REQUESTED':['c-acc','info']};
+const STATEC={'NOT STEMI — PATHWAY CLOSED':['c-neutral','done'],'STEMI PATHWAY COMPLETED':['c-ok','done'],'AWAITING CARDIOLOGIST':['c-neutral','pend'],'UNDER REVIEW':['c-acc','ack'],'CONFIRMED STEMI':['c-red',''],'NOT STEMI':['c-neutral','done'],'REPEAT ECG REQUESTED':['c-acc','info']};
 function caseState(){
- if(closed())return 'HANDOVER COMPLETED';
+ if(closed())return R.closed.kind==='not-stemi'?'NOT STEMI — PATHWAY CLOSED':'STEMI PATHWAY COMPLETED';
  const d=lastDec(),m=mode();
  if(d&&m!=='review')return {confirm:'CONFIRMED STEMI',not:'NOT STEMI',repeat:'REPEAT ECG REQUESTED'}[d.k];
  if(d&&d.k==='confirm')return 'CONFIRMED STEMI';
@@ -173,17 +173,15 @@ const crewDlv=d=>d.crewAck?`Crew acknowledged ${hms(d.crewAck)}`:d.dlv?`Shown on
 const crewOff=()=>!!(R.presence&&R.presence.crew&&R.presence.crew.up===false);
 /* a case that reached the platform only after the crew had started the STEMI downtime route (C-08) */
 const lateLine=()=>`The crew was already using the STEMI downtime route${R.downtime?` from ${hms(R.downtime.at)}`:''}`;
-/* the journey after the decision, from the crew, silently: TRANSPORTING → ARRIVED → HANDOVER COMPLETED */
+/* the STEMI pathway's closure, silently (the CAD incident itself is never closed here) */
 function lifeBand(){
- const A=R.arr&&R.arr.length?R.arr[R.arr.length-1]:null,H=R.ho&&R.ho.length?R.ho[R.ho.length-1]:null,e=R.eta.find(x=>x.dep);
- if(R.closed)return band('info','done','HANDOVER COMPLETED',[A?`Receiving hospital: ${HN[A.hosp]}`:'',A?`Arrival ${hms(A.at)}`:'',H&&H.at?`Handover ${hms(H.at)}`:'',`Case closed ${hms(R.closed.at)} · read-only`]);
- if(A)return band('info','info',`ARRIVED · ${HN[A.hosp]}`,[`Arrival ${hms(A.at)}`,H||R.hopen?'Handover in progress':'']);
- if(e)return band('info','info','TRANSPORTING',[`Departed ${hms(e.dep)}`,esc(etaLine())]);
- return '';
+ const Z=R.closed;if(!Z)return '';
+ if(Z.kind==='not-stemi')return band('info','done','NOT STEMI — PATHWAY CLOSED',[`${esc(Z.by)} · ${hms(Z.at)}`,'Closed automatically · read-only','No cath-lab activation · the CAD incident is not changed']);
+ return band('info','done','STEMI PATHWAY COMPLETED',[`Completed by ${esc(Z.by)} · ${hms(Z.at)}`,'Read-only']);
 }
 function bandsHtml(){
  const hv=HV?band('slate','info','COMPLETED CASE · READ-ONLY',['Opened from completed cases','<button class="btn btn-q" data-act="hist-close">Back to the review queue</button>']):'';
- if(closed())return hv+lifeBand()+decBand();
+ if(closed())return hv+lifeBand()+(R.closed.kind==='not-stemi'?'':decBand());
  const late=R.sub&&R.sub.late?band('amb','warn','DOWNTIME CASE · delivered late',[lateLine(),'The case may already have been discussed by phone']):'';
  const off=crewOff()?band('info','warn',`CREW TABLET OFFLINE since ${hms(R.presence.crew.at)}`,['Anything the crew saves meanwhile arrives here, in order, when the tablet reconnects','Call the crew if it cannot wait']):'';
  return lifeBand()+late+off+decBand();
@@ -232,7 +230,7 @@ function vQueue(){
 function hqRows(){
  const L=(HQL||[]).filter(x=>!(R&&!HV&&R.closed&&x.cad===R.cad));
  if(!L.length)return `<li class="q-empty">${HQ?'No completed case matches this CAD number':'No other completed cases'}</li>`;
- return L.map(x=>`<li><b class="mono">CAD #${esc(x.cad)}</b><span>${esc(x.unit||'')}${x.hosp?' · '+esc(x.hosp):''}</span><span class="mono">Completed ${hm(x.closedAt)}</span><button class="btn btn-q" data-act="hq-open" data-cad="${esc(x.cad)}">Open</button></li>`).join('');
+ return L.map(x=>`<li><b class="mono">CAD #${esc(x.cad)}</b><span>${esc(x.unit||'')}${x.hosp?' · '+esc(x.hosp):''}</span><span>${x.kind==='not-stemi'?'NOT STEMI — pathway closed':'Pathway completed'}</span><span class="mono">Closed ${hm(x.closedAt)}</span><button class="btn btn-q" data-act="hq-open" data-cad="${esc(x.cad)}">Open</button></li>`).join('');
 }
 function loadHq(){LIVE&&LIVE.request('GET','/api/cases?q='+encodeURIComponent(HQ)).then(x=>{HQL=(x.body&&x.body.cases)||[];const l=$('.q-hl');if(l)l.innerHTML=hqRows()},()=>{})}
 function histOpen(rec){
@@ -297,7 +295,7 @@ function actHtml(){
  const m=mode(),call=`<button class="btn btn-s btn-call" data-act="call">${IC.phone}CALL CREW</button>`,off=!NET.up?' disabled':'';
  const offNote=NET.up?'':'<p class="dnote warnn">No connection: a decision cannot be sent. Call the crew if it cannot wait.</p>';
  /* handover completed: read-only, no decision can be recorded or changed */
- if(m==='closed')return DEV==='phone'?`<span class="dnote">Handover completed · case closed · read-only</span>`:`<div class="dbar"><p class="dnote">Handover completed: the case is closed and read-only. A correction would need an authorised amendment (not built in this phase).</p></div>`;
+ if(m==='closed')return DEV==='phone'?`<span class="dnote">STEMI pathway closed · read-only</span>`:`<div class="dbar"><p class="dnote">The STEMI pathway is closed and read-only. A correction would need an authorised amendment (not built in this phase).</p></div>`;
  if(DEV==='phone'){
   if(m==='review')return `<button class="icon-btn" data-act="call" aria-label="Call crew">${IC.phone}</button><button class="btn btn-p" data-act="decide"${off}>Decide</button>`;
   if(m==='confirm')return `<button class="btn btn-s" data-act="call">${IC.phone}Call crew</button>`;
@@ -495,7 +493,7 @@ const LAYERS={
   <span class="lab">Reason (required)</span><div class="opts">${NOT_REASONS.map(r=>opt('n-why',r,r,L.why===r)).join('')}</div>
   ${L.why==='Other (free text)'?`<textarea class="tin" id="nother" rows="2" placeholder="Describe the reason">${esc(L.other)}</textarea>`:''}
   <label class="lab" for="nadv">Advice to the crew (optional)</label><textarea class="tin" id="nadv" rows="2">${esc(L.adv)}</textarea>
-  <div class="box">The crew continues standard care. The case stays open, and a new ECG can still be sent.</div>
+  <div class="box">NOT STEMI closes the STEMI pathway automatically: no cath-lab activation, and the case becomes read-only. The CAD incident itself is not changed; the crew continues standard care.</div>
   <div class="foot" id="lfoot">${guardFoot(`<button class="btn btn-p" data-act="n-go"${notOk(L)?'':' disabled'}>Confirm NOT STEMI</button>`)}</div>`,'wide','Not STEMI')},
  repeat:L=>dlg(`<h2>Unclear: request a repeat ECG</h2><div class="box"><b>Current ECG: ECG ${lastEcg().n} · ${hm(lastEcg().acq)}</b><span>The crew’s tablet shows the request at once. The repeat arrives here as ECG ${R.ecgs.length+1}, silently.</span></div>
   <span class="lab">Reason (optional, one or more)</span><div class="opts">${REP_REASONS.map(r=>opt('r-why',r,r,L.why.includes(r),true)).join('')}</div>

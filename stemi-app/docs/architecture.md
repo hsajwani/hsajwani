@@ -65,9 +65,7 @@ when it was taken and when the server received it.
 | `ecg_views` | When each ECG image was first opened by the cardiologist |
 | `decisions` | CONFIRMED STEMI, NOT STEMI or repeat ECG request, with the cardiologist's identity, time, reason and note, and when the crew saw and acknowledged it |
 | `destinations`, `etas` | Destination recommendation and changes, ETA |
-| `arrivals` | Arrival at the receiving hospital (hospital, time); a correction is a new row |
-| `handovers` | Transfer of care: handover time, hospital, area, receiving clinician and role, crew clinician, notes; each save a new row |
-| `final_vitals` | The latest vital signs confirmed at handover (the values at that moment; the readings stay in `observations` / `treatments`) |
+| `arrivals`, `handovers`, `final_vitals` | 0.3.0 handover documentation: no longer used (it belongs to ICCC / ePCR), kept so existing databases open |
 | `case_updates` | What the cardiologist sees as NEW, and when it was seen |
 | `audit_events` | The audit trail: time, user, role (`crew`, `cardiologist`, `system`, `cad-feed`), action, CAD number |
 | `ops` | Every action received from a device, once, with its device time and server receipt time |
@@ -101,22 +99,24 @@ when it was taken and when the server received it.
 | Crew | `dest`, `eta` | Destination confirmation or change; ETA and departure |
 | Crew | `decrcv`, `decack` | The decision was shown on the tablet; the crew acknowledged it |
 | Crew | `downtime`, `note` | Downtime route used; free-text audit note |
-| Crew | `arrive` | Arrival at the receiving hospital, or a correction of it (new row); NEW for the cardiologist |
-| Crew | `hopen` | The handover page was opened (recorded once) |
-| Crew | `ho` | Transfer of care details (new row each save; *Other* area needs text) |
-| Crew | `fv` | Final vitals at handover confirmed: the latest BP, HR, SpO₂, RR, GCS, pain score at that moment |
+| Crew | `hopen` | The case summary was opened (recorded once) |
 | Cardiologist | `shown` | The NEW CARDIAC CASE alert is on screen and the alarm started |
 | Cardiologist | `ack` | ACKNOWLEDGE & OPEN: the alarm stops. Recorded separately from any decision |
 | Cardiologist | `viewed`, `seen`, `compare` | First view of each ECG image (the first one starts the review), NEW items seen, serial comparison opened |
 | Cardiologist | `decision` | CONFIRMED STEMI, NOT STEMI or repeat ECG request, with identity and time. Refused before acknowledgement |
 | Cardiologist | `call`, `note` | Call with the crew; free-text audit note |
 
-Closing is not an action but a request, because it needs an immediate answer: `POST /api/cases/close {cad}` checks
-the required handover items (the same list the crew sees as *missing*), then sets `status = 'closed'`, `closed_at`,
-`closed_by`, writes the audit events and pushes the record. `409 {code:'incomplete', missing}` lists what is missing.
-After closure every action on the case is refused except viewing (`viewed`, `seen`, `compare`), and image uploads
-are refused. Completed cases: `GET /api/cases?q=<CAD number or part>` lists them, `GET /api/cases/view?cad=` returns
-one (closed cases only), read-only, for both roles.
+**Closing the STEMI pathway** (never the CAD incident, which belongs to ICCC / ACC and ePCR):
+- The crew's COMPLETE STEMI PATHWAY is a request, not an action, because it needs an immediate answer:
+  `POST /api/cases/close {cad}` (the case must have been sent) sets `status = 'closed'`, `closed_at`, `closed_by`,
+  `closure_reason = 'STEMI pathway completed'`, `closure_source = 'crew'`, writes the audit event and pushes the record.
+- The cardiologist's `decision` with `k = 'not'` closes it in the same transaction: `closure_reason = 'Cardiologist
+  decision: NOT STEMI'`, `closure_source = 'automatic following Cardiologist decision'`, `closed_by` the cardiologist,
+  with a separate audit event after the decision's own.
+- After closure every action on the case is refused except viewing (`viewed`, `seen`, `compare`) and the crew's
+  receipt of the decision (`decrcv`, `decack`); image uploads are refused. Completed cases:
+  `GET /api/cases?q=<CAD number or part>` lists them (with `kind`: `not-stemi` or `completed`),
+  `GET /api/cases/view?cad=` returns one, read-only, for both roles.
 
 Each action runs in one database transaction with its audit entries. The server checks the role: a crew login cannot
 send a cardiologist action, and the reverse. An action meant for a case that is no longer active is refused.

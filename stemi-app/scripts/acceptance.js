@@ -220,64 +220,38 @@ async function main() {
   const docBody = await doc.textContent('body');
   ok('O2', 'Entry saved offline reached the phone after reconnection', docBody.includes('102'));
 
-  /* the rest of the lifecycle: transport → arrival → handover → COMPLETE HANDOVER & CLOSE CASE */
+  /* Test 2 — CONFIRMED STEMI does not close the pathway; Test 4 — the crew completes it from the CASE SUMMARY */
   const t0 = await tones();
-  await tap('[data-act="dest-accept"]');
-  await crew.waitForSelector('#r-tr [data-act="depart"]:not([disabled])', { timeout: 5000 });
-  await tap('#r-tr [data-act="depart"]');
-  await crew.waitForSelector('.ch .chip >> text=TRANSPORTING', { timeout: 5000 }).catch(() => {});
-  ok('H1', 'Crew marks TRANSPORTING (start transport after the decision)', await crew.isVisible('.ch .chip >> text=TRANSPORTING'));
-  await tap('#r-tr [data-act="mark-arrived"]');
-  await crew.waitForSelector('#h-arr', { timeout: 5000 });
-  await crew.waitForSelector('.ch .chip >> text=/ARRIVED|HANDOVER IN PROGRESS/', { timeout: 5000 }).catch(() => {});
-  const arrTxt = (await crew.textContent('#h-arr')).replace(/\s+/g, ' ');
-  ok('H2', 'Crew marks ARRIVED: arrival time recorded, the handover page opens, receiving hospital from the destination', /PCI Hospital A/.test(arrTxt) && /\d\d:\d\d:\d\d/.test(arrTxt), arrTxt.slice(0, 120));
-  const hoTxt = (await crew.textContent('.vbody.ho')).replace(/\s+/g, ' ');
-  ok('H3', 'Handover page summarises the case from the shared record (CAD, decision, ECGs, AI, treatments, timeline)', hoTxt.includes(`CAD #${CAD}`) && /CONFIRMED STEMI/.test(hoTxt) && /ECG 1 —/.test(hoTxt) && /ECG 2 —/.test(hoTxt) && /Aspirin/.test(hoTxt) && /The Cardiologist makes the final STEMI decision/.test(hoTxt) && /Handover timeline/.test(hoTxt));
-  const missTxt = await crew.textContent('#h-miss').catch(() => '');
-  ok('H4', 'Missing items listed and closing blocked until they are recorded', /Receiving clinician name/.test(missTxt) && /Handover time/.test(missTxt) && await crew.isDisabled('[data-act="ho-complete"]'), missTxt.replace(/\s+/g, ' ').slice(0, 140));
-  await tap('[data-act="fv-confirm"]');
-  await tap('[data-act="ho-edit"]');
-  await crew.waitForSelector('#honame');
-  await tap('[data-act="ho-area"][data-v="Other"]');
-  ok('H5', '"Other" receiving area requires text', await crew.isDisabled('[data-act="ho-save"]'));
-  await tap('[data-act="ho-area"][data-v="Cath Lab"]');
-  await crew.fill('#honame', 'Dr A. Rahman (fictional)'); await crew.fill('#horole', 'Interventional cardiologist');
-  await crew.fill('#honotes', 'Handed over in the cath lab. Fictional test case.');
-  await tap('[data-act="ho-now"]'); await tap('[data-act="ho-save"]');
-  await crew.waitForSelector('[data-act="ho-complete"]:not([disabled])', { timeout: 8000 }).catch(() => {});
-  ok('H6', 'Final vitals confirmed and transfer of care recorded: COMPLETE HANDOVER & CLOSE CASE available', await crew.isEnabled('[data-act="ho-complete"]'));
-  await shot(crew, 'H6-crew-handover-page');
+  const st0 = DBQ(`SELECT status, closed_at FROM cases WHERE cad='${CAD}'`)[0];
+  ok('P1', 'CONFIRMED STEMI: the pathway stays active (no automatic closure)', !st0.closed_at && !st0.status && await crew.isVisible('[data-act="mdup"][data-k="hr"]'));
+  await tap('.ch [data-act="handover"]');
+  await crew.waitForSelector('#h-sum', { timeout: 5000 });
+  const sumTxt = (await crew.textContent('.vbody.ho')).replace(/\s+/g, ' ');
+  ok('P2', 'CASE SUMMARY shows the STEMI pathway only: CAD, ECGs, AI, acknowledgement, decision, timeline', sumTxt.includes(`CAD #${CAD}`) && /Cardiologist acknowledgement/.test(sumTxt) && /CONFIRMED STEMI/.test(sumTxt) && /ECG 1 —/.test(sumTxt) && /ECG 2 —/.test(sumTxt) && /The Cardiologist makes the final STEMI decision/.test(sumTxt) && /STEMI timeline/.test(sumTxt));
+  ok('P3', 'No handover / ePCR documentation is asked for', !/Receiving clinician|Arrival time|Transfer of care|Final vitals|Handover time/i.test(sumTxt) && await crew.isEnabled('[data-act="ho-complete"]'));
+  await shot(crew, 'P3-crew-case-summary');
   await tap('[data-act="ho-complete"]');
-  const dlgTxt = await crew.textContent('#layer');
-  ok('H7', 'Confirmation dialog: COMPLETE HANDOVER? with CANCEL', /COMPLETE HANDOVER\?/.test(dlgTxt) && /CANCEL/.test(dlgTxt) && /Final observations have been documented/.test(dlgTxt));
+  const dlgTxt = (await crew.textContent('#layer')).replace(/\s+/g, ' ');
+  ok('P4', 'Confirmation: COMPLETE STEMI PATHWAY? with the CAD number, CANCEL and COMPLETE', /COMPLETE STEMI PATHWAY\?/.test(dlgTxt) && dlgTxt.includes(`CAD #${CAD}`) && /CANCEL/.test(dlgTxt) && /COMPLETE/.test(dlgTxt));
   await tap('[data-act="ho-close"]');
   await crew.waitForSelector('text=Completed cases', { timeout: 8000 });
-  await doc.waitForSelector('text=HANDOVER COMPLETED', { timeout: 8000 }).catch(() => {});
+  await doc.waitForSelector('text=STEMI PATHWAY COMPLETED', { timeout: 8000 }).catch(() => {});
   const crewHome = (await crew.textContent('#view')).replace(/\s+/g, ' ');
-  ok('H8', 'Case closed: off the crew active list, listed under completed cases', /New STEMI case|Open STEMI pathway/.test(crewHome) && !/My active cases/.test(crewHome) && crewHome.includes(`CAD #${CAD}`));
+  const st1 = DBQ(`SELECT status, closed_at, closed_by, closure_reason, closure_source FROM cases WHERE cad='${CAD}'`)[0];
+  ok('P5', 'Completed: closure time, crew user, reason and source recorded; off the active list, under Completed', st1.status === 'closed' && st1.closed_at && /K\. Ahmed/.test(st1.closed_by) && st1.closure_reason === 'STEMI pathway completed' && st1.closure_source === 'crew' && !/My active cases/.test(crewHome) && crewHome.includes(`CAD #${CAD}`), JSON.stringify(st1));
   await sleep(1500);
   const docTxt = (await doc.textContent('body')).replace(/\s+/g, ' ');
-  ok('H9', 'Cardiologist sees HANDOVER COMPLETED automatically, with hospital, arrival and handover times, and no sound', /HANDOVER COMPLETED/.test(docTxt) && /Receiving hospital: PCI Hospital A/.test(docTxt) && /Arrival \d\d:\d\d/.test(docTxt) && /Handover \d\d:\d\d/.test(docTxt) && (await tones()) === t0, `${(await tones()) - t0} tones`);
-  await shot(doc, 'H9-phone-handover-completed');
-  ok('H10', 'Cardiologist: completed case read-only (no decision buttons)', !(await doc.isVisible('[data-act="decide"]')) && !(await doc.isVisible('[data-act="d-confirm"]')) && !(await doc.isVisible('[data-act="newdec"]')));
-  await doc.click('[data-act="nav"][data-k="queue"]');
-  await doc.waitForSelector('text=Completed');
-  const q = (await doc.textContent('main')).replace(/\s+/g, ' ');
-  ok('H11', 'Cardiologist queue lists the case under Completed and it opens read-only', q.includes(`CAD #${CAD}`) && /Completed/.test(q));
-  await doc.locator('[data-act="open"]:visible').first().click(); await sleep(500);
-  ok('H11b', 'Opened completed case shows HANDOVER COMPLETED, still no decision buttons', (await doc.textContent('body')).includes('HANDOVER COMPLETED') && !(await doc.isVisible('[data-act="decide"]')));
+  ok('P6', 'Cardiologist sees STEMI PATHWAY COMPLETED automatically, read-only, with no sound', /STEMI PATHWAY COMPLETED/.test(docTxt) && !(await doc.isVisible('[data-act="decide"]')) && !(await doc.isVisible('[data-act="newdec"]')) && (await tones()) === t0, `${(await tones()) - t0} tones`);
+  await shot(doc, 'P6-phone-pathway-completed');
   const closedOp = await crewCtx.request.post(BASE + '/api/ops', { data: { ops: [{ id: 'after-close-1', cad: CAD, k: 'md', t: Date.now(), data: { k: 'hr', v: '60 bpm', raw: { v: 60 }, kind: 'update' } }] } });
   const cr = (await closedOp.json()).results[0];
-  ok('H12', 'The platform refuses changes to a closed case', cr && cr.ok === false && /closed/.test(cr.error), cr && cr.error);
-  /* crew refresh: still closed, everything kept */
+  ok('P7', 'The platform refuses changes to a closed STEMI pathway', cr && cr.ok === false && /closed/.test(cr.error), cr && cr.error);
   await crew.reload(); await crew.waitForSelector('text=Completed cases');
   await crew.fill('#histq', CAD.slice(-6)); await sleep(800);
   await crew.click(`[data-act="hist-open"][data-cad="${CAD}"]`);
-  await crew.waitForSelector('#h-toc', { timeout: 5000 });
+  await crew.waitForSelector('#h-sum', { timeout: 5000 });
   const hist = (await crew.textContent('.vbody.ho')).replace(/\s+/g, ' ');
-  ok('H13', 'After refresh the case stays closed; found by CAD number, it opens read-only with all handover information', /HANDOVER COMPLETED/.test(hist) && /Dr A\. Rahman/.test(hist) && /Interventional cardiologist/.test(hist) && /Cath Lab/.test(hist) && /Handed over in the cath lab/.test(hist) && !(await crew.isVisible('[data-act="ho-edit"]')) && !(await crew.isVisible('[data-act="ho-complete"]')));
-  await shot(crew, 'H13-crew-completed-case');
+  ok('P8', 'After refresh: found by CAD number under Completed, read-only, everything kept', /STEMI PATHWAY COMPLETED/.test(hist) && /ECG 2 —/.test(hist) && !(await crew.isVisible('[data-act="ho-complete"]')));
   await tap('[data-act="hist-back"]');
 
   const info = await (await crewCtx.request.get(BASE + '/api/me')).json();
@@ -295,7 +269,7 @@ async function main() {
     `const {DatabaseSync}=require('node:sqlite');const d=new DatabaseSync(${JSON.stringify(path.join(DATA, 'stemi-test.db'))});console.log(JSON.stringify(d.prepare("SELECT action FROM audit_events ORDER BY at, id").all().map(r=>r.action)))`]).toString();
   const A = JSON.parse(audit);
   const need = [`STEMI case opened by K. Ahmed, Paramedic (Ambulance 214) — CAD #${CAD} · CAD number entered manually by crew`, 'ECG 1 acquired', 'Case submitted', 'Server received case', 'Cardiologist alerted', 'alert shown', 'Cardiologist acknowledged', 'ECG 1 opened', 'BP updated', 'Aspirin documented', 'ECG 2 received', 'AI analysis completed', 'Serial comparison opened', 'STEMI confirmed', 'Decision delivered', `Existing case CAD #${CAD} opened`,
-    'Transport started', 'Arrived at the receiving hospital', 'Handover page opened', 'Final vitals at handover confirmed', 'Transfer of care details recorded', 'Handover completed by', `Case CAD #${CAD} closed by`];
+    'Case summary opened', `STEMI pathway completed and closed by K. Ahmed, Paramedic (Ambulance 214) — CAD #${CAD}`];
   const missing = need.filter(n => !A.some(a => a.includes(n)));
   ok('A1', 'Audit trail holds every major event', !missing.length, missing.length ? 'missing: ' + missing.join(', ') : `${A.length} events`);
   /* requests that fail while the crew context is deliberately offline are expected */

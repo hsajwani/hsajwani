@@ -93,7 +93,7 @@ ol.aud .tm{text-align:left}
       <p class="note urls" id="urls"></p>
       <p class="grp">Cases</p>
       <div class="row"><button class="btn p" data-c="close-case" id="b-close">Take the active case off the screens</button><button class="btn bad" data-c="reset">Delete all test data</button></div>
-      <p class="note">The crew enters the CAD number on the MDT when opening the STEMI pathway; nothing generates CAD numbers. One active case at a time in this build (Q-69, Q-73 open): taking it off the screens keeps it in the database (it is not a handover; the crew closes a case with COMPLETE HANDOVER &amp; CLOSE CASE), and the crew then opens the next case with <b>New STEMI case</b>.</p>
+      <p class="note">The crew enters the CAD number on the MDT when opening the STEMI pathway; nothing generates CAD numbers. One active case at a time in this build (Q-69, Q-73 open): taking it off the screens keeps it in the database (it does not close the STEMI pathway: the crew does that with COMPLETE STEMI PATHWAY, or a NOT STEMI decision closes it), and the crew then opens the next case with <b>New STEMI case</b>.</p>
       <div class="row"><input id="demo-cad" class="cadin" placeholder="CAD number, e.g. 20261004-0123-1" autocomplete="off" spellcheck="false" aria-label="CAD number for the demo case"><button class="btn" data-c="demo-case">Pre-filled demo case (sent)</button></div>
       <p class="note" id="demo-msg">The pre-filled demo case arrives already sent under the CAD number you type here (checked like the crew's entry; an existing number is refused): ECG 1, minimum dataset, aspirin and the mock AI result. It raises the normal new-case alarm on the cardiologist's device; the crew can then add ECG 2 and update vital signs.</p>
       <p class="grp">Test ECGs and the simulated AI</p>
@@ -146,11 +146,8 @@ const STEPS=[
  ['doc','View AI interpretation',()=>{const e=R.ecgs[R.ecgs.length-1];return R.ecgs.length>1&&e.ai&&e.ai.done}],
  ['doc','Select CONFIRMED STEMI',()=>{const d=R.dec.find(x=>x.k==='confirm');return d&&d.at}],
  ['crew','Decision appears on the crew screen',()=>{const d=R.dec.find(x=>x.k==='confirm');return d&&d.dlv}],
- ['crew','Mark transporting',()=>{const e=R.eta.find(x=>x.dep);return e&&e.dep}],
- ['crew','Mark arrived',()=>R.arr&&R.arr.length&&R.arr[0].at],
- ['crew','Final vitals and transfer of care recorded',()=>R.fv&&R.fv.length&&R.ho&&R.ho.length&&Math.max(R.fv[R.fv.length-1].rcv,R.ho[R.ho.length-1].rcv)],
- ['crew','Complete handover & close case',()=>R.closed&&R.closed.at],
- ['doc','HANDOVER COMPLETED appears, read-only, no sound',()=>R.closed&&R.closed.at]
+ ['crew','Case summary → COMPLETE STEMI PATHWAY',()=>R.closed&&R.closed.at],
+ ['doc','STEMI PATHWAY COMPLETED appears, read-only, no sound',()=>R.closed&&R.closed.at]
 ];
 function steps(){
  let cur=-1;
@@ -175,12 +172,8 @@ function tst(){
  const an=R.ecgs.filter(e=>e.ai&&e.ai.done);
  if(an.length){rows.push('<tr class="sub"><td colspan="3">AI analyses (simulated) · the same on both screens</td></tr>');an.forEach(e=>row(`ECG ${e.n} · ${{ok:'AI analysis completed',lim:'AI interpretation limited',wh:'AI interpretation limited',down:'AI interpretation unavailable'}[e.ai.st]}`,e.ai.done,e.rcv))}
  if(R.dec.length>1){rows.push('<tr class="sub"><td colspan="3">Later decisions</td></tr>');R.dec.slice(1).forEach(x=>row({confirm:'STEMI confirmed',not:'Not STEMI',repeat:'Repeat ECG requested'}[x.k],x.at))}
- const dep=R.eta.find(x=>x.dep),A=R.arr&&R.arr.length?R.arr[R.arr.length-1]:null,H=R.ho&&R.ho.length?R.ho[R.ho.length-1]:null;
- rows.push('<tr class="sub"><td colspan="3">Transport and handover</td></tr>');
- row('Transport started (departed scene)',dep&&dep.dep,d&&d.at);
- row('Arrival at the receiving hospital',A&&A.at,dep&&dep.dep);
- row('Handover (transfer of care)',H&&H.at,A&&A.at);
- row('Handover completed · case closed',R.closed&&R.closed.at,H&&H.at);
+ rows.push('<tr class="sub"><td colspan="3">STEMI pathway closure</td></tr>');
+ row(R.closed&&R.closed.kind==='not-stemi'?'Closed automatically (NOT STEMI)':'STEMI pathway completed (crew)',R.closed&&R.closed.at,d&&d.at);
  rows.push('<tr class="sub"><td colspan="3">Next phase (hospital)</td></tr>');
  ['Cath-lab activation','Hospital acknowledgement'].forEach(l=>rows.push(`<tr class="later"><td>${l}</td><td class="v">not in this build</td><td></td></tr>`));
  $('#tst').innerHTML=rows.join('');
@@ -220,7 +213,7 @@ document.addEventListener('click',async e=>{
  if(b.closest('#audf')){audf=b.dataset.v;aud();return}
  const c=b.dataset.c;if(!c)return;
  if(c==='reset'&&!confirm('Delete every test case, image and audit event? The test users stay.'))return;
- if(c==='close-case'&&!confirm('Take the active case CAD #'+(R&&R.cad)+' off both screens? It stays in the database. This is not a handover.'))return;
+ if(c==='close-case'&&!confirm('Take the active case CAD #'+(R&&R.cad)+' off both screens? It stays in the database. This does not close the STEMI pathway.'))return;
  if(c==='demo-case'){
   if(R&&R.path&&!confirm('Send a pre-filled demo case? The active case CAD #'+R.cad+' is closed on both screens.'))return;
   const r=await fetch('/api/control/demo-case',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cad:$('#demo-cad').value})});

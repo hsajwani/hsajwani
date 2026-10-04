@@ -23,6 +23,8 @@ addColumn('cases', 'handover_opened_at', 'INTEGER');
 addColumn('cases', 'closed_at', 'INTEGER');
 addColumn('cases', 'closed_by', 'TEXT');
 addColumn('cases', 'closed_user_id', 'TEXT');
+addColumn('cases', 'closure_reason', 'TEXT');
+addColumn('cases', 'closure_source', 'TEXT');
 
 const cache = new Map();
 const st = sql => { let s = cache.get(sql); if (!s) { s = db.prepare(sql); cache.set(sql, s); } return s; };
