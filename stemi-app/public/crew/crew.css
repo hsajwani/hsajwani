@@ -674,3 +674,25 @@ body{overflow-x:hidden}
 .dup-cad{font-size:24px;font-weight:700}
 .device.port .cadv{padding:20px 16px}
 .device.port .cadv-in{font-size:24px}
+
+/* ---------- handover page and completed cases (4 Oct 2026) ---------- */
+.st-done{border-color:var(--t-ok);color:var(--t-ok);background:var(--t-ok-soft)}
+.vbody.ho{display:flex;flex-direction:column;gap:14px;padding:16px 24px 24px}
+.hotop{background:var(--t-surface);border:1px solid var(--t-line);border-radius:14px;padding:14px 18px}
+.hotop .card-f{row-gap:12px}
+.hotop .chip{font-size:13px}
+.hoecgs{display:flex;flex-direction:column;gap:10px}
+.hoecg{display:grid;grid-template-columns:200px minmax(0,1fr);gap:14px;align-items:start}
+.hoecg .imgbtn{padding:0;border:1px solid var(--t-line);border-radius:8px;background:none;overflow:hidden}
+.hoecg img{display:block;width:100%;height:auto}
+.hoecg-t{display:flex;flex-direction:column;gap:4px;font-size:15px;align-items:flex-start}
+.hotl{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}
+.hotl li{display:grid;grid-template-columns:86px minmax(0,1fr);gap:10px;padding:6px 0;border-bottom:1px solid var(--t-line);font-size:15px}
+.homiss ul{margin:0;padding-left:22px;font-size:16px;font-weight:700}
+.hoconf{margin:0;padding-left:22px;font-size:16px;line-height:1.6}
+.hist{display:flex;flex-direction:column;gap:10px}
+.hist-l{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
+.hist-l li{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1.4fr) auto auto;gap:12px;align-items:center;background:var(--t-surface);border:1px solid var(--t-line);border-radius:10px;padding:8px 12px;font-size:15px}
+.hist-l li.nye{display:block;color:var(--t-muted)}
+.device.port .hoecg{grid-template-columns:1fr}
+.device.port .hist-l li{grid-template-columns:1fr auto}

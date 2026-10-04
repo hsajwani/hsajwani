@@ -18,6 +18,11 @@ addColumn('cases', 'cad_source', 'TEXT');
 addColumn('cases', 'cad_entered_at', 'INTEGER');
 addColumn('cases', 'cad_entered_by', 'TEXT');
 addColumn('cases', 'created_cid', 'TEXT');
+addColumn('cases', 'status', 'TEXT');
+addColumn('cases', 'handover_opened_at', 'INTEGER');
+addColumn('cases', 'closed_at', 'INTEGER');
+addColumn('cases', 'closed_by', 'TEXT');
+addColumn('cases', 'closed_user_id', 'TEXT');
 
 const cache = new Map();
 const st = sql => { let s = cache.get(sql); if (!s) { s = db.prepare(sql); cache.set(sql, s); } return s; };

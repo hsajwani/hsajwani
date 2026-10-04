@@ -74,7 +74,7 @@ const post=()=>{};
 const rid=()=>Math.random().toString(36).slice(2,10);
 /* every action goes to the server at once; o.p resolves true only when the server has stored it */
 function op(k,data,t){
- if(!NET.up)return null;
+ if(!NET.up||HV)return null; /* a completed case opened from history is read-only: nothing is sent */
  const o={id:'d'+rid()+'-'+(++opSeq),cad:CAD,k,data:data||{},t:t==null?now():t};
  o.p=LIVE.send([o]).then(r=>{const x=(r.results||[])[0];if(x&&!x.ok){toast(x.error||'The platform did not accept this action');return false}return true},()=>false);
  return o;
@@ -94,7 +94,11 @@ const lastDec=()=>R.dec.length?R.dec[R.dec.length-1]:null;
 /* ACKNOWLEDGE & OPEN is shown at once on this device; the platform's record follows within milliseconds */
 const ackAt=()=>R&&(R.ack||U.ackAt)||null;
 const acked=()=>!!ackAt();
-const alertOn=()=>!!(R&&R.alert&&!acked());
+/* handover completed: the case is closed and read-only, and never alarms */
+const closed=()=>!!(R&&R.closed);
+const alertOn=()=>!!(R&&R.alert&&!acked()&&!closed());
+/* a completed case opened from the history list (HV) is shown in place of the live record, which waits in RL */
+let HV=null,RL=null,UL=null,HQL=null,HQ='',hqT=null;
 /* NEW marks what arrives after the cardiologist opened the case; everything before is the case as first opened */
 const updSeen=u=>!!(u.seen||U.seen[u.id]||(ackAt()&&u.at<=ackAt()));
 const unseen=()=>R.upd.filter(u=>!updSeen(u));
@@ -110,6 +114,7 @@ function ptLine(){
  return p.join(' · ')||'Patient details pending';
 }
 function mode(){
+ if(closed())return 'closed';
  const d=lastDec();
  if(!d||U.newDec)return 'review';
  if(d.k==='repeat')return R.ecgs.some(e=>e.rcv>d.at)?'review':'repeat';
@@ -141,8 +146,9 @@ function topbar(){
  return `<header class="tb"><nav class="tb-nav" aria-label="Main">${nav.map(([k,ic,l,on])=>`<button data-act="nav" data-k="${k}"${on?' aria-current="page"':''}>${ic}<span>${l}</span></button>`).join('')}</nav><span class="tb-app">Unified STEMI Platform</span><span class="sp">${idTag(scrId())}</span><span class="tb-me">${ME}<small>Cardiologist · ${HN.A}</small></span><span class="tb-duty"><i></i>On duty</span>${netHtml()}<span class="tb-clock mono" data-tick="clock">${hm(now())}</span></header>`;
 }
 const lostBand=()=>NET.up?'':`<div class="pband pb-amb lostband" role="alert">${G('warn')}<b class="t">CONNECTION LOST · Attempting to reconnect</b><span class="sub">What you see may no longer be current${NET.last?` · last update ${hms(NET.last)}`:''}</span><span class="sub">A decision cannot be sent until the connection returns</span></div>`;
-const STATEC={'AWAITING CARDIOLOGIST':['c-neutral','pend'],'UNDER REVIEW':['c-acc','ack'],'CONFIRMED STEMI':['c-red',''],'NOT STEMI':['c-neutral','done'],'REPEAT ECG REQUESTED':['c-acc','info']};
+const STATEC={'HANDOVER COMPLETED':['c-ok','done'],'AWAITING CARDIOLOGIST':['c-neutral','pend'],'UNDER REVIEW':['c-acc','ack'],'CONFIRMED STEMI':['c-red',''],'NOT STEMI':['c-neutral','done'],'REPEAT ECG REQUESTED':['c-acc','info']};
 function caseState(){
+ if(closed())return 'HANDOVER COMPLETED';
  const d=lastDec(),m=mode();
  if(d&&m!=='review')return {confirm:'CONFIRMED STEMI',not:'NOT STEMI',repeat:'REPEAT ECG REQUESTED'}[d.k];
  if(d&&d.k==='confirm')return 'CONFIRMED STEMI';
@@ -167,10 +173,20 @@ const crewDlv=d=>d.crewAck?`Crew acknowledged ${hms(d.crewAck)}`:d.dlv?`Shown on
 const crewOff=()=>!!(R.presence&&R.presence.crew&&R.presence.crew.up===false);
 /* a case that reached the platform only after the crew had started the STEMI downtime route (C-08) */
 const lateLine=()=>`The crew was already using the STEMI downtime route${R.downtime?` from ${hms(R.downtime.at)}`:''}`;
+/* the journey after the decision, from the crew, silently: TRANSPORTING → ARRIVED → HANDOVER COMPLETED */
+function lifeBand(){
+ const A=R.arr&&R.arr.length?R.arr[R.arr.length-1]:null,H=R.ho&&R.ho.length?R.ho[R.ho.length-1]:null,e=R.eta.find(x=>x.dep);
+ if(R.closed)return band('info','done','HANDOVER COMPLETED',[A?`Receiving hospital: ${HN[A.hosp]}`:'',A?`Arrival ${hms(A.at)}`:'',H&&H.at?`Handover ${hms(H.at)}`:'',`Case closed ${hms(R.closed.at)} · read-only`]);
+ if(A)return band('info','info',`ARRIVED · ${HN[A.hosp]}`,[`Arrival ${hms(A.at)}`,H||R.hopen?'Handover in progress':'']);
+ if(e)return band('info','info','TRANSPORTING',[`Departed ${hms(e.dep)}`,esc(etaLine())]);
+ return '';
+}
 function bandsHtml(){
+ const hv=HV?band('slate','info','COMPLETED CASE · READ-ONLY',['Opened from completed cases','<button class="btn btn-q" data-act="hist-close">Back to the review queue</button>']):'';
+ if(closed())return hv+lifeBand()+decBand();
  const late=R.sub&&R.sub.late?band('amb','warn','DOWNTIME CASE · delivered late',[lateLine(),'The case may already have been discussed by phone']):'';
  const off=crewOff()?band('info','warn',`CREW TABLET OFFLINE since ${hms(R.presence.crew.at)}`,['Anything the crew saves meanwhile arrives here, in order, when the tablet reconnects','Call the crew if it cannot wait']):'';
- return late+off+decBand();
+ return lifeBand()+late+off+decBand();
 }
 function decBand(){
  const d=lastDec(),m=mode();if(!d)return '';
@@ -205,9 +221,31 @@ function qrow(){
 }
 function vQueue(){
  let h=topbar()+`<div id="r-lost">${lostBand()}</div>`;
- h+=`<main class="qwrap" data-keep="q"><h2 class="q-h">Needs your review</h2>${sub()&&mode()==='review'?qrow():'<div class="q-empty">No cases waiting for review</div>'}`;
- h+=`<h2 class="q-h">Ongoing</h2>${sub()&&mode()!=='review'?qrow():'<div class="q-empty">No other active cases</div>'}</main>`;
+ const live=sub()&&!closed();
+ if(HQL===null){HQL=[];setTimeout(loadHq,0)}
+ h+=`<main class="qwrap" data-keep="q"><h2 class="q-h">Needs your review</h2>${live&&mode()==='review'?qrow():'<div class="q-empty">No cases waiting for review</div>'}`;
+ h+=`<h2 class="q-h">Ongoing</h2>${live&&mode()!=='review'?qrow():'<div class="q-empty">No other active cases</div>'}`;
+ h+=`<h2 class="q-h">Completed</h2>${sub()&&closed()?qrow():''}<div class="q-hist"><input class="hq-in" id="hq" value="${esc(HQ)}" placeholder="Find a completed case by CAD number" autocomplete="off" spellcheck="false" aria-label="Find a completed case by CAD number"><ul class="q-hl">${hqRows()}</ul></div></main>`;
  return h;
+}
+/* completed cases, found by CAD number and opened read-only */
+function hqRows(){
+ const L=(HQL||[]).filter(x=>!(R&&!HV&&R.closed&&x.cad===R.cad));
+ if(!L.length)return `<li class="q-empty">${HQ?'No completed case matches this CAD number':'No other completed cases'}</li>`;
+ return L.map(x=>`<li><b class="mono">CAD #${esc(x.cad)}</b><span>${esc(x.unit||'')}${x.hosp?' · '+esc(x.hosp):''}</span><span class="mono">Completed ${hm(x.closedAt)}</span><button class="btn btn-q" data-act="hq-open" data-cad="${esc(x.cad)}">Open</button></li>`).join('');
+}
+function loadHq(){LIVE&&LIVE.request('GET','/api/cases?q='+encodeURIComponent(HQ)).then(x=>{HQL=(x.body&&x.body.cases)||[];const l=$('.q-hl');if(l)l.innerHTML=hqRows()},()=>{})}
+function histOpen(rec){
+ if(!HV){RL=R;UL=U}
+ HV=rec;R=rec;CAD=rec.cad;UNIT=R.unit;EMIRATE=R.emirate;CREWT=R.crew;CREW=String(R.crew||'').split(',')[0];
+ U=newU();U.scr='case';U.last='case';U.ackAt=rec.ack||rec.closed.at;U.ecg=rec.ecgs.length||1;
+ layer=null;$('#layer').innerHTML='';lastSig='';render();
+}
+function histClose(){
+ if(!HV)return;
+ HV=null;R=RL;U=UL||newU();RL=UL=null;CAD=R?R.cad:'';
+ if(R){UNIT=R.unit;EMIRATE=R.emirate;CREWT=R.crew;CREW=String(R.crew||'').split(',')[0]}
+ U.scr='queue';layer=null;$('#layer').innerHTML='';lastSig='';render();
 }
 function vAlert(){
  const a=R.alert,L=R.ecgs[0];
@@ -258,6 +296,8 @@ function coversText(){
 function actHtml(){
  const m=mode(),call=`<button class="btn btn-s btn-call" data-act="call">${IC.phone}CALL CREW</button>`,off=!NET.up?' disabled':'';
  const offNote=NET.up?'':'<p class="dnote warnn">No connection: a decision cannot be sent. Call the crew if it cannot wait.</p>';
+ /* handover completed: read-only, no decision can be recorded or changed */
+ if(m==='closed')return DEV==='phone'?`<span class="dnote">Handover completed · case closed · read-only</span>`:`<div class="dbar"><p class="dnote">Handover completed: the case is closed and read-only. A correction would need an authorised amendment (not built in this phase).</p></div>`;
  if(DEV==='phone'){
   if(m==='review')return `<button class="icon-btn" data-act="call" aria-label="Call crew">${IC.phone}</button><button class="btn btn-p" data-act="decide"${off}>Decide</button>`;
   if(m==='confirm')return `<button class="btn btn-s" data-act="call">${IC.phone}Call crew</button>`;
@@ -585,7 +625,9 @@ function act(a,el){
  const d=(el&&el.dataset)||{},t=now();
  switch(a){
   case 'close':if(layer&&layer.t==='call')return endCall();layer=null;renderLayer();return;
-  case 'nav':U.scr=d.k==='case'&&acked()?(U.last==='cmp'&&R.ecgs.length>1?'cmp':'case'):'queue';if(U.scr!=='queue')U.last=U.scr;render();return;
+  case 'hist-close':histClose();return;
+  case 'hq-open':LIVE.request('GET','/api/cases/view?cad='+encodeURIComponent(d.cad)).then(x=>{if(x.status===200)histOpen(x.body.rec);else toast('This completed case could not be opened')},()=>toast('No connection'));return;
+  case 'nav':if(HV){if(d.k==='queue')histClose();return}U.scr=d.k==='case'&&acked()?(U.last==='cmp'&&R.ecgs.length>1?'cmp':'case'):'queue';if(U.scr!=='queue')U.last=U.scr;render();return;
   case 'ack':acknowledge();return;
   case 'open':U.scr=U.last==='cmp'&&R.ecgs.length>1?'cmp':'case';render();return;
   case 'timeline':layer={t:'tl'};renderLayer();return;
@@ -653,6 +695,9 @@ function cmd(k){
 
 /* ---------- the link to the platform ---------- */
 function onSnap(rec,at){
+ /* while a completed case is open from history the live record waits; a new case alert always takes over */
+ if(HV){RL=rec;NET.last=at;if(!(rec&&rec.alert&&!rec.ack&&!rec.closed))return;histClose()}
+ if(rec&&rec.closed&&!(HQL||[]).some(x=>x.cad===rec.cad))HQL=null;
  R=rec;NET.last=at;
  /* the CAD number comes with the case record: exactly as the crew entered it (normalised by the platform) */
  if(R){CAD=R.cad;UNIT=R.unit;EMIRATE=R.emirate;CREWT=R.crew;CREW=String(R.crew||'').split(',')[0]}
@@ -662,7 +707,7 @@ function onSnap(rec,at){
 }
 function onMsg(m){
  switch(m.t){
-  case 'init':{clearTimers();T0=m.T0;base=m.base;CAD=m.cad||'';EPOCH=m.epoch||'';R=null;U=newU();layer=null;lastSig='';lastScr='';NET.last=null;NET.up=true;$('#layer').innerHTML='';const al=$('#alertl');al.innerHTML='';al._h='';render();break}
+  case 'init':{HV=null;RL=UL=null;clearTimers();T0=m.T0;base=m.base;CAD=m.cad||'';EPOCH=m.epoch||'';R=null;U=newU();layer=null;lastSig='';lastScr='';NET.last=null;NET.up=true;$('#layer').innerHTML='';const al=$('#alertl');al.innerHTML='';al._h='';render();break}
   case 'clock':T0=m.T0;base=m.base;break;
   case 'cfg':{
    const ids=!!m.sim.ids;
@@ -687,6 +732,7 @@ $('#device').addEventListener('input',e=>{
  layer[k]=v;
  if(layer.t==='not'){const b=$('[data-act="n-go"]');if(b)b.disabled=!notOk(layer)}
 });
+$('#view').addEventListener('input',e=>{if(e.target.id==='hq'){HQ=e.target.value;clearTimeout(hqT);hqT=setTimeout(loadHq,250)}});
 $('#device').addEventListener('scroll',e=>{const s=e.target;if(s.classList&&s.classList.contains('ev-scroll')){U.sx=s.scrollLeft;U.sy=s.scrollTop}},true);
 let drag=null,devScale=1;
 $('#device').addEventListener('pointerdown',e=>{const s=e.target.closest('.ev-scroll,.fs-b');if(!s||e.button!==0||e.target.closest('button'))return;drag={s,x:e.clientX,y:e.clientY,l:s.scrollLeft,t:s.scrollTop,k:devScale||1};try{s.setPointerCapture(e.pointerId)}catch(_){}});

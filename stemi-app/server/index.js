@@ -114,6 +114,20 @@ async function route(req, res) {
     if (r.status === 'exists') return send(res, 409, { code: 'exists', ...r });
     return send(res, r.status === 'created' ? 201 : 200, { ok: true, ...r, rec: platform.snapshot(r.cad) });
   }
+  /* completed cases: listed and opened read-only by CAD number, for the crew and the cardiologist */
+  if (p === '/api/cases' && req.method === 'GET') return send(res, 200, { cases: platform.listClosed(url.searchParams.get('q')) });
+  if (p === '/api/cases/view' && req.method === 'GET') {
+    const rec = platform.viewClosed(url.searchParams.get('cad'));
+    return rec ? send(res, 200, { rec }) : send(res, 404, { error: 'No completed case with this CAD number' });
+  }
+  /* COMPLETE HANDOVER & CLOSE CASE */
+  if (p === '/api/cases/close' && req.method === 'POST') {
+    if (user.role !== 'crew') return send(res, 403, { error: 'Only the crew completes the handover' });
+    const r = platform.closeCase(user, (await json(req)).cad);
+    if (r.status === 'notactive') return send(res, 409, { code: 'notactive', error: 'This case is no longer the active case' });
+    if (r.status === 'incomplete') return send(res, 409, { code: 'incomplete', ...r });
+    return send(res, 200, { ok: true, ...r });
+  }
   if (p === '/api/cases/open' && req.method === 'POST') {
     if (user.role !== 'crew') return send(res, 403, { error: 'Only the crew opens cases' });
     const r = platform.openExisting(user, (await json(req)).cad);
@@ -139,6 +153,7 @@ async function route(req, res) {
     if (!buf.length) return send(res, 400, { error: 'Empty image' });
     const cad = seed.activeCad();
     if (!cad) return send(res, 409, { error: 'No case is open on the platform' });
+    if (D.get('SELECT closed_at FROM cases WHERE cad=?', cad).closed_at) return send(res, 409, { error: 'This case is closed (handover completed): it is read-only' });
     if (url.searchParams.get('cad') && url.searchParams.get('cad') !== cad) return send(res, 409, { error: 'This case is no longer the active test case' });
     const id = D.uid('img'), file = `${id}${mime === 'image/png' ? '.png' : '.jpg'}`;
     const sha = crypto.createHash('sha256').update(buf).digest('hex');
@@ -191,7 +206,7 @@ async function route(req, res) {
 /* wipe every test case and image (users stay) */
 function resetData() {
   D.tx(() => {
-    ['ops', 'audit_events', 'case_updates', 'etas', 'destinations', 'decisions', 'ecg_views', 'alert_followups', 'cardiologist_alerts',
+    ['final_vitals', 'handovers', 'arrivals', 'ops', 'audit_events', 'case_updates', 'etas', 'destinations', 'decisions', 'ecg_views', 'alert_followups', 'cardiologist_alerts',
       'ai_interpretations', 'ecg_images', 'ecgs', 'treatments', 'observations', 'patient_details', 'cases'].forEach(t => D.run(`DELETE FROM ${t}`));
   });
   for (const f of fs.readdirSync(cfg.IMAGE_DIR)) fs.unlinkSync(path.join(cfg.IMAGE_DIR, f));

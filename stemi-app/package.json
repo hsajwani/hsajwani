@@ -1,6 +1,6 @@
 {
   "name": "stemi-unified-platform-test",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Unified STEMI Platform: first functional crew ↔ cardiologist multi-device test build. Fictional test data only.",
   "license": "UNLICENSED",

@@ -22,6 +22,11 @@ CREATE TABLE IF NOT EXISTS cases (
   cad_entered_at      INTEGER,          -- when the crew confirmed the CAD number on the tablet
   cad_entered_by      TEXT,
   created_cid         TEXT,             -- the tablet's id for this case, so a resent "create" is not taken for a duplicate
+  status              TEXT,             -- NULL while open; 'closed' once the crew completed the handover (shown as HANDOVER COMPLETED)
+  handover_opened_at  INTEGER,
+  closed_at           INTEGER,          -- handover completed and case closed: the case is read-only from then on
+  closed_by           TEXT,
+  closed_user_id      TEXT,
   active              INTEGER NOT NULL DEFAULT 1,
   unit                TEXT NOT NULL,
   emirate             TEXT NOT NULL,
@@ -118,6 +123,25 @@ CREATE TABLE IF NOT EXISTS destinations (
 CREATE TABLE IF NOT EXISTS etas (
   id TEXT PRIMARY KEY, cad TEXT NOT NULL REFERENCES cases(cad), minutes INTEGER NOT NULL,
   departed_at INTEGER, at INTEGER NOT NULL, received_at INTEGER NOT NULL, set_by TEXT, why TEXT
+);
+
+-- arrival at the receiving hospital. A correction before closure is a new row; the latest row is the current one
+CREATE TABLE IF NOT EXISTS arrivals (
+  id TEXT PRIMARY KEY, cad TEXT NOT NULL REFERENCES cases(cad), hospital TEXT NOT NULL, arrived_at INTEGER NOT NULL,
+  kind TEXT NOT NULL,                   -- mark | correct
+  received_at INTEGER NOT NULL, set_by TEXT, op_id TEXT
+);
+-- transfer of care. Each save is a new row (earlier details kept); the latest row is the one used at closure
+CREATE TABLE IF NOT EXISTS handovers (
+  id TEXT PRIMARY KEY, cad TEXT NOT NULL REFERENCES cases(cad), handover_at INTEGER, hospital TEXT,
+  area TEXT, area_other TEXT, clinician_name TEXT, clinician_role TEXT, crew_clinician TEXT, notes TEXT,
+  saved_at INTEGER NOT NULL, received_at INTEGER NOT NULL, saved_by TEXT, op_id TEXT
+);
+-- the crew confirmed the final vital signs at handover: the latest recorded values at that moment (they are rows in
+-- observations / treatments; this only records which ones were confirmed, and when)
+CREATE TABLE IF NOT EXISTS final_vitals (
+  id TEXT PRIMARY KEY, cad TEXT NOT NULL REFERENCES cases(cad), values_json TEXT NOT NULL,
+  confirmed_at INTEGER NOT NULL, received_at INTEGER NOT NULL, confirmed_by TEXT, op_id TEXT
 );
 
 -- what the cardiologist sees as NEW (silent updates)
