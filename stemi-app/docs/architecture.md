@@ -1,4 +1,4 @@
-# Architecture · test build 0.5.0
+# Architecture · test build 0.6.0
 
 TEST BUILD · FICTIONAL DATA ONLY. This describes the test build, not the production system.
 
@@ -6,7 +6,7 @@ TEST BUILD · FICTIONAL DATA ONLY. This describes the test build, not the produc
 
 ```
  crew MDT (/crew)        ER Doctor (/er)          Cardiologist (/cardiologist)     test console (/control)
- public/crew/            public/er/               public/cardiologist/             public/control/
+ public/crew/            public/er/               public/cardiologist/             public/control/ (+ CORPULS SIMULATOR)
       │  ▲                    │  ▲                      │  ▲                             ▲
  POST │  │ SSE           POST │  │ SSE             POST │  │ SSE                         │ SSE
       ▼  │                    ▼  │                      ▼  │                             │
@@ -14,7 +14,10 @@ TEST BUILD · FICTIONAL DATA ONLY. This describes the test build, not the produc
  │ auth.js      crew test login · prototype device sessions for ER / cardiologist / console          │
  │ pathway.js   the state machine: derives each case's state, refuses actions the state does not allow│
  │ platform.js  the platform: actions, audit trail, alerts, closures, snapshots, pushes per role       │
- │ live.js      Server-Sent Events: per-screen case pushes, heartbeat, presence                         │
+ │ monitor.js   the corpuls feed on the platform's side: link, check, store once, audit, push          │
+ │   └ integrations/corpuls/  provider contract · MockCorpulsProvider (simulated) ·                    │
+ │                            RealCorpulsMissionProvider (placeholder, not implemented)                │
+ │ live.js      Server-Sent Events: per-screen case pushes, monitor updates, heartbeat, presence       │
  │ ai/          AI service interface; provider "mock" (simulated)                                       │
  │ db.js        node:sqlite → data/stemi-test.db (migrations on start); images → data/images/           │
  └───────────────────────────────────────────────────────────────────────────────────────────────────┘
@@ -58,7 +61,7 @@ DRAFT → SENT TO ER → ER REVIEWING ─┬─ NOT SUSPICIOUS FOR STEMI (reason
 
 | State key | Derived from |
 |---|---|
-| `draft` | case created, not yet received (`server_received_at` empty) |
+| `draft` | case created (from 0.6.0 at LINK CORPULS, so the monitor feed can attach), not yet sent (`server_received_at` empty); never shown to the ER or the Cardiologist |
 | `sent_to_er` | received; no ER acceptance |
 | `er_reviewing` | `er_accepted_at`; no activation |
 | `er_closed` | closed with `closure_reason = ER Doctor assessment: NOT SUSPICIOUS FOR STEMI` |
@@ -80,6 +83,41 @@ SUSPICIOUS never creates a cardiologist decision.
 **Cases made before 0.5.0** went straight to the cardiologist. They have no ER fields and are read as already
 cardiology-activated (`legacy: true` in the record): they still open, and are acknowledged and decided as before.
 
+## The corpuls feed (new in 0.6.0)
+
+The ECG and the vital signs come from the unit's corpuls monitor through a provider
+(`server/integrations/corpuls/`). In this build that provider is **simulated** (MockCorpulsProvider). No real
+corpuls.mission is connected. The provider emits normalized events (`VITALS_UPDATED`, `ECG_ACQUIRED`,
+`CORPULS_CONNECTION_CHANGED`). `server/monitor.js` turns them into the case record:
+
+- It refuses an event for a missing CAD number, a closed case, or a monitor not linked to the case.
+- It stores each ECG once (by event id), numbers it with the platform's ECG count, runs the mock AI on it and pushes
+  it silently.
+- It keeps the latest values with their time, plus a light history.
+- It audits only the significant moments.
+
+The screens never see the provider. Linking happens at the crew's LINK CORPULS, which creates the unsent case. One
+monitor serves one case at a time, and closing the pathway ends the feed. The contract, the mock's behaviour, the
+simulator and what MEAD / corpuls must still provide are in [corpuls-integration.md](corpuls-integration.md).
+
+## Data model (new in 0.6.0)
+
+Added on start by `server/db.js` (nothing is wiped):
+
+- **On `cases`:**
+  - the link: `corpuls_provider`, `corpuls_device_id`, `corpuls_device_label`, `corpuls_linked_at`,
+    `corpuls_linked_by`;
+  - the feed: `corpuls_status`, `corpuls_status_at`, `corpuls_connected_once`, `corpuls_last_data_at`,
+    `corpuls_link_ended_at`, `corpuls_link_end_reason`;
+  - the latest values: `vitals_json`, `vitals_at`, `vitals_source`, `vitals_hist_at`;
+  - `draft_discarded_at`.
+- **On `ecgs`:** `source` (`corpuls` · `manual_fallback` · `test`; empty for the photographed ECGs of older cases),
+  `device_id`, `source_event_id`, `source_seq`, `transmitted_at`, `device_hr`.
+- **New tables:**
+  - `monitor_vitals`: a light history, with no waveforms. It keeps each NIBP measurement, explicit updates, at most
+    about one routine sample a minute, and the values sent with the case.
+  - `monitor_events`: the feed's significant moments, for the timeline.
+
 ## Data model (new in 0.5.0)
 
 Added to `cases` on start by `server/db.js` (existing rows are kept, nothing is wiped):
@@ -96,7 +134,9 @@ The 0.3.0 handover tables (`arrivals`, `handovers`, `final_vitals`) and the 0.4.
 
 Server-Sent Events from the server, HTTP POST to it. On connecting a screen gets `init` (server clock, data epoch),
 `cfg` (test simulation), `cases` (every open case it may see). After each change the server pushes `case` with the
-whole record of that case to every screen allowed to see it (`rec: null` when it leaves the screen). A heartbeat
+whole record of that case to every screen allowed to see it (`rec: null` when it leaves the screen). A monitor
+vital-signs update travels as the smaller `monitor` event (`{ cad, mon }`); the test console also gets `corpuls` (the
+simulated monitors' state). A heartbeat
 (`hb`) every few seconds keeps the clocks aligned and proves the link; when it stops, or any request fails, the
 screen says CONNECTION LOST — RECONNECTING. The crew tablet says OFFLINE — CHANGES SAVED LOCALLY only when something
 is actually waiting on the tablet.
@@ -110,14 +150,18 @@ Each action is `{ id, cad, k, t, data }`; the id makes a resend harmless (stored
 
 | Screen | Actions |
 |---|---|
-| Crew | `submit` (ECG 1 + minimum data), `ecg` (serial / repeat ECG), `img` (another image of a sent ECG), `md` (vital signs update), `rec` (treatment update), `hopen`, `decrcv`, `decack`, `erack`, `note` |
+| Crew | `submit` (the four patient items, and a manual fallback ECG 1 only when corpuls has delivered none), `ecg` (a manual fallback ECG), `img` (another image of a manual ECG; never of a corpuls ECG), `md` (manual fallback vital signs), `rec` (treatment update), `hopen`, `decrcv`, `decack`, `erack`, `note` |
 | ER Doctor | `er_shown`, `er_accept {name}`, `er_assess {kind, on, reason, comment, name}`, `viewed`, `compare`, `note` |
 | Cardiologist | `shown`, `ack {name}`, `viewed`, `compare`, `decision {k, on, also, reason, note, adv, reasons, instr, within, ai, name}`, `note` |
 
-Plus `POST /api/cases` (create under the CAD number), `GET /api/cases/check`, `POST /api/cases/open` (existing case),
+Plus `POST /api/cases` (create under the CAD number; `link: true` links corpuls), `POST /api/cases/correct` (the CAD
+number of an unsent case; the case and its corpuls data move with it), `POST /api/cases/discard` (an unsent case;
+its feed ends), `POST /api/corpuls/link` (link again), `GET /api/cases/check`, `POST /api/cases/open` (existing case),
 `POST /api/cases/complete` (COMPLETE STEMI PATHWAY), `GET /api/cases?q=` (completed cases by CAD number),
 `GET /api/cases/view?cad=` (one case, read-only), `POST /api/images?cad=` (crew), `GET /files/:id` (stored images),
-and the test console's `/api/control/*` (console session only).
+and the test console's `/api/control/*` (console session only), including `GET /api/control/corpuls` and
+`POST /api/control/corpuls/<action>` (the simulator: connect, disconnect, reconnect, signal-loss, restore-signal,
+pause, resume, set, send-vitals, trigger-ecg).
 
 ## Identity (prototype only)
 
@@ -138,8 +182,8 @@ until then):
 - **ER Doctor:** NEW STEMI CASE — from the moment the case reaches the ER screen until an ER Doctor accepts it.
 - **Cardiologist:** NEW CARDIOLOGY ACTIVATION — from activation until ACKNOWLEDGE & OPEN.
 
-Nothing else sounds anywhere: AI results, repeat ECGs, vital signs, treatment updates, activation (on the ER screen),
-decisions and closures arrive silently. The audit records when each alert was shown (alarm started) and accepted /
+Nothing else sounds anywhere: AI results, repeat ECGs, corpuls ECGs and monitor values, connection changes, treatment
+updates, activation (on the ER screen), decisions and closures arrive silently. The audit records when each alert was shown (alarm started) and accepted /
 acknowledged (alarm stopped).
 
 ## The AI interface (`server/ai/`)
@@ -161,4 +205,5 @@ local fonts (Public Sans, Atkinson Hyperlegible Mono; OFL).
 ## Replacing pieces later
 
 The data layer is `server/db.js` (+ `schema.sql`); identity is `server/auth.js`; the AI is `server/ai/`; the live link
-is `server/live.js`. Each can be replaced without changing the screens' contract.
+is `server/live.js`; the monitor feed is a corpuls provider in `server/integrations/corpuls/` (`CORPULS_PROVIDER`).
+Each can be replaced without changing the screens' contract.

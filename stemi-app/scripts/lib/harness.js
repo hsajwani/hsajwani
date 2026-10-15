@@ -43,7 +43,7 @@ async function startServer(env) {
   const PORT = 3050 + Math.floor(Math.random() * 900), BASE = `http://localhost:${PORT}`;
   const DATA = (env && env.DATA_DIR) || fs.mkdtempSync(path.join(os.tmpdir(), 'stemi-test-'));
   const proc = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', 'server/index.js'], {
-    cwd: ROOT, env: { ...process.env, STEMI_DEV: '', PORT: String(PORT), DATA_DIR: DATA, MOCK_AI_DELAY_MS: '1500', HEARTBEAT_MS: '2000', ...(env || {}) }, stdio: ['ignore', 'pipe', 'pipe']
+    cwd: ROOT, env: { ...process.env, STEMI_DEV: '', PORT: String(PORT), DATA_DIR: DATA, MOCK_AI_DELAY_MS: '1500', HEARTBEAT_MS: '2000', CORPULS_SIM_TICK_MS: '1000', CORPULS_PROVIDER: 'mock', ...(env || {}) }, stdio: ['ignore', 'pipe', 'pipe']
   });
   let log = '';
   proc.stdout.on('data', d => { log += d; }); proc.stderr.on('data', d => { log += d; });
@@ -69,7 +69,7 @@ function Api(BASE, role) {
   const take = r => { for (const x of r.headers.getSetCookie()) { const [kv] = x.split(';'); const i = kv.indexOf('='); jar[kv.slice(0, i)] = kv.slice(i + 1); } };
   let n = 0;
   const api = {
-    role,
+    role, BASE,
     async req(method, url, body, ct) {
       const r = await fetch(BASE + url, { method, redirect: 'manual', headers: { cookie: cookie(), 'x-stemi-role': role, ...(body ? { 'content-type': ct || 'application/json' } : {}) }, body: body ? (ct ? body : JSON.stringify(body)) : undefined });
       take(r); let b = null; try { b = await r.json(); } catch (_) { /* not JSON */ }
@@ -91,18 +91,33 @@ function Api(BASE, role) {
   };
   return api;
 }
-/* a complete crew SEND through the API (for tests that are about what happens after it) */
+/* the test console's corpuls simulator, acting on the simulated monitor of one case (TEST ONLY) */
+const CONSOLES = new Map();
+async function testConsole(BASE) {
+  if (!CONSOLES.has(BASE)) { const c = Api(BASE, 'control'); await c.start(); CONSOLES.set(BASE, c); }
+  return CONSOLES.get(BASE);
+}
+async function sim(BASE, c, action, body) { return (await testConsole(BASE)).req('POST', '/api/control/corpuls/' + action, { cad: c, ...(body || {}) }); }
+/* a complete crew SEND through the API (for tests that are about what happens after it): the case is created and linked
+   to the simulated corpuls monitor, ECG 1 arrives from it, then the crew's four items are sent.
+   opts.manual: the manual ECG fallback instead (an uploaded image, no corpuls) */
 async function apiSend(crew, c, opts) {
   opts = opts || {};
-  const cr = await crew.req('POST', '/api/cases', { cad: c, cid: 'cid-' + c, openedAt: Date.now() - 120e3 });
-  const up = await crew.upload(c);
+  const cr = await crew.req('POST', '/api/cases', { cad: c, cid: 'cid-' + c, openedAt: Date.now() - 120e3, link: !opts.manual });
   const t = Date.now();
   const md = {
     age: { v: '58 y', raw: { v: 58 }, t }, sex: { v: 'Male', raw: { v: 'Male' }, t }, complaint: { v: 'Chest pain', raw: { k: 'cp' }, t },
-    onset: { v: 'Unknown', raw: { nv: 'Unknown' }, t }, bp: { v: '142/88 mmHg', raw: { sys: 142, dia: 88 }, t }, hr: { v: '88 bpm', raw: { v: 88 }, t },
-    spo2: { v: '97 %', raw: { v: 97 }, t }, gcs: { v: '15', raw: { v: 15 }, t }
+    onset: { v: 'Unknown', raw: { nv: 'Unknown' }, t }
   };
-  const r = await crew.one(c, 'submit', { sendAt: t, md, ecg: { n: 1, acq: t - 60e3, variant: opts.variant || 'border', pri: 1, imgs: [{ i: 1, kind: 'full', q: 'file', at: t - 60e3, imageId: up.body && up.body.id }] } });
+  let ecg = null;
+  if (opts.manual) {
+    const up = await crew.upload(c);
+    ecg = { n: 1, acq: t - 60e3, variant: opts.variant || 'border', pri: 1, imgs: [{ i: 1, kind: 'full', q: 'file', at: t - 60e3, imageId: up.body && up.body.id }] };
+  } else {
+    await sim(crew.BASE, c, 'connect');
+    await sim(crew.BASE, c, 'trigger-ecg', { sample: opts.sample || 'A' });
+  }
+  const r = await crew.one(c, 'submit', { sendAt: t, md, ecg });
   return { created: cr.status, submit: r };
 }
 
@@ -137,27 +152,31 @@ async function clinPage(browser, BASE, role, errors, ctxOpts) {
   await sleep(400);
   return { ctx, page, tones: () => page.evaluate(() => window.__tones.length) };
 }
-/* the crew's whole new-case pathway through the screen: CAD → ECG (fictional test image) → minimum data → SEND */
+/* the crew's whole new-case pathway through the screen: OPEN STEMI PATHWAY → CAD number → LINK CORPULS → ECG 1 arrives
+   from the simulated corpuls (the test console triggers the acquisition) → age, sex, complaint, onset → SEND TO ER.
+   opts.fallback: corpuls is not used; the crew adds ECG 1 with the manual ECG fallback (fictional test image) */
 async function crewNewCase(page, c, opts) {
   opts = opts || {};
+  const BASE = new URL(page.url()).origin;
   await page.click('[data-act="home"]').catch(() => {});
   await page.click('[data-act="new-case"]');
-  if (await page.isVisible('[data-act="draft-discard"]') && await page.isVisible('.modal')) { await page.click('.modal [data-act="draft-discard"]'); await page.click('[data-act="draft-discard-go"]'); await page.click('[data-act="new-case"]'); }
+  if (await page.isVisible('.modal [data-act="draft-discard"]')) { await page.click('.modal [data-act="draft-discard"]'); await page.click('[data-act="draft-discard-go"]'); await page.click('[data-act="new-case"]'); }
   await page.waitForSelector('#cadin');
   await page.fill('#cadin', opts.typed || c);
   await page.click('[data-act="cad-ok"]');
-  await page.waitForSelector('[data-act="img-add"]');
-  for (let i = 0; i < (opts.images || 1); i++) { await page.click('[data-act="img-add"]'); await page.click('[data-act="img-gen"]'); await sleep(150); }
-  await page.click('[data-act="step"][data-k="md"]');
-  await page.waitForSelector('#md-age');
+  await page.waitForSelector('#d-bar .cbar', { timeout: 10000 });
+  if (opts.fallback) {
+    for (let i = 0; i < (opts.images || 1); i++) { await page.click('[data-act="fb-draft"], [data-act="img-add"]'); await page.click('[data-act="img-gen"]'); await sleep(150); }
+  } else {
+    await page.waitForSelector('.cbar--ok', { timeout: 10000 });
+    await sim(BASE, c, 'trigger-ecg', { sample: opts.sample || 'A' });
+    await page.waitForSelector('#d-viewer:not([hidden]) .ecgv__scroll img', { timeout: 10000 });
+  }
   await page.fill('#md-age', String(opts.age || 58));
   await page.click(`[data-act="md-set"][data-k="sex"][data-v="${opts.sex || 'Male'}"]`);
   await page.click('[data-act="md-set"][data-k="complaint"][data-v="cp"]');
   await page.click('[data-act="md-ago"][data-m="30"]');
-  await page.fill('#md-sys', '142'); await page.fill('#md-dia', '88');
-  await page.fill('#md-hr', '88'); await page.fill('#md-spo2', '97'); await page.fill('#md-gcs', '15');
-  await page.click('[data-act="md-done"]');
-  await page.waitForSelector('[data-act="send"]:not([disabled])');
+  await page.waitForSelector('[data-act="send"]:not([aria-disabled="true"])');
   if (opts.noSend) return;
   await page.click('[data-act="send"]');
   await page.waitForSelector(`.case-h__cad:has-text("CAD #${c}")`, { timeout: 20000 });
@@ -173,4 +192,4 @@ async function shot(page, name, full) {
   await page.screenshot({ path: path.join(OUT, name + '.png'), fullPage: !!full }).catch(() => {});
 }
 
-module.exports = { ROOT, OUT, sleep, cad, DAY, playwright, Results, startServer, db, auditOf, Api, apiSend, SOUND_PROBE, PHONE, watch, crewPage, clinPage, crewNewCase, giveName, shot };
+module.exports = { ROOT, OUT, sleep, cad, DAY, playwright, Results, startServer, db, auditOf, Api, apiSend, testConsole, sim, SOUND_PROBE, PHONE, watch, crewPage, clinPage, crewNewCase, giveName, shot };

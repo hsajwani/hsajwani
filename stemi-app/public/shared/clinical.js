@@ -1,10 +1,10 @@
 /* Shared clinical components for every role (window.CLIN):
-   the ECG viewer, the AI decision-support panel, the patient data, the clinical timeline, the Case Summary, the crew's
-   pathway progress, the clinician name prompt and the audible alarm.
+   the ECG viewer, the live monitor data from corpuls, the AI decision-support panel, the patient data, the clinical
+   timeline, the Case Summary, the crew's pathway progress, the clinician name prompt and the audible alarm.
    They only display the shared case record; nothing here decides anything clinical. */
 (function () {
   'use strict';
-  const { esc, icon, hm, hms, when, now, modal, dlg } = window.UI;
+  const { esc, icon, hm, hms, when, dur, now, modal, dlg } = window.UI;
   const RULES = window.RULES;
 
   /* ---------- reading the record ---------- */
@@ -17,14 +17,118 @@
   const MDL = { age: 'Age', sex: 'Sex', complaint: 'Complaint', onset: 'Symptom onset', bp: 'BP', hr: 'HR', spo2: 'SpO₂', gcs: 'GCS' };
   const AIST = { proc: 'AI analysis processing', ok: 'AI analysis completed', lim: 'AI interpretation limited — ECG quality insufficient', wh: 'AI interpretation limited — ECG quality insufficient', down: 'AI interpretation unavailable' };
   const imgName = (e, x) => (x.i === e.pri ? `Image ${x.i} (Primary)` : `Image ${x.i}`);
+  /* where an ECG came from: the corpuls feed normally, the crew's manual fallback otherwise */
+  const SRC = { corpuls: 'from corpuls', manual_fallback: 'manual fallback (photo)', test: 'test ECG' };
+  const ecgSrc = e => (e && SRC[e.src]) || 'crew photo';
+
+  /* ---------- the corpuls feed: live vital signs, the connection, and how fresh the data is ----------
+     Values are never erased: when the feed stops they stay, marked with the time they were received. "Not updating"
+     is a technical freshness indicator only (three missed updates of the feed), never a clinical threshold. */
+  function monState(rec) {
+    const m = rec && rec.monitor;
+    if (!m) return { kind: 'none', m: null };
+    if (m.ended || RULES.isClosed(rec.state)) return { kind: 'ended', m };
+    if (m.status === 'waiting') return { kind: 'waiting', m };
+    if (m.status === 'connected') return { kind: m.last && now() - m.last > (m.every || 5000) * 3 ? 'stale' : 'live', m };
+    return { kind: 'lost', m };
+  }
+  /* the latest value of each vital sign: from corpuls, or entered by the crew (the manual fallback, or a case made
+     before 0.6.0), whichever is newer */
+  function vitals(rec) {
+    const v = (rec.monitor && rec.monitor.v) || {}, out = {};
+    const crewVal = k => { const x = cur(rec, k); return x && (isNv(x) || x.raw) ? x : null; };
+    const fromCrew = (x, val) => ({ v: isNv(x) ? x.v : val, nv: isNv(x), at: x.t || x.rcv, src: x.kind === 'fallback' ? 'fallback' : 'crew' });
+    const one = (k, mv, mt) => {
+      const x = crewVal(k), xt = x ? x.t || x.rcv : 0;
+      if (mv != null && (!x || mt >= xt)) return { v: String(mv), at: mt, src: 'corpuls' };
+      if (x) return fromCrew(x, x.raw && x.raw.v != null ? String(x.raw.v) : x.v);
+      return null;
+    };
+    out.hr = one('hr', v.hr, v.at); out.spo2 = one('spo2', v.spo2, v.at); out.rr = one('rr', v.rr, v.at);
+    const xb = crewVal('bp'), xbt = xb ? xb.t || xb.rcv : 0, bt = v.bpAt || v.at;
+    if (v.sys != null && (!xb || bt >= xbt)) out.bp = { v: `${v.sys}/${v.dia}`, at: bt, src: 'corpuls' };
+    else if (xb) out.bp = fromCrew(xb, xb.raw && xb.raw.sys != null ? `${xb.raw.sys}/${xb.raw.dia}` : xb.v);
+    const g = crewVal('gcs');
+    if (g) out.gcs = fromCrew(g, g.raw && g.raw.v != null ? String(g.raw.v) : g.v);
+    return out;
+  }
+  const VL = { hr: 'HR', spo2: 'SpO₂', bp: 'BP', rr: 'RR', gcs: 'GCS' }, VU = { hr: 'bpm', spo2: '%', bp: 'mmHg', rr: '/min', gcs: '' };
+  /* "… ago" is filled in (and kept current) by tickAgo, so the HTML of a panel changes only when its data does */
+  const ago = t => (t ? `<span data-ago="${t}"></span>` : '');
+  const devLine = m => (m && m.label ? esc(m.label) : 'corpuls');
+  /* the state of the feed in words. role: crew sees CORPULS CONNECTION LOST, the clinicians LIVE MONITOR DATA
+     TEMPORARILY UNAVAILABLE */
+  function monWords(rec, role) {
+    const s = monState(rec), m = s.m, last = m && m.last;
+    const lastTxt = last ? `Last data received ${hms(last)}` : 'No data received yet';
+    switch (s.kind) {
+      case 'live': return { s, tone: 'ok', title: 'LIVE FROM CORPULS', sub: last ? `Updated ${ago(last)}` : 'Connected · waiting for the first values' };
+      case 'stale': return { s, tone: 'warn', title: `LAST DATA RECEIVED ${hms(last)}`, sub: `${ago(last)} · the monitor is connected but no new values are arriving` };
+      case 'waiting': return { s, tone: 'neutral', title: 'WAITING FOR CORPULS', sub: `Linked to ${devLine(m)} · values appear when the monitor connects` };
+      case 'lost': return { s, tone: 'warn', title: role === 'crew' ? 'CORPULS CONNECTION LOST' : 'LIVE MONITOR DATA TEMPORARILY UNAVAILABLE', sub: `${lastTxt}${last ? ` (${ago(last)})` : ''}${m.status === 'reconnecting' ? ' · reconnecting' : ' · monitor disconnected'}` };
+      case 'ended': return { s, tone: 'neutral', title: 'MONITOR FEED ENDED', sub: `${lastTxt}${m && m.endWhy ? ` · ${esc(m.endWhy)}` : ''}` };
+      default: return { s, tone: 'neutral', title: 'NO CORPULS DATA', sub: 'Vital signs entered by the crew' };
+    }
+  }
+  /* the live monitor as tiles (the crew's screen) */
+  function monitorPanel(rec, o) {
+    o = o || {};
+    const w = monWords(rec, o.role || 'crew'), V = vitals(rec), dim = w.s.kind !== 'live' ? ' is-dim' : '', m = w.s.m;
+    /* on the crew's screen the connection itself is in the corpuls bar: the panel only says how fresh the values are */
+    if ((o.role || 'crew') === 'crew') {
+      if (w.s.kind === 'waiting') { w.title = 'LIVE FROM CORPULS'; w.sub = 'No values yet: the monitor has not connected'; }
+      if (w.s.kind === 'lost') { w.title = m.last ? `LAST DATA RECEIVED ${hms(m.last)}` : 'NO DATA RECEIVED'; w.sub = `${m.last ? `${ago(m.last)} · ` : ''}corpuls connection lost`; }
+    }
+    const ks = ['hr', 'spo2', 'bp', 'rr'].concat(V.gcs ? ['gcs'] : []);
+    const tile = k => { const x = V[k], tag = x && x.src !== 'corpuls' ? `<span class="mtile__src">entered by the crew ${hm(x.at)}</span>` : '';
+      return `<div class="mtile mtile--${k}${x && !x.nv ? '' : ' is-none'}"><span class="mtile__k">${VL[k]}</span><span class="mtile__v">${x ? esc(x.v) : '—'}</span><span class="mtile__u">${x && !x.nv ? VU[k] : ''}${k === 'bp' && x && x.src === 'corpuls' ? ` · ${hm(x.at)}` : ''}</span>${tag}</div>`; };
+    return `<section class="mon mon--${w.tone}${dim}" aria-label="Live monitor data">
+      <div class="mon__h"><span class="mon__st">${w.s.kind === 'live' ? '<span class="mon__dot"></span>' : ''}${w.title}</span><span class="mon__sub">${w.sub}</span></div>
+      <div class="mtiles">${ks.map(tile).join('')}</div>
+      ${w.s.m ? `<div class="mon__f">${devLine(w.s.m)}${w.s.m.simulated ? ' · simulated feed' : ''}</div>` : ''}</section>`;
+  }
+  /* the live monitor as items of the patient strip (the ER Doctor's and the Cardiologist's screens) */
+  function monitorInline(rec, role) {
+    const V = vitals(rec), w = monWords(rec, role);
+    if (w.s.kind === 'none' && !Object.keys(V).some(k => V[k])) return '';
+    const dim = w.s.kind === 'live' || w.s.kind === 'none' ? '' : ' is-dim';
+    const item = k => { const x = V[k]; return `<span class="pstrip__item${dim}"><span class="k">${VL[k]}</span><span class="v${x && !x.nv ? ' val' : ''}">${x ? esc(x.v) : '—'}</span>${x && !x.nv && VU[k] ? `<span class="u">${VU[k]}</span>` : ''}${k === 'bp' && x && !x.nv ? `<span class="u">${hm(x.at)}</span>` : ''}</span>`; };
+    const st = w.s.kind === 'live' ? `<span class="pstrip__item mon-st mon-st--ok"><span class="mon__dot"></span><span>corpuls · ${w.s.m.last ? ago(w.s.m.last) : 'connected'}</span></span>`
+      : w.s.kind === 'none' ? '<span class="pstrip__item mon-st"><span>entered by the crew</span></span>'
+      : `<span class="pstrip__item mon-st mon-st--${w.tone}"><span><b>${w.title}</b>${w.s.kind === 'lost' || w.s.kind === 'ended' ? ` · ${w.s.m.last ? `last data ${hms(w.s.m.last)}` : 'no data received'}` : ''}</span></span>`;
+    return ['hr', 'spo2', 'bp', 'rr'].concat(V.gcs ? ['gcs'] : []).map(item).join('') + st;
+  }
+  /* the vital signs in full, with the feed's state and a few earlier readings */
+  function vitalsGroup(rec, role) {
+    const m = rec.monitor, V = vitals(rec), w = monWords(rec, role), H = (m && m.hist) || [];
+    const earlier = (k, x) => {
+      if (!x || x.src !== 'corpuls') return '';
+      const seen = new Set([x.v]), out = [];
+      for (const h of H) {
+        const t = k === 'bp' ? h.bpAt : h.at, val = k === 'bp' ? (h.sys != null ? `${h.sys}/${h.dia}` : null) : h[k] != null ? String(h[k]) : null;
+        if (val == null || !t || t >= x.at || seen.has(val)) continue;
+        seen.add(val); out.push(`${esc(val)} (${hm(t)})`);
+        if (out.length >= 2) break;
+      }
+      return out.length ? `<span class="earlier">Earlier: ${out.join(' · ')}</span>` : '';
+    };
+    const row = k => { const x = V[k]; if (!x && k === 'gcs') return '';
+      return `<dt>${VL[k]}</dt><dd>${x ? (x.nv ? `<span class="nv">${esc(x.v)}</span>` : `<span class="val">${esc(x.v)}</span> ${VU[k]}`) : '<span class="nv">—</span>'}${x && !x.nv ? `<span class="when">${k === 'bp' && x.src === 'corpuls' ? 'measured ' : ''}${hm(x.at)}</span>` : ''}${x && x.src !== 'corpuls' ? ' <span class="tag">Entered by the crew</span>' : ''}${earlier(k, x)}</dd>`; };
+    const head = m ? `Vital signs · from corpuls${m.simulated ? ' (simulated)' : ''}` : 'Vital signs · entered by the crew';
+    return `<div class="kv-group"><div class="overline">${head}</div>${m ? `<p class="mon-line mon-line--${w.tone}"><b>${w.title}</b> · ${w.sub}</p>` : ''}<dl class="kv">${['hr', 'spo2', 'bp', 'rr', 'gcs'].map(row).join('')}</dl></div>`;
+  }
+  /* "… ago" stays current everywhere on the page, every second */
+  function tickAgo() { document.querySelectorAll('[data-ago]').forEach(el => { const t = +el.dataset.ago, x = t ? `${dur(now() - t)} ago` : ''; if (el.textContent !== x) el.textContent = x; }); }
+  setInterval(tickAgo, 1000);
+  /* patch a part of the page and fill in its "… ago" at once */
+  function paint(id, html) { const r = window.UI.patch(id, html); tickAgo(); return r; }
 
   /* ---------- patient strip: the basics at a glance ---------- */
-  function ptStrip(rec, extra) {
+  function ptStrip(rec, extra, role) {
     const item = (k, v, data) => `<span class="pstrip__item"><span class="k">${k}</span><span class="v${data ? ' val' : ''}">${v}</span></span>`;
     const age = cur(rec, 'age'), sex = cur(rec, 'sex'), cpl = cur(rec, 'complaint'), on = cur(rec, 'onset');
-    const vit = ['bp', 'hr', 'spo2', 'gcs'].map(k => { const x = cur(rec, k); return item(MDL[k], vText(x), x && !isNv(x)); }).join('');
     const e = latest(rec);
-    return `<div class="pstrip" aria-label="Patient summary">${item('Age', vText(age), age && !isNv(age))}${item('Sex', vText(sex))}${item('Complaint', vText(cpl))}${item('Onset', vText(on))}${vit}${e ? item('ECG ' + e.n, `acquired <span class="val">${hm(e.acq)}</span>`) : ''}${extra || ''}</div>`;
+    return `<div class="pstrip" aria-label="Patient summary">${item('Age', vText(age), age && !isNv(age))}${item('Sex', vText(sex))}${item('Complaint', vText(cpl))}${item('Onset', vText(on))}${monitorInline(rec, role)}${e ? item('ECG ' + e.n, `acquired <span class="val">${hm(e.acq)}</span>`) : ''}${extra || ''}</div>`;
   }
 
   /* ---------- the minimum data in full: latest value, its time, and every earlier value kept ---------- */
@@ -40,9 +144,11 @@
       return `<dt>${MDL[k]}</dt><dd>${isNv(c) ? vText(c) : `<span class="${timed ? 'val' : ''}">${esc(c.v)}</span>`}${timed && !isNv(c) ? `<span class="when">${hm(c.t)}</span>` : ''}${kind}${isNew(c) ? ' <span class="tag tag--new">NEW</span>' : ''}${earlier}</dd>`;
     };
     const tx = Object.values(rec.rec || {}).flatMap(r => r.vers.map(v => ({ label: r.label, ...v }))).sort((a, b) => a.t - b.t);
-    const ecgs = rec.ecgs.map(e => `<dt>ECG ${e.n}</dt><dd>acquired <span class="val">${hms(e.acq)}</span>${e.n > 1 ? `<span class="when">received ${hm(e.rcv)}</span>` : ''}${e.rcv > since && e.n > 1 ? ' <span class="tag tag--new">NEW</span>' : ''}${e.why ? `<span class="earlier">Time set by the crew: ${esc(e.why)}</span>` : ''}</dd>`).join('');
+    const ecgs = rec.ecgs.map(e => `<dt>ECG ${e.n}</dt><dd>acquired <span class="val">${hms(e.acq)}</span><span class="when">${ecgSrc(e)}${e.n > 1 || e.src === 'corpuls' ? ` · received ${hm(e.rcv)}` : ''}</span>${e.rcv > since && e.n > 1 ? ' <span class="tag tag--new">NEW</span>' : ''}${e.why ? `<span class="earlier">Time set by the crew: ${esc(e.why)}</span>` : ''}</dd>`).join('');
+    /* vital signs: from the corpuls feed (0.6.0); the crew's own entries for older cases */
+    const vit = o.vitals === false ? '' : rec.monitor ? vitalsGroup(rec, o.role) : `<div class="kv-group"><div class="overline">Vital signs · latest first</div><dl class="kv">${row('bp', 1)}${row('hr', 1)}${row('spo2', 1)}${row('gcs', 1)}</dl></div>`;
     return `<div class="kv-group"><div class="overline">Patient</div><dl class="kv">${row('age')}${row('sex')}${row('complaint')}${row('onset')}</dl></div>
-      <div class="kv-group"><div class="overline">Vital signs · latest first</div><dl class="kv">${row('bp', 1)}${row('hr', 1)}${row('spo2', 1)}${row('gcs', 1)}</dl></div>
+      ${vit}
       <div class="kv-group"><div class="overline">ECG acquisition</div><dl class="kv">${ecgs || '<dt>ECG</dt><dd><span class="nv">None yet</span></dd>'}</dl></div>
       <div class="kv-group"><div class="overline">Crew / unit</div><dl class="kv"><dt>Unit</dt><dd>${esc(rec.unit)}${rec.emirate ? ` · ${esc(rec.emirate)}` : ''}</dd><dt>Crew</dt><dd>${esc(rec.crew)}</dd></dl></div>
       ${tx.length ? `<div class="kv-group"><div class="overline">Treatment updates</div><dl class="kv">${tx.map(x => `<dt>${esc(x.label)}</dt><dd>${esc(x.v)}<span class="when">${hm(x.t)}</span>${x.rcv > since ? ' <span class="tag tag--new">NEW</span>' : ''}</dd>`).join('')}</dl></div>` : ''}`;
@@ -83,10 +189,14 @@
     const er = rec.er || {}, cd = rec.cardio || {};
     add(rec.path && rec.path.at, `STEMI pathway opened · CAD #${rec.cad}`, 'minor', rec.crew);
     rec.ecgs.forEach(e => {
-      add(e.acq, `ECG ${e.n} acquired${e.imgs.length > 1 ? ` · ${e.imgs.length} images` : ''}`, 'key');
-      if (e.n > 1) add(e.rcv, `ECG ${e.n} received${e.rcv && rec.dec.some(d => d.k === 'repeat' && d.on === e.n - 1) ? ' · repeat ECG as requested' : ''}`, 'minor');
+      const rep = rec.dec.some(d => d.k === 'repeat' && d.on === e.n - 1) ? ' · repeat ECG as requested' : '';
+      add(e.acq, `ECG ${e.n} acquired${e.src === 'corpuls' ? ' on corpuls' : ''}${e.imgs.length > 1 ? ` · ${e.imgs.length} images` : ''}`, 'key');
+      if (e.src === 'corpuls') add(e.rcv, `ECG ${e.n} received from corpuls${rep}`, 'minor');
+      else if (e.n > 1) add(e.rcv, `ECG ${e.n} received${rep}`, 'minor');
       if (e.ai && e.ai.done) add(e.ai.done, `AI decision support, ECG ${e.n}: ${AIST[e.ai.st]}`, 'minor');
     });
+    /* the corpuls feed's significant moments (never the routine samples) */
+    ((rec.monitor && rec.monitor.log) || []).forEach(l => { if (l.kind !== 'ecg') add(l.at, l.text, l.kind === 'lost' || l.kind === 'fallback' ? 'warn' : 'minor'); });
     if (rec.sub) add(rec.sub.send, `Sent to the ER by ${rec.unit}`, 'key', rec.crew);
     if (!rec.legacy) {
       add(er.accepted, `Accepted by ${er.name} (ER Doctor)`, 'key');
@@ -120,13 +230,15 @@
   function summary(rec, role) {
     const er = rec.er || {}, cd = rec.cardio || {}, sec = (title, body) => `<section class="card"><div class="card__h"><h2>${title}</h2></div><div class="card__b">${body}</div></section>`;
     const age = cur(rec, 'age'), sex = cur(rec, 'sex'), cpl = cur(rec, 'complaint'), on = cur(rec, 'onset');
-    const vit = ['bp', 'hr', 'spo2', 'gcs'].map(k => { const x = cur(rec, k); return `${MDL[k]} ${x ? (isNv(x) ? esc(x.v) : `<span class="val">${esc(x.v)}</span>`) : '–'}`; }).join(' · ');
+    const V = vitals(rec), m = rec.monitor;
+    const vit = ['hr', 'spo2', 'bp', 'rr'].concat(V.gcs ? ['gcs'] : []).map(k => { const x = V[k]; return `${VL[k]} ${x ? (x.nv ? esc(x.v) : `<span class="val">${esc(x.v)}</span> ${VU[k]}`) : '–'}`; }).join(' · ');
     const caseB = `<dl class="kv kv--wide">
       <dt>CAD</dt><dd><span class="cad">CAD #${esc(rec.cad)}</span></dd>
       <dt>Status</dt><dd>${window.UI.badge(rec.state, role)}</dd>
       <dt>Patient</dt><dd>${vText(age)} · ${vText(sex)} · ${vText(cpl)}</dd>
       <dt>Symptom onset</dt><dd>${vText(on)}</dd>
-      <dt>Latest vital signs</dt><dd>${vit}</dd>
+      <dt>Latest monitor data</dt><dd>${vit}${m && m.last ? `<span class="earlier">Last monitor update ${hms(m.last)}${V.bp && V.bp.src === 'corpuls' ? ` · BP measured ${hms(V.bp.at)}` : ''}</span>` : ''}</dd>
+      <dt>Monitor feed</dt><dd>${m ? `${devLine(m)}${m.simulated ? ' · simulated feed' : ''}<span class="earlier">${monWords(rec, role).title}${m.linked ? ` · linked ${when(m.linked)}` : ''}</span>` : '<span class="nv">No corpuls link</span>'}</dd>
       <dt>Crew / unit</dt><dd>${esc(rec.unit)} · ${esc(rec.crew)}</dd>
       <dt>Pathway opened</dt><dd>${when(rec.path && rec.path.at)}</dd>
       <dt>Sent to ER</dt><dd>${rec.sub ? when(rec.sub.send) : 'Not sent'}</dd></dl>`;
@@ -149,8 +261,8 @@
         <dt>${rec.closed || (d && d.k === 'confirm') ? 'Final decision' : 'Decision'}</dt><dd>${d ? `<b>${esc(RULES.DECISIONS[d.k])}</b><span class="when">${when(d.at)} · ${esc(d.by)}</span>${d.reason ? `<span class="earlier">Reason: ${esc(d.reason)}</span>` : ''}${d.note ? `<span class="earlier">Note to the crew: ${esc(d.note)}</span>` : ''}${d.adv ? `<span class="earlier">Advice: ${esc(d.adv)}</span>` : ''}${d.instr ? `<span class="earlier">Instruction: ${esc(d.instr)}</span>` : ''}` : '<span class="nv">No decision yet</span>'}</dd>
         ${earlier.length ? `<dt>Earlier decisions</dt><dd>${earlier.map(x => `${esc(RULES.DECISIONS[x.k])} <span class="when">${when(x.at)} · ${esc(x.by)}</span>`).join('<br>')}</dd>` : ''}</dl>`;
     }
-    const ecgB = rec.ecgs.length ? rec.ecgs.map(e => `<div class="kv-group"><div class="row"><b>ECG ${e.n}</b><span class="muted small">acquired ${hms(e.acq)} · received ${when(e.rcv)} · ${e.imgs.length} image${e.imgs.length > 1 ? 's' : ''}</span></div>
-        <div class="row" style="margin-top:8px">${e.imgs.map(x => `<button class="thumb" data-act="sum-img" data-n="${e.n}" data-i="${x.i}" aria-label="ECG ${e.n}, ${imgName(e, x)}, open full screen"><img src="${esc(x.url)}" alt="" loading="lazy"><b>${imgName(e, x)}</b><span>${hms(x.at)}</span></button>`).join('')}</div>
+    const ecgB = rec.ecgs.length ? rec.ecgs.map(e => `<div class="kv-group"><div class="row"><b>ECG ${e.n}</b><span class="tag${e.src === 'corpuls' ? ' tag--primary' : ''}">${esc(ecgSrc(e))}</span><span class="muted small">acquired ${hms(e.acq)} · received ${when(e.rcv)}${e.src === 'corpuls' ? '' : ` · ${e.imgs.length} image${e.imgs.length > 1 ? 's' : ''}`}</span></div>
+        <div class="row" style="margin-top:8px">${e.imgs.map(x => `<button class="thumb" data-act="sum-img" data-n="${e.n}" data-i="${x.i}" aria-label="ECG ${e.n}, ${e.src === 'corpuls' ? '12-lead from corpuls' : imgName(e, x)}, open full screen"><img src="${esc(x.url)}" alt="" loading="lazy"><b>${e.src === 'corpuls' ? '12-lead ECG' : imgName(e, x)}</b><span>${hms(x.at)}</span></button>`).join('')}</div>
         <p class="small muted" style="margin-top:8px">AI decision support: ${esc(e.ai ? AIST[e.ai.st] : 'not started')}${e.ai && e.ai.imp ? ` · ${esc(e.ai.imp)}` : ''}</p></div>`).join('') : '<p class="muted">No ECG.</p>';
     const closeB = rec.closed ? sec('Pathway closure', `<dl class="kv kv--wide"><dt>Closed</dt><dd>${when(rec.closed.at)} · ${esc(rec.closed.by || '')}</dd><dt>Reason</dt><dd>${esc(rec.closed.reason)}</dd><dt>Source</dt><dd>${esc(rec.closed.source)}</dd></dl><p class="small muted" style="margin-top:12px">${icon('lock', 'ico-sm')} Read-only. Closing the STEMI pathway does not change the CAD incident.</p>`) : '';
     return `<div class="stack">${sec('Case', caseB)}${sec('ER review', erB)}${sec('Cardiology', cdB)}${sec('ECGs', ecgB)}${closeB}${sec('Timeline', timelineHtml(rec))}</div>`;
@@ -206,10 +318,12 @@
     }
     /* the case record changed; a different case starts at its latest ECG */
     set(rec) {
-      const other = !this.rec || this.rec.cad !== rec.cad;
+      const other = !this.rec || this.rec.cad !== rec.cad, L = latest(rec);
       this.rec = rec;
-      if (other) { this.n = latest(rec) ? latest(rec).n : null; this.img = {}; this.zoom = 1; this.cmp = null; }
-      if (this.n == null && latest(rec)) this.n = latest(rec).n;
+      if (other) { this.n = L ? L.n : null; this.img = {}; this.zoom = 1; this.cmp = null; this.top = L ? L.n : null; }
+      /* follow: the crew's screen shows each new ECG as it arrives (they acquired it) */
+      if (this.o.follow && L && L.n !== this.top) { this.n = L.n; this.cmp = null; this.zoom = 1; this.top = L.n; }
+      if (this.n == null && L) this.n = L.n;
       this.render();
       this.notify();
     }
@@ -253,10 +367,11 @@
             <div class="ecgv__cap"><b>ECG ${g.n} · ${imgName(g, y)}</b><span>image ${hms(y.at)}</span></div></div>`;
         }).join('')}</div>`;
       } else {
-        body = `<div class="ecgv__stage"><div class="ecgv__scroll${this.zoom > 1 ? ' is-zoomed' : ''}" tabindex="0" role="img" aria-label="ECG ${e.n}, ${imgName(e, x)}, as photographed by the crew. Zoom ${Math.round(this.zoom * 100)} percent. Plus and minus keys zoom.">
+        const mon = e.src === 'corpuls';
+        body = `<div class="ecgv__stage"><div class="ecgv__scroll${this.zoom > 1 ? ' is-zoomed' : ''}" tabindex="0" role="img" aria-label="ECG ${e.n}, ${mon ? 'received from corpuls' : `${imgName(e, x)}, ${e.src === 'manual_fallback' ? 'manual fallback photo' : 'as photographed by the crew'}`}. Zoom ${Math.round(this.zoom * 100)} percent. Plus and minus keys zoom.">
             <img src="${esc(x.url)}" alt="" draggable="false"></div>${!this.o.fs && this.zoom === 1 ? '<span class="ecgv__hint">Tap for full screen</span>' : ''}</div>
           ${e.imgs.length > 1 ? `<div class="ecgv__imgs" role="group" aria-label="Images of ECG ${e.n}">${e.imgs.map(y => `<button class="thumb" data-v="img" data-i="${y.i}" aria-pressed="${y.i === x.i}" aria-label="${imgName(e, y)}"><img src="${esc(y.url)}" alt="" loading="lazy"><b>${imgName(e, y)}${y.after ? ' <span class="tag">Added later</span>' : ''}</b><span>${hms(y.at)}</span></button>`).join('')}</div>` : ''}
-          <div class="ecgv__cap"><b>ECG ${e.n} of ${R.ecgs.length} · ${imgName(e, x)}${e.imgs.length > 1 ? ` of ${e.imgs.length}` : ''}</b><span>acquired ${hms(e.acq)}</span><span>image ${hms(x.at)}</span>${e.n > 1 ? `<span>received ${hm(e.rcv)}</span>` : ''}<span>CAD #${esc(R.cad)}</span>${this.o.fs && innerWidth < 600 && innerHeight > innerWidth ? '<span>Turn the phone sideways for a larger view</span>' : ''}</div>`;
+          <div class="ecgv__cap"><b>ECG ${e.n} of ${R.ecgs.length}${mon ? '' : ` · ${imgName(e, x)}${e.imgs.length > 1 ? ` of ${e.imgs.length}` : ''}`}</b><span class="ecgv__src${mon ? ' is-mon' : ''}">${esc(ecgSrc(e))}</span><span>acquired ${hms(e.acq)}</span>${mon ? '' : `<span>image ${hms(x.at)}</span>`}${e.n > 1 || mon ? `<span>received ${hm(e.rcv)}</span>` : ''}<span>CAD #${esc(R.cad)}</span>${this.o.fs && innerWidth < 600 && innerHeight > innerWidth ? '<span>Turn the phone sideways for a larger view</span>' : ''}</div>`;
       }
       this.el.innerHTML = `<div class="ecgv__bar"><div class="ecgv__tabs" role="tablist" aria-label="ECGs in this case">${tabs}${cmpBtn}</div>${tools}${closeCmp}</div>${newer}${body}`;
       const img = this.el.querySelector('.ecgv__scroll img');
@@ -489,5 +604,6 @@
     };
   }
 
-  window.CLIN = { latest, ecgN, imgOf, cur, isNv, vText, MDL, AIST, STATEMENT, ptStrip, ptDetails, aiPanel, timeline, timelineHtml, summary, progress, Viewer, showFull, updateFull, closeFull, identity, namePrompt, Alarm };
+  window.CLIN = { latest, ecgN, imgOf, cur, isNv, vText, MDL, AIST, STATEMENT, ecgSrc, monState, monWords, vitals, monitorPanel, monitorInline, vitalsGroup, tickAgo, paint,
+    ptStrip, ptDetails, aiPanel, timeline, timelineHtml, summary, progress, Viewer, showFull, updateFull, closeFull, identity, namePrompt, Alarm };
 })();

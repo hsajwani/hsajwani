@@ -142,7 +142,7 @@
     return `<div id="c-head"></div><div id="c-strip" style="margin-bottom:16px"></div>
       <div class="review"><div class="review__main"><div id="c-viewer" class="o-1"></div><div id="c-ai" class="o-4"></div></div>
       <div class="review__side"><div id="c-decide" class="o-2"></div>
-        <section class="card o-3"><div class="card__h"><h2>Clinical information</h2><span class="sp"></span><span class="small muted">from the crew · read only</span></div><div class="card__b" id="c-details"></div></section>
+        <section class="card o-3"><div class="card__h"><h2>Clinical information</h2><span class="sp"></span><span class="small muted">from the crew and corpuls · read only</span></div><div class="card__b" id="c-details"></div></section>
         <section class="card o-5"><div class="card__h"><h2>Timeline</h2></div><div class="card__b" id="c-tl"></div></section></div></div>`;
   }
   function caseHead(r) {
@@ -187,11 +187,11 @@
     const r = cur();
     if (!r || S.view !== 'case') return;
     patch('c-head', caseHead(r));
-    patch('c-strip', CLIN.ptStrip(r));
+    CLIN.paint('c-strip', CLIN.ptStrip(r, '', ROLE));
     viewer.set(r); CLIN.updateFull(r);
     patch('c-ai', viewer.cmp ? '' : CLIN.aiPanel(viewer.e || CLIN.latest(r)));
     patch('c-decide', decideCard(r));
-    patch('c-details', CLIN.ptDetails(r, { since: S.since[r.cad] }));
+    CLIN.paint('c-details', CLIN.ptDetails(r, { since: S.since[r.cad], role: ROLE }));
     patch('c-tl', CLIN.timelineHtml(r));
   }
 
@@ -382,13 +382,23 @@
         if (m.rec && RULES.isClosed(m.rec.state) && (!was || !RULES.isClosed(was.state))) { S.hist = S.hist && S.hist.filter(x => x.cad !== m.cad); loadHist(); }
         break;
       }
+      /* new vital signs from the case's corpuls feed: only the live values are redrawn */
+      case 'monitor': { const r = S.cases.get(m.cad); if (r) { r.monitor = m.mon; if (S.view === 'case' && S.cad === m.cad) patchMonitor(); } return; }
       case 'net': S.up = m.up; break;
       case 'hb': UI.setClock(m.at); return;
       default: return;
     }
     render();
   }
+  /* the live values on the case on screen (the freshness of the corpuls data changes with time alone) */
+  function patchMonitor() {
+    const r = cur();
+    if (!r || S.view !== 'case') return;
+    CLIN.paint('c-strip', CLIN.ptStrip(r, '', ROLE));
+    CLIN.paint('c-details', CLIN.ptDetails(r, { since: S.since[r.cad], role: ROLE }));
+  }
   render();
   LIVE = Live({ role: ROLE, onMsg });
   setInterval(render, 15000);
+  setInterval(patchMonitor, 2000);
 })();

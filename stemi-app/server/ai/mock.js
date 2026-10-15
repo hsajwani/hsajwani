@@ -30,7 +30,8 @@ const QTXT = {
   ok: 'Suitable: all 12 leads, calibration pulse and rhythm strip visible',
   lim: 'Limited: glare over limb leads I, II and III',
   wh: 'Not suitable: leads V4 to V6 cut off at the edge of the image',
-  file: 'Not assessed: uploaded image file. The simulated AI does not read images; these are the scripted test findings'
+  file: 'Not assessed: uploaded image file. The simulated AI does not read images; these are the scripted test findings',
+  corpuls: 'Digital 12-lead from the simulated corpuls feed. The simulated AI does not read the ECG; these are the scripted test findings'
 };
 
 function serial(ecg, st, prev) {
@@ -46,18 +47,19 @@ function serial(ecg, st, prev) {
   return { ...base, h: s.h, t };
 }
 
-/* analyse({ecg:{n,acq,variant,same,pri,primary:{quality,source}}, previous:{n,acq,ai}|null, unavailable})
+/* analyse({ecg:{n,acq,variant,same,pri,rate,primary:{quality,source}}, previous:{n,acq,ai}|null, unavailable})
+   rate: the heart rate the monitor reported with a corpuls 12-lead (the image is drawn at it)
    → {st, result}. st: ok | lim (limited by quality) | wh (not suitable) | down (unavailable) */
 async function analyse({ ecg, previous, unavailable }) {
-  const q = ecg.primary.quality, file = ecg.primary.source === 'file';
+  const q = ecg.primary.quality, file = ecg.primary.source === 'file', mon = ecg.primary.source === 'corpuls';
   const st = unavailable ? 'down' : q === 'glare' ? 'lim' : q === 'cut' ? 'wh' : 'ok';
   const T = AIT[ecg.variant] || AIT.clear, lim = st === 'lim';
-  const out = { q: file ? QTXT.file : QTXT[st] || null, ver: VERSION, pri: ecg.pri, provider: 'mock' };
+  const out = { q: mon ? QTXT.corpuls : file ? QTXT.file : QTXT[st] || null, ver: VERSION, pri: ecg.pri, provider: 'mock' };
   if (st === 'ok' || st === 'lim') {
     Object.assign(out, {
-      rhy: T.rhy, rate: T.rate, ste: lim ? T.steL : T.ste, std: lim ? T.stdL : T.std, cond: 'No bundle branch block or AV block',
+      rhy: T.rhy, rate: ecg.rate ? `${ecg.rate} bpm` : T.rate, ste: lim ? T.steL : T.ste, std: lim ? T.stdL : T.std, cond: 'No bundle branch block or AV block',
       ser: serial(ecg, st, previous), imp: lim ? T.impL : T.imp,
-      conf: `${lim ? 'Model confidence: moderate, limited by image quality' : T.conf}. ${file ? 'Scripted test result for an uploaded file' : 'Read from a photograph of the printout'}`,
+      conf: `${lim ? 'Model confidence: moderate, limited by image quality' : T.conf}. ${mon ? 'Scripted test result for the simulated corpuls ECG' : file ? 'Scripted test result for an uploaded file' : 'Read from a photograph of the printout'}`,
       lim: lim ? { ste: 1, std: 1, imp: 1 } : {}
     });
   }

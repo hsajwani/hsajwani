@@ -35,7 +35,14 @@ module.exports = {
   AI_PROVIDER: process.env.AI_PROVIDER || 'mock',
   MOCK_AI_DELAY_MS: num(process.env.MOCK_AI_DELAY_MS, 5000),
   HEARTBEAT_MS: num(process.env.HEARTBEAT_MS, 5000),
-  MAX_IMAGE_BYTES: num(process.env.MAX_IMAGE_BYTES, 8 * 1024 * 1024)
+  MAX_IMAGE_BYTES: num(process.env.MAX_IMAGE_BYTES, 8 * 1024 * 1024),
+  /* the corpuls integration behind server/integrations/corpuls/: "mock" (simulated monitors, the only working provider)
+     or "corpuls-mission" (a stub: not implemented, connects to nothing) */
+  CORPULS_PROVIDER: process.env.CORPULS_PROVIDER || 'mock',
+  /* the simulated monitor: one vital-signs update every CORPULS_SIM_TICK_MS, a non-invasive BP measurement every
+     CORPULS_SIM_NIBP_SECONDS. Simulation settings, not clinical ones */
+  CORPULS_SIM_TICK_MS: num(process.env.CORPULS_SIM_TICK_MS, 5000),
+  CORPULS_SIM_NIBP_SECONDS: num(process.env.CORPULS_SIM_NIBP_SECONDS, 120)
   /* acknowledgement reminders and escalation are governance decisions not yet made (Q-15, Q-54, Q-72): nothing in this
      build reminds or escalates; the alarms continue until a clinician accepts / acknowledges */
 };

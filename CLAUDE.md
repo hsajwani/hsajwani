@@ -12,12 +12,16 @@ at `http://localhost:3000/control`) and iPhone (`http://<Mac IP>:3000/cardiologi
 2. If it is running, leave it running. Do not stop it at the end of a task, and do not tell the user to run `npm start`.
 3. Make the change. Backend changes (`server/`, `public/shared/cad.js`, `public/shared/rules.js`, `package.json`,
    `.env`) restart the server by themselves; screen changes in `public/` need only a browser refresh.
-4. Run the relevant tests: `npm run test:api` (no browser), `npm run test:acceptance`, `npm run test:pathway`,
-   `npm run test:cad`, and `npm run test:visual` after screen changes (Playwright; in the cloud container
-   `NODE_PATH=$(npm root -g)`). They use their own random ports and temporary databases and do not touch the
+4. Run the relevant tests: `npm run test:api` (no browser), `npm run test:corpuls`, `npm run test:acceptance`,
+   `npm run test:pathway`, `npm run test:cad`, and `npm run test:visual` after screen changes (Playwright; in the cloud
+   container `NODE_PATH=$(npm root -g)`). They use their own random ports and temporary databases and do not touch the
    development server or `data/`.
 5. Confirm the development server answers again: `npm run dev:status` (or `curl -s localhost:3000/health`).
 6. Never delete or reset `data/` (the test database) unless the user asks.
+
+The ECGs and vital signs come from a **simulated** corpuls feed (`server/integrations/corpuls/`, MockCorpulsProvider),
+driven from the test console's CORPULS SIMULATOR (`/control`). No real corpuls.mission is connected: never add real
+network calls or vendor API details without a supported, approved interface (see `stemi-app/docs/corpuls-integration.md`).
 
 Only ask the user to restart something manually if it genuinely cannot be done automatically.
 Note: a Claude Code cloud session runs in its own container, not on the user's Mac. Changes reach the Mac through

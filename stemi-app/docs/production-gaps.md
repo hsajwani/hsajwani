@@ -1,7 +1,7 @@
 # What must change before production
 
-This test build proves the crew → ER Doctor → cardiologist workflow with fictional data. It is **not** fit for
-real patient information. Real patient data stays out of every environment until hosting, InfoSec, privacy and
+This test build proves the crew → ER Doctor → cardiologist workflow with fictional data and a **simulated** corpuls
+feed. It is **not** fit for real patient information. Real patient data stays out of every environment until hosting, InfoSec, privacy and
 data-governance requirements are approved. Nothing below has been chosen yet: vendors, hosting and architecture are
 decided after design approval, with National Ambulance InfoSec and the governance bodies.
 
@@ -19,7 +19,8 @@ decided after design approval, with National Ambulance InfoSec and the governanc
 - **Authorisation.** Per-case access by role and organisation (an ER sees its own cases, a cardiologist the cases
   routed to them, their backup and ACC); the test build lets every ER screen see every sent case.
 - **The server as the authority for time.** The test build accepts the device's time for some events (it also
-  records the server's receipt time). Production records authoritative server times and synchronised device clocks.
+  records the server's receipt time). Production records authoritative server times and synchronised device clocks,
+  including the monitors' and corpuls.mission's clocks (ECG acquisition and vital-sign times come from them).
 - **InfoSec review**, penetration testing and vulnerability management before any pilot.
 
 ## Alerting (the production alarm requirement)
@@ -65,8 +66,19 @@ alerting method that covers at least:
 
 ## Integrations (later phases)
 
+- **corpuls / corpuls.mission.** The build simulates the feed (MockCorpulsProvider). The real connection
+  (RealCorpulsMissionProvider) is a placeholder. Writing it needs everything listed in
+  [corpuls-integration.md](corpuls-integration.md) from MEAD / corpuls:
+  - authentication, API documentation, payload formats and units;
+  - the event mechanism and delivery guarantees;
+  - CAD / mission and device mapping;
+  - sandbox access with test devices;
+  - retention, connection / retry / heartbeat rules, and clock synchronisation.
+
+  It also needs National Ambulance InfoSec approval, a data-sharing agreement, and data-protection and clinical-safety
+  approval. No real monitor data flows until then.
 - How the CAD number reaches the tablet in V1 (Q-70), then CAD integration.
-- ePCR, and ECG devices (corpuls, ZOLL, LIFEPAK). The core works without them.
+- ePCR, and other ECG devices (ZOLL, LIFEPAK). The manual ECG fallback stays for when no monitor feed is available.
 - Hospital, cath-lab, ACC and administration views (not built yet). The ED view in this build is the ER Doctor's
   screening step only.
 - An authorised amendment workflow for closed cases (a closed STEMI pathway is read-only here).

@@ -1,6 +1,7 @@
 /* The live link from a screen to the platform server.
    Down: Server-Sent Events — init (server clock, data epoch), cfg (test simulation), cases (every case this screen may
-   see, on connecting), case (one case changed; rec null = no longer on this screen), presence (test console), hb.
+   see, on connecting), case (one case changed; rec null = no longer on this screen), monitor (new vital signs from the
+   corpuls feed of a case this screen holds), corpuls (the simulator, test console), presence (test console), hb.
    Up: each action is POSTed to /api/ops with a unique id; the server stores it once, so a resend is harmless.
    Every request names the screen's role (X-Stemi-Role), which the server checks against the screen's session.
    The screen is told the link is down when the stream errors or no heartbeat arrives for STALE_MS. */
@@ -32,6 +33,9 @@
       es.addEventListener('cases', e => { seen(); set(true); const d = JSON.parse(e.data); onMsg({ t: 'cases', list: d.list, at: d.at }); });
       es.addEventListener('case', e => { seen(); set(true); const d = JSON.parse(e.data); onMsg({ t: 'case', cad: d.cad, rec: d.rec, at: d.at }); });
       es.addEventListener('presence', e => { seen(); onMsg({ t: 'presence', presence: JSON.parse(e.data) }); });
+      /* the corpuls feed: a vital-signs update of one case (small and frequent), and the simulator's state (test console) */
+      es.addEventListener('monitor', e => { seen(); const d = JSON.parse(e.data); onMsg({ t: 'monitor', cad: d.cad, mon: d.mon, at: d.at }); });
+      es.addEventListener('corpuls', e => { seen(); onMsg({ t: 'corpuls', sim: JSON.parse(e.data) }); });
       es.addEventListener('hb', e => { seen(); set(true); onMsg({ t: 'hb', at: JSON.parse(e.data).at }); });
       es.onerror = () => {
         set(false);

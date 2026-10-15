@@ -33,6 +33,14 @@ addColumn('audit_events', 'device', 'TEXT');
   ['cardiology_activated_at', 'INTEGER'], ['cardiology_activation_reason', 'TEXT'], ['cardiology_activated_by', 'TEXT'],
   ['cardiologist_name', 'TEXT'], ['cardiologist_acknowledged_at', 'INTEGER'], ['cardiologist_decision', 'TEXT'], ['cardiologist_decision_at', 'INTEGER']
 ].forEach(([c, t]) => addColumn('cases', c, t));
+/* 0.6.0: the corpuls feed on the case, and where each ECG came from (older ECGs keep these empty) */
+[['corpuls_provider', 'TEXT'], ['corpuls_device_id', 'TEXT'], ['corpuls_device_label', 'TEXT'], ['corpuls_linked_at', 'INTEGER'], ['corpuls_linked_by', 'TEXT'],
+  ['corpuls_status', 'TEXT'], ['corpuls_status_at', 'INTEGER'], ['corpuls_connected_once', 'INTEGER'], ['corpuls_last_data_at', 'INTEGER'],
+  ['corpuls_link_ended_at', 'INTEGER'], ['corpuls_link_end_reason', 'TEXT'], ['vitals_json', 'TEXT'], ['vitals_at', 'INTEGER'], ['vitals_source', 'TEXT'],
+  ['vitals_hist_at', 'INTEGER'], ['draft_discarded_at', 'INTEGER']
+].forEach(([c, t]) => addColumn('cases', c, t));
+[['source', 'TEXT'], ['device_id', 'TEXT'], ['source_event_id', 'TEXT'], ['source_seq', 'INTEGER'], ['transmitted_at', 'INTEGER'], ['device_hr', 'INTEGER']].forEach(([c, t]) => addColumn('ecgs', c, t));
+db.exec('CREATE INDEX IF NOT EXISTS ix_ecg_event ON ecgs(source_event_id)');
 
 const cache = new Map();
 const st = sql => { let s = cache.get(sql); if (!s) { s = db.prepare(sql); cache.set(sql, s); } return s; };

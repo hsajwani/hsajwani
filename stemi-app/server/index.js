@@ -110,7 +110,8 @@ async function route(req, res) {
     if (!auth.anySession(req)) return send(res, 401, { error: 'Not signed in' });
     const row = D.get('SELECT file_name FROM ecg_images WHERE id=?', p.slice(7));
     if (!row) return send(res, 404, 'Not found');
-    return serveFile(res, path.join(cfg.IMAGE_DIR, row.file_name), { 'Cache-Control': 'private, max-age=86400, immutable' });
+    /* the simulated corpuls ECGs are SVG drawn by the platform itself; nothing in them may ever run */
+    return serveFile(res, path.join(cfg.IMAGE_DIR, row.file_name), { 'Cache-Control': 'private, max-age=86400, immutable', 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'", 'X-Content-Type-Options': 'nosniff' });
   }
 
   /* everything below needs the screen's session: the crew login, or the ER / cardiologist / console device session */
@@ -121,7 +122,7 @@ async function route(req, res) {
   if (req.method === 'GET' && p === '/api/me') return send(res, 200, { role: A.role, user: A.role === 'crew' ? A : null, version: VERSION });
   if (req.method === 'GET' && p === '/api/info') {
     const lan = lanAddresses();
-    return send(res, 200, { version: VERSION, aiProvider: cfg.AI_PROVIDER, clients: live.clientCount(), presence: live.presence(),
+    return send(res, 200, { version: VERSION, aiProvider: cfg.AI_PROVIDER, corpuls: platform.monitor.providerInfo(), clients: live.clientCount(), presence: live.presence(),
       urls: lan.map(a => ({ name: a.name, er: `http://${a.address}:${cfg.PORT}/er`, cardiologist: `http://${a.address}:${cfg.PORT}/cardiologist` })) });
   }
 
@@ -164,6 +165,33 @@ async function route(req, res) {
     if (r.status === 'other-unit') return send(res, 403, { code: 'other-unit', ...r, error: 'This CAD number belongs to a case of another unit' });
     return send(res, 200, { ok: true, ...r });
   }
+  /* the CAD number of an unsent case corrected before SEND (the case and its corpuls data move with it) */
+  if (p === '/api/cases/correct' && req.method === 'POST') {
+    if (A.role !== 'crew') return crewOnly('corrects a CAD number');
+    const r = platform.correctCad(A, await json(req));
+    if (r.status === 'invalid') return send(res, 400, { code: 'invalid', ...r });
+    if (r.status === 'exists') return send(res, 409, { code: 'exists', ...r });
+    if (r.status === 'missing') return send(res, 404, { code: 'missing', ...r, error: 'There is no unsent case with this CAD number on this tablet' });
+    if (r.status === 'sent') return send(res, 409, { code: 'sent', ...r });
+    return send(res, 200, { ok: true, ...r });
+  }
+  /* an unsent case discarded on the tablet: kept as an unsent draft, its corpuls feed ends */
+  if (p === '/api/cases/discard' && req.method === 'POST') {
+    if (A.role !== 'crew') return crewOnly('discards an unsent case');
+    const r = platform.discardDraft(A, (await json(req)).cad);
+    if (r.status === 'missing') return send(res, 404, { code: 'missing', ...r, error: 'There is no unsent case with this CAD number on this tablet' });
+    if (r.status === 'sent') return send(res, 409, { code: 'sent', ...r, error: 'The case was already sent: it cannot be discarded.' });
+    return send(res, 200, { ok: true, ...r });
+  }
+
+  /* ---------- the corpuls feed: the crew links the case to the unit's monitor (the CAD number must exist) ---------- */
+  if (p === '/api/corpuls/link' && req.method === 'POST') {
+    if (A.role !== 'crew') return crewOnly('links the corpuls monitor');
+    const r = platform.monitor.link(A, (await json(req)).cad);
+    if (r.status === 'missing') return send(res, 404, { code: 'missing', ...r, error: 'There is no case with this CAD number for this tablet: enter the CAD number first.' });
+    if (r.status === 'closed') return send(res, 409, { code: 'closed', ...r, error: 'This STEMI pathway is closed: it is read-only.' });
+    return send(res, 200, { ok: true, ...r, rec: platform.snapshot(r.cad) });
+  }
 
   /* ---------- actions from the screens ---------- */
   if (req.method === 'POST' && p === '/api/ops') {
@@ -198,6 +226,12 @@ async function route(req, res) {
     if (A.role !== 'control') return send(res, 403, { error: 'Test console only' });
     const what = p.slice(13);
     if (req.method === 'GET' && what === 'cases') return send(res, 200, { cases: platform.consoleCases() });
+    /* the corpuls simulator (TEST ONLY): the simulated monitors, and what the tester makes them do */
+    if (req.method === 'GET' && what === 'corpuls') return send(res, 200, platform.monitor.simInfo());
+    if (req.method === 'POST' && what.startsWith('corpuls/')) {
+      const b = await json(req), r = platform.monitor.simulate(b.cad, what.slice(8), b);
+      return send(res, r.ok ? 200 : 409, { ...r, sim: platform.monitor.simInfo() });
+    }
     if (req.method !== 'POST') return send(res, 404, { error: 'Not found' });
     if (what === 'sim') {
       const b = await json(req), patch = {};
@@ -223,6 +257,7 @@ async function route(req, res) {
       const r = platform.demoCase(A, (await json(req)).cad);
       if (r.status === 'invalid') return send(res, 400, { code: 'invalid', ...r, error: r.error + ' ' + r.detail });
       if (r.status === 'exists') return send(res, 409, { code: 'exists', ...r, error: `CASE ALREADY EXISTS: CAD #${r.cad}. No second case was created.` });
+      if (r.status === 'error') return send(res, 500, { code: 'error', ...r });
       return send(res, 200, { ok: true, cad: r.cad });
     }
   }
@@ -233,8 +268,9 @@ async function route(req, res) {
 function resetData() {
   D.tx(() => {
     ['final_vitals', 'handovers', 'arrivals', 'ops', 'audit_events', 'case_updates', 'etas', 'destinations', 'decisions', 'ecg_views', 'ecg_role_views', 'alert_followups', 'cardiologist_alerts',
-      'ai_interpretations', 'ecg_images', 'ecgs', 'treatments', 'observations', 'patient_details', 'cases'].forEach(t => D.run(`DELETE FROM ${t}`));
+      'ai_interpretations', 'monitor_vitals', 'monitor_events', 'ecg_images', 'ecgs', 'treatments', 'observations', 'patient_details', 'cases'].forEach(t => D.run(`DELETE FROM ${t}`));
   });
+  platform.monitor.reset();
   for (const f of fs.readdirSync(cfg.IMAGE_DIR)) fs.unlinkSync(path.join(cfg.IMAGE_DIR, f));
 }
 
@@ -246,6 +282,8 @@ const server = http.createServer((req, res) => {
 });
 server.keepAliveTimeout = 65000;
 platform.aiResume();
+/* the corpuls feeds that were linked carry on after a restart */
+platform.monitor.resume();
 
 function lanAddresses() {
   const out = [];
@@ -273,7 +311,7 @@ server.listen(cfg.PORT, cfg.HOST, () => {
   console.log(` Cardiologist on iPhone:     http://${ip}:${cfg.PORT}/cardiologist`);
   console.log(` Test console:               http://localhost:${cfg.PORT}/control`);
   if (lan.length > 1) console.log(` Other addresses: ${lan.slice(1).map(a => `${a.address} (${a.name})`).join(', ')}`);
-  console.log(` Health: http://localhost:${cfg.PORT}/health · database: ${path.relative(cfg.ROOT, cfg.DB_FILE)} (kept across restarts) · AI: ${cfg.AI_PROVIDER} (simulated)`);
+  console.log(` Health: http://localhost:${cfg.PORT}/health · database: ${path.relative(cfg.ROOT, cfg.DB_FILE)} (kept across restarts) · AI: ${cfg.AI_PROVIDER} (simulated) · corpuls: ${cfg.CORPULS_PROVIDER === 'mock' ? 'simulated feed (MockCorpulsProvider)' : cfg.CORPULS_PROVIDER + ' (not implemented)'}`);
   if (!DEV) console.log(` Crew test login: crew@test.local · password: ${process.env.TEST_USER_PASSWORD ? '(from .env)' : cfg.TEST_PASSWORD}\n The iPhone must be on the same Wi-Fi. Stop the server with Ctrl+C.`);
   console.log(`${line}\n`);
 });

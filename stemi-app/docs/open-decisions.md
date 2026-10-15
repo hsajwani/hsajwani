@@ -1,4 +1,4 @@
-# Open decisions in this build (0.5.0)
+# Open decisions in this build (0.6.0)
 
 Where a decision is still open, the build uses a working default and says so. None of these defaults is confirmed.
 Reminder and escalation times are governance configurable and not set; the build invents no numbers, rosters,
@@ -25,6 +25,14 @@ response times, hospital capabilities or clinical criteria.
 | Q-26 | Does V1 show the AI or run it in shadow mode first? | Shown as decision support to the crew, ER and cardiologist, the same analysis everywhere. It is a simulation. |
 | Q-56 | Crew pick lists (complaints, treatments) | Illustrative lists; no default doses are pre-filled. |
 | Q-59 | Patient details on the lock screen | Not applicable: no push notifications in the test build. |
+| C-1 | How is a case linked to the monitor? | When the crew confirms the CAD number (LINK CORPULS), the case is created, still unsent and invisible to the ER, and linked to the unit's monitor (one simulated corpuls3 per unit). The crew does not pick a device. The real mapping of CAD number, mission and monitor depends on corpuls.mission ([corpuls-integration.md](corpuls-integration.md)). |
+| C-2 | ECGs acquired on the monitor before the CAD number was entered | Not attached: only ECGs acquired after the link reach the case. The crew can use the manual ECG fallback. |
+| C-3 | When is monitor data "not current"? | Technical indicator only: connected but no new values for more than 3 × the expected update interval, shown as LAST DATA RECEIVED hh:mm:ss / N min ago. No clinical threshold is set; any rule needs clinical governance. |
+| C-4 | Must the crew confirm the vital signs at SEND? | No: the latest monitor values travel with the case automatically, recorded with their time (and in the audit). |
+| C-5 | Which values come from the monitor? | HR, SpO₂, non-invasive BP (with its measurement time) and RR, plus the 12-lead ECG. The crew enters age, sex, presenting complaint and symptom onset. Manual vital signs remain a fallback. |
+| C-6 | Does the manual ECG fallback need a reason? | No reason is asked; it is recorded as *manual fallback* and audited. It is prominent only when corpuls is not available. |
+| C-7 | One monitor, two cases | A monitor serves one case at a time: linking it to a new case ends the previous case's feed, which keeps what it received. |
+| C-8 | What happens to the feed when the pathway closes? | It ends; the last values stay with the case; late data for the closed case is refused. A lost connection never closes the pathway, cancels the case or triggers a decision. |
 
 ## Design choices not yet confirmed
 
@@ -32,9 +40,13 @@ The alert band across the ER screen (rather than a full-screen alert), the full-
 cardiologist's phone, the order of the ER decisions (ACTIVATE · UNCERTAIN · NOT SUSPICIOUS), the two-step cardiologist
 decision, the rule that an assessment or decision must cover the latest ECG, the queues on each screen, the crew's
 pathway progress (CREW → ER → CARDIOLOGY → DECISION), and the clinical timeline built from the record (the full audit
-trail stays in the test console). Each needs a yes or no.
+trail stays in the test console). From 0.6.0: the crew's single page (the corpuls connection bar, the large ECG, the
+compact live-values panel, the four patient items, one sticky SEND TO ER with the list of what is missing), the
+wording of the connection states (CORPULS CONNECTED · WAITING FOR CORPULS · CORPULS CONNECTION LOST / LIVE MONITOR
+DATA TEMPORARILY UNAVAILABLE), and the manual fallback as a quiet secondary control. Each needs a yes or no.
 
 ## Not built in this round
 
 Hospital, cath-lab and ACC screens; cath-lab activation; destination / transfer; administration and rosters;
-lock-screen push and escalation; an amendment workflow for closed cases; real identity (SSO).
+lock-screen push and escalation; an amendment workflow for closed cases; real identity (SSO); the real corpuls.mission
+connection (simulated only; see corpuls-integration.md); other monitors (ZOLL, LIFEPAK).

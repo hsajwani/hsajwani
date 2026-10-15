@@ -35,6 +35,11 @@ CREATE TABLE IF NOT EXISTS cases (
   -- er_assessment_at, er_assessed_by, er_assessment_ecg, er_non_activation_reason, er_non_activation_comment, er_outcome_seen_at,
   -- cardiology_activated_at, cardiology_activation_reason, cardiology_activated_by,
   -- cardiologist_name, cardiologist_acknowledged_at, cardiologist_decision, cardiologist_decision_at
+  -- 0.6.0, the corpuls feed (added on start by server/db.js): corpuls_provider, corpuls_device_id, corpuls_device_label,
+  -- corpuls_linked_at, corpuls_linked_by, corpuls_status (waiting | connected | reconnecting | disconnected),
+  -- corpuls_status_at, corpuls_connected_once, corpuls_last_data_at, corpuls_link_ended_at, corpuls_link_end_reason,
+  -- vitals_json (the latest monitor values: hr, spo2, rr, sys, dia, bpAt, at), vitals_at, vitals_source, vitals_hist_at,
+  -- draft_discarded_at (an unsent case discarded on the tablet; it stays a draft, nothing reached the ER)
   active              INTEGER NOT NULL DEFAULT 1,
   unit                TEXT NOT NULL,
   emirate             TEXT NOT NULL,
@@ -73,7 +78,10 @@ CREATE TABLE IF NOT EXISTS treatments (
   taken_at INTEGER, received_at INTEGER NOT NULL, entered_by TEXT, entry_kind TEXT NOT NULL, op_id TEXT
 );
 
--- ECG 1, ECG 2, ECG 3 …: one row per acquisition
+-- ECG 1, ECG 2, ECG 3 …: one row per acquisition, numbered by the platform across every source.
+-- 0.6.0 adds: source (corpuls | manual_fallback | test; empty for the crew photos of 0.5.0 and earlier), device_id,
+-- source_event_id (the provider's event id: an ECG sent again is stored once), source_seq (the monitor's own count),
+-- transmitted_at (when the provider sent it), device_hr (the heart rate the monitor reported with the 12-lead)
 CREATE TABLE IF NOT EXISTS ecgs (
   cad TEXT NOT NULL REFERENCES cases(cad), n INTEGER NOT NULL,
   acquired_at INTEGER, sent_at INTEGER, received_at INTEGER,
@@ -86,7 +94,7 @@ CREATE TABLE IF NOT EXISTS ecgs (
 CREATE TABLE IF NOT EXISTS ecg_images (
   id TEXT PRIMARY KEY, cad TEXT NOT NULL REFERENCES cases(cad), ecg_n INTEGER, i INTEGER,
   captured_at INTEGER, uploaded_at INTEGER NOT NULL, received_at INTEGER,
-  kind TEXT, quality TEXT, source TEXT NOT NULL,      -- source: test-generator | file
+  kind TEXT, quality TEXT, source TEXT NOT NULL,      -- source: test-generator | file | corpuls (simulated feed)
   file_name TEXT NOT NULL, mime TEXT NOT NULL, bytes INTEGER NOT NULL, sha256 TEXT NOT NULL,
   added_after_send INTEGER NOT NULL DEFAULT 0, uploaded_by TEXT, op_id TEXT
 );
@@ -160,6 +168,19 @@ CREATE TABLE IF NOT EXISTS final_vitals (
   confirmed_at INTEGER NOT NULL, received_at INTEGER NOT NULL, confirmed_by TEXT, op_id TEXT
 );
 
+-- the corpuls monitor's vital signs: a light history, not every sample (each blood pressure measurement, about one row
+-- a minute otherwise, the values at SEND and the first sample after a reconnection). The latest values are on the case.
+CREATE TABLE IF NOT EXISTS monitor_vitals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, cad TEXT NOT NULL REFERENCES cases(cad), at INTEGER NOT NULL, received_at INTEGER NOT NULL,
+  device_id TEXT, source TEXT NOT NULL, hr INTEGER, spo2 INTEGER, bp_sys INTEGER, bp_dia INTEGER, bp_at INTEGER, rr INTEGER,
+  event_id TEXT, why TEXT
+);
+-- the feed's significant moments (linked, connected, connection lost, restored, ended, manual fallback): the timeline
+-- reads them; the audit trail records them too. Routine samples and heartbeats are never recorded here
+CREATE TABLE IF NOT EXISTS monitor_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, cad TEXT NOT NULL REFERENCES cases(cad), at INTEGER NOT NULL, kind TEXT NOT NULL, text TEXT NOT NULL
+);
+
 -- what the cardiologist sees as NEW (silent updates)
 CREATE TABLE IF NOT EXISTS case_updates (
   id TEXT PRIMARY KEY, cad TEXT NOT NULL REFERENCES cases(cad), kind TEXT NOT NULL,
@@ -185,3 +206,5 @@ CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
 CREATE INDEX IF NOT EXISTS ix_audit_cad ON audit_events(cad, at);
 CREATE INDEX IF NOT EXISTS ix_upd_cad ON case_updates(cad, at);
 CREATE INDEX IF NOT EXISTS ix_img_cad ON ecg_images(cad, ecg_n);
+CREATE INDEX IF NOT EXISTS ix_monv_cad ON monitor_vitals(cad, at);
+CREATE INDEX IF NOT EXISTS ix_mone_cad ON monitor_events(cad, at);

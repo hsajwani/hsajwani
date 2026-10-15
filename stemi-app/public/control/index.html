@@ -39,6 +39,17 @@
 .dev { display: flex; gap: var(--s2); align-items: center; }
 .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--line-2); flex: none; }
 .dot.up { background: var(--ok); } .dot.down { background: var(--crit); }
+/* the corpuls simulator */
+.simcard { border-color: var(--warn-line); }
+.simcard > .card__h { background: var(--warn-soft); border-radius: var(--r-lg) var(--r-lg) 0 0; }
+.simcard > .card__h h2 { color: var(--warn-text); letter-spacing: .02em; }
+.simgroup { display: flex; flex-direction: column; gap: 8px; padding-top: var(--s3); border-top: 1px solid var(--line); }
+.btn-wrap { display: flex; flex-wrap: wrap; gap: 6px; }
+.simstat { display: flex; flex-wrap: wrap; gap: 6px var(--s3); align-items: center; }
+.simvits { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: var(--s2) var(--s3); }
+.simvit { display: flex; flex-direction: column; gap: 4px; }
+.simvit .label { font-size: var(--fs-sm); }
+.simok { color: var(--ok-text); font-weight: 600; }
 .urls code { font: 600 var(--fs-sm) var(--font-data); background: var(--surface-3); padding: 2px 6px; border-radius: var(--r-sm); user-select: all; overflow-wrap: anywhere; }
 </style>
 <!--APP-->

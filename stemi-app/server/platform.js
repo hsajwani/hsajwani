@@ -1,17 +1,22 @@
 /* The platform: it receives every screen's actions, keeps the shared case record (one record per CAD number, the same
    record on every screen), writes the audit trail, raises the ER and cardiology alerts, runs the (mock) AI service and
-   pushes each changed case to the screens allowed to see it. It decides nothing clinical: every clinical step is a
-   person's action, checked against the pathway rules (server/pathway.js) before it is stored. */
+   pushes each changed case to the screens allowed to see it. ECGs and vital signs normally arrive from the unit's corpuls
+   monitor through the corpuls feed (server/monitor.js); the crew's manual ECG upload is the fallback. It decides nothing
+   clinical: every clinical step is a person's action, checked against the pathway rules (server/pathway.js) before it is
+   stored. */
 const D = require('./db');
 const cfg = require('./config');
 const live = require('./live');
 const seed = require('./seed');
 const AI = require('./ai');
 const PW = require('./pathway');
+const monitor = require('./monitor');
 const CADN = require('../public/shared/cad.js');
 const RULES = require('../public/shared/rules.js');
 
-const MDL = { age: 'Age', sex: 'Sex', complaint: 'Presenting complaint', onset: 'Symptom onset', bp: 'BP', hr: 'HR', spo2: 'SpO₂', gcs: 'GCS' };
+/* the crew's minimum data (age, sex, complaint, onset); BP, HR, SpO₂ and RR come from corpuls and are entered by the crew
+   only as a manual fallback; GCS is kept for cases of 0.5.0 and earlier */
+const MDL = { age: 'Age', sex: 'Sex', complaint: 'Presenting complaint', onset: 'Symptom onset', bp: 'BP', hr: 'HR', spo2: 'SpO₂', rr: 'RR', gcs: 'GCS' };
 const PATIENT_FIELDS = ['age', 'sex', 'complaint', 'onset'];
 const ptTable = k => (PATIENT_FIELDS.includes(k) ? 'patient_details' : 'observations');
 const J = v => (v == null ? null : JSON.stringify(v));
@@ -70,12 +75,24 @@ function needLatest(F, on) {
 }
 
 /* ---------- storing ECGs, images and the minimum data ---------- */
+/* an ECG uploaded by the crew: the manual fallback (the normal ECG arrives from corpuls, server/monitor.js) */
 function insertEcg(cad, e, sendAt, rcv, by, opId) {
-  D.run('INSERT INTO ecgs(cad,n,acquired_at,sent_at,received_at,primary_image,variant,same_as_previous,sent_by,time_reason,op_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+  D.run('INSERT INTO ecgs(cad,n,acquired_at,sent_at,received_at,primary_image,variant,same_as_previous,sent_by,time_reason,op_id,source) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
     cad, e.n, sane(e.acq, rcv), sane(sendAt, rcv), rcv, Number.isInteger(e.pri) ? e.pri : 1, e.variant ? String(e.variant).slice(0, 20) : null, e.same ? 1 : 0, by,
-    e.timeWhy ? RULES.cleanText(e.timeWhy, 200) : null, opId);
+    e.timeWhy ? RULES.cleanText(e.timeWhy, 200) : null, opId, 'manual_fallback');
   linkImages(cad, e.n, e.imgs, rcv, false, opId);
 }
+/* an image the platform received itself (the corpuls feed): stored on disk with its checksum, linked to its ECG later */
+function storeImage(cad, mime, buf, by, source) {
+  const fs = require('node:fs'), path = require('node:path'), crypto = require('node:crypto');
+  const id = D.uid('img'), file = id + (mime === 'image/svg+xml' ? '.svg' : mime === 'image/png' ? '.png' : '.jpg');
+  fs.writeFileSync(path.join(cfg.IMAGE_DIR, file), buf);
+  D.run('INSERT INTO ecg_images(id,cad,uploaded_at,source,file_name,mime,bytes,sha256,uploaded_by) VALUES(?,?,?,?,?,?,?,?,?)',
+    id, cad, Date.now(), source || 'corpuls', file, mime, buf.length, crypto.createHash('sha256').update(buf).digest('hex'), by);
+  return { id, file };
+}
+const SRC = { corpuls: 'corpuls', manual_fallback: 'manual fallback', test: 'test' };
+const ecgList = cad => D.all('SELECT n, source FROM ecgs WHERE cad=? ORDER BY n', cad).map(e => `ECG ${e.n}${SRC[e.source] ? ` (${SRC[e.source]})` : ''}`).join(', ');
 /* images are uploaded before the action that sends them; the action links them to their ECG */
 function linkImages(cad, n, imgs, rcv, after, opId) {
   for (const x of imgs || []) {
@@ -98,36 +115,48 @@ function crewOp(A, o, F, rcv, W) {
       return true;
     case 'submit': {
       if (C.server_received_at) return true; /* already received: a resend changes nothing */
-      const e = d.ecg;
-      if (!e || e.n !== 1 || !Array.isArray(e.imgs) || !e.imgs.length) throw err(400, 'ECG 1 with at least one image is needed to send the case.');
-      insertEcg(cad, e, d.sendAt, rcv, ME, o.id);
-      D.run('UPDATE cases SET submitted_at=?, server_received_at=?, delivered_late=?, er_alerted_at=? WHERE cad=?', sane(d.sendAt, rcv), rcv, d.late ? 1 : 0, rcv, cad);
-      Object.entries(d.md || {}).forEach(([k, v]) => { if (MDL[k] && v) insertMd(cad, k, v, rcv, ME, 'sent', '', o.id); });
-      W.by(sane(e.acq, rcv), `ECG 1 acquired${e.imgs.length > 1 ? ` · ${e.imgs.length} images` : ''}`, ME, 'key');
-      W.by(sane(d.sendAt, rcv), `Case sent to the ER by ${UNIT}: ECG 1 and the minimum data`, ME, 'key');
-      W.sys(rcv, `Server received the case and ECG 1 (images stored, checksums recorded)${d.late ? ' · delivered after a failed first attempt' : ''}`, 'key');
+      /* the ECG normally arrived from corpuls already; an ECG in the action is the crew's manual fallback */
+      const e = d.ecg && Array.isArray(d.ecg.imgs) && d.ecg.imgs.length ? d.ecg : null;
+      if (!e && !F.nEcg) throw err(400, 'An ECG is needed to send the case: wait for the ECG from corpuls, or use the manual ECG fallback.');
+      const n = e ? F.nEcg + 1 : null;
+      if (e) insertEcg(cad, { ...e, n }, d.sendAt, rcv, ME, o.id);
+      D.run('UPDATE cases SET submitted_at=?, server_received_at=?, delivered_late=?, er_alerted_at=?, draft_discarded_at=NULL WHERE cad=?', sane(d.sendAt, rcv), rcv, d.late ? 1 : 0, rcv, cad);
+      /* vital signs in the minimum data are the crew's manual fallback (corpuls had none); the rest is the crew's own */
+      Object.entries(d.md || {}).forEach(([k, v]) => { if (MDL[k] && v) insertMd(cad, k, v, rcv, ME, v.fb && ['bp', 'hr', 'spo2', 'rr'].includes(k) ? 'fallback' : 'sent', '', o.id); });
+      if (e) {
+        W.by(sane(e.acq, rcv), `ECG ${n} acquired · manual ECG fallback${e.imgs.length > 1 ? ` · ${e.imgs.length} images` : ''}`, ME, 'key');
+        W.by(sane(d.sendAt, rcv), `Manual ECG fallback used: ECG ${n} (${e.imgs.length} image${e.imgs.length > 1 ? 's' : ''}) uploaded by the crew`, ME, 'key');
+        monitor.fallbackUsed(cad, rcv, n);
+      }
+      W.by(sane(d.sendAt, rcv), `Case sent to the ER by ${UNIT}: ${ecgList(cad)}, the latest monitor values and the minimum data`, ME, 'key');
+      W.sys(rcv, `Server received the case${e ? ` and ECG ${n} (images stored, checksums recorded)` : ''}${d.late ? ' · delivered after a failed first attempt' : ''}`, 'key');
+      monitor.atSend(C, rcv, W);
       W.sys(rcv, 'ER alerted: NEW STEMI CASE awaiting ER Doctor acceptance · the Cardiologist is not alerted at this stage', 'key');
-      aiRun(cad, 1);
+      if (e) aiRun(cad, n);
       return true;
     }
-    case 'ecg': {
+    case 'ecg': { /* the manual ECG fallback after SEND (the normal serial ECG arrives from corpuls) */
       const e = d.ecg;
       if (!e || !Number.isInteger(e.n)) throw err(400, 'This ECG could not be read.');
-      if (D.get('SELECT 1 FROM ecgs WHERE cad=? AND n=?', cad, e.n)) return true;
-      if (e.n !== F.nEcg + 1) throw err(409, `The case has ${F.nEcg} ECG${F.nEcg === 1 ? '' : 's'}: the next ECG is ECG ${F.nEcg + 1}, not ECG ${e.n}.`);
+      if (e.n > F.nEcg + 1) throw err(409, `The case has ${F.nEcg} ECG${F.nEcg === 1 ? '' : 's'}: the next ECG is ECG ${F.nEcg + 1}, not ECG ${e.n}.`);
       if (!Array.isArray(e.imgs) || !e.imgs.length) throw err(400, `ECG ${e.n} needs at least one image.`);
-      insertEcg(cad, e, d.sendAt, rcv, ME, o.id);
-      W.by(sane(e.acq, rcv), `ECG ${e.n} acquired${e.imgs.length > 1 ? ` · ${e.imgs.length} images` : ''}`, ME, 'key');
-      W.by(sane(d.sendAt, rcv), F.state === 'repeat_requested' ? `Repeat ECG sent by ${UNIT} as requested by the Cardiologist: ECG ${e.n}` : `ECG ${e.n} sent by ${UNIT} (serial ECG)`, ME, 'key');
-      W.sys(rcv, `ECG ${e.n} received · ${F.activated ? 'the ER and the Cardiologist screens were' : 'the ER screen was'} updated silently (no alarm)`, 'key');
-      W.upd(rcv, 'ecg', `ECG ${e.n} received`, { n: e.n });
-      aiRun(cad, e.n);
+      /* an ECG from corpuls may have taken the number meanwhile: the fallback ECG becomes the next one, nothing is replaced */
+      const n = F.nEcg + 1;
+      insertEcg(cad, { ...e, n }, d.sendAt, rcv, ME, o.id);
+      W.by(sane(e.acq, rcv), `ECG ${n} acquired · manual ECG fallback${e.imgs.length > 1 ? ` · ${e.imgs.length} images` : ''}${n !== e.n ? ` · stored as ECG ${n} (ECG ${e.n} had arrived from corpuls meanwhile)` : ''}`, ME, 'key');
+      W.by(sane(d.sendAt, rcv), `Manual ECG fallback used: ECG ${n} (${e.imgs.length} image${e.imgs.length > 1 ? 's' : ''}) uploaded by ${UNIT}${F.state === 'repeat_requested' ? ' · repeat ECG as requested by the Cardiologist' : ''}`, ME, 'key');
+      W.sys(rcv, `ECG ${n} received · ${F.activated ? 'the ER and the Cardiologist screens were' : 'the ER screen was'} updated silently (no alarm)`, 'key');
+      W.upd(rcv, 'ecg', `ECG ${n} received`, { n });
+      monitor.fallbackUsed(cad, rcv, n);
+      aiRun(cad, n);
       return true;
     }
     case 'img': {
       const x = d.img;
       if (!x || !Number.isInteger(d.n) || !Number.isInteger(x.i)) throw err(400, 'This image could not be read.');
-      if (!D.get('SELECT 1 FROM ecgs WHERE cad=? AND n=?', cad, d.n)) throw err(409, `ECG ${d.n} is not on the server.`);
+      const target = D.get('SELECT source FROM ecgs WHERE cad=? AND n=?', cad, d.n);
+      if (!target) throw err(409, `ECG ${d.n} is not on the server.`);
+      if (target.source === 'corpuls') throw err(409, `ECG ${d.n} came from corpuls: a photo is added as a new ECG with the manual ECG fallback.`);
       const ex = D.get('SELECT id FROM ecg_images WHERE cad=? AND ecg_n=? AND i=?', cad, d.n, x.i);
       if (ex) { if (ex.id === x.imageId) return true; throw err(409, `ECG ${d.n} already has an Image ${x.i}. Nothing is replaced: add it again as a new image.`); }
       linkImages(cad, d.n, [x], rcv, true, o.id);
@@ -137,14 +166,15 @@ function crewOp(A, o, F, rcv, W) {
     }
     case 'md': {
       if (!MDL[d.k]) throw err(400, 'Unknown field.');
-      const kind = ['update', 'correct', 'clarify'].includes(d.kind) ? d.kind : 'update', tb = ptTable(d.k);
+      const kind = ['update', 'correct', 'clarify', 'fallback'].includes(d.kind) ? d.kind : 'update', tb = ptTable(d.k);
       const prev = D.get(`SELECT * FROM ${tb} WHERE cad=? AND field=? ORDER BY received_at DESC, rowid DESC LIMIT 1`, cad, d.k);
       const why = RULES.cleanText(d.why, 200), v = RULES.cleanText(d.v, 120), L = MDL[d.k];
       if (!v) throw err(400, `${L}: no value.`);
       insertMd(cad, d.k, { v, raw: d.raw, t: d.at || t }, rcv, ME, kind, why, o.id);
       W.by(rcv, kind === 'correct' ? `${L} corrected by crew: ${prev ? prev.value_text : '–'} → ${v} · the previous value is kept${why ? ' · reason: ' + why : ''}`
+        : kind === 'fallback' ? `${L} entered by crew (manual fallback, corpuls data unavailable): ${v}`
         : `${L} updated by crew: ${v}${prev ? ` · previous ${prev.value_text} (${hm(prev.taken_at)}) kept` : ''}`, ME, 'key');
-      W.upd(rcv, 'md', kind === 'correct' ? `${L} corrected to ${v}` : `${L} ${v}`, { k: d.k, corr: kind === 'correct' });
+      W.upd(rcv, 'md', kind === 'correct' ? `${L} corrected to ${v}` : `${L} ${v}${kind === 'fallback' ? ' (entered by the crew)' : ''}`, { k: d.k, corr: kind === 'correct' });
       return true;
     }
     case 'rec': { /* a treatment update: shown silently to the ER and the Cardiologist */
@@ -353,7 +383,7 @@ function applyOps(A, ops) {
       if (!e.status) console.error('action failed', o.k, e);
     }
   }
-  touched.forEach(push);
+  touched.forEach(cad => { monitor.closeIfNeeded(cad); push(cad); });
   return results;
 }
 
@@ -376,6 +406,7 @@ function completeCase(A, raw) {
     W.upd(t, 'closed', 'STEMI PATHWAY COMPLETED', {});
     W.flush();
   });
+  monitor.closeIfNeeded(cad);
   push(cad);
   return { status: 'completed', cad };
 }
@@ -445,7 +476,7 @@ function createCase(A, b, source) {
   const cad = c.cad, cid = String((b && b.cid) || '').slice(0, 64) || null, rcv = Date.now();
   const ex = caseRow(cad);
   if (ex) {
-    if (cid && ex.created_cid === cid) return { status: 'same', cad };
+    if (cid && ex.created_cid === cid) { if (b.link && A.role === 'crew') monitor.link(A, cad); return { status: 'same', cad }; }
     return { status: 'exists', cad, existing: casePublic(ex) };
   }
   const crew = A.role === 'crew' ? A : { ...seed.crewUser(), device: A.device };
@@ -463,8 +494,57 @@ function createCase(A, b, source) {
     W.sys(rcv, `Case created on the platform under CAD #${cad} (CAD number checked: no existing case with this number)`, 'key');
     W.flush();
   });
+  /* the crew's tablet links the case to the unit's corpuls monitor at once: from then on the ECGs and vital signs
+     acquired on corpuls attach to this CAD number */
+  if (b && b.link) monitor.link(crew, cad);
   push(cad);
   return { status: 'created', cad };
+}
+/* the tables that carry the CAD number (a correction before SEND moves everything of the case) */
+let CAD_TABLES = null;
+const cadTables = () => CAD_TABLES || (CAD_TABLES = D.all("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").map(r => r.name)
+  .filter(tb => D.all(`PRAGMA table_info(${tb})`).some(c => c.name === 'cad')));
+/* the CAD number of an unsent case, corrected on the tablet: the case — with anything already received from corpuls —
+   moves to the corrected number. Nothing had reached the ER, and an existing case is never touched. */
+function correctCad(A, b) {
+  const from = CADN.normalize(b && b.cad), F = from && facts(from);
+  if (!F || F.C.unit !== A.unit) return { status: 'missing', cad: from };
+  if (F.state !== 'draft') return { status: 'sent', cad: from, error: 'The case was already sent: its CAD number is locked.' };
+  const c = CADN.check(b.to);
+  if (!c.ok) return { status: 'invalid', cad: c.cad, error: c.error, detail: c.detail };
+  const to = c.cad;
+  if (to === from) return { status: 'same', cad: to, rec: snapshot(to) };
+  const ex = caseRow(to);
+  if (ex) return { status: 'exists', cad: to, existing: casePublic(ex) };
+  const t = Date.now(), ME = crewT(A);
+  D.tx(() => {
+    D.db.exec('PRAGMA defer_foreign_keys = ON');
+    for (const tb of cadTables()) D.run(`UPDATE ${tb} SET cad=? WHERE cad=?`, to, from);
+    const W = writer(to, A);
+    W.by(t, `CAD number corrected by crew before sending: CAD #${from} → CAD #${to} · nothing had been sent${F.C.corpuls_linked_at ? ' · the corpuls feed and what it sent move with the case' : ''}`, ME, 'key');
+    W.flush();
+  });
+  monitor.relink(from, to);
+  D.all("SELECT ecg_n FROM ai_interpretations WHERE cad=? AND status='proc'", to).forEach(r => setTimeout(() => aiFinish(to, r.ecg_n).catch(console.error), 1500));
+  push(from); push(to);
+  return { status: 'corrected', cad: to, rec: snapshot(to) };
+}
+/* an unsent case discarded on the tablet: nothing reached the ER; the case stays stored as an unsent draft, its corpuls
+   feed ends, and OPEN EXISTING CASE can take it up again */
+function discardDraft(A, raw) {
+  const cad = CADN.normalize(raw), F = cad && facts(cad);
+  if (!F || F.C.unit !== A.unit) return { status: 'missing', cad };
+  if (F.state !== 'draft') return { status: 'sent', cad };
+  if (F.C.draft_discarded_at) return { status: 'discarded', cad };
+  const t = Date.now(), W = writer(cad, A);
+  D.tx(() => {
+    D.run('UPDATE cases SET draft_discarded_at=? WHERE cad=?', t, cad);
+    W.by(t, `Unsent case discarded on the ${A.unit} tablet by ${crewT(A)} · nothing was sent to the ER · what was received from corpuls is kept`, crewT(A), 'key');
+    W.flush();
+  });
+  monitor.endLink(cad, 'unsent case discarded on the tablet');
+  push(cad);
+  return { status: 'discarded', cad };
 }
 /* CASE ALREADY EXISTS → OPEN EXISTING CASE: the existing case opens on the tablet; nothing is created or changed */
 function openExisting(A, raw) {
@@ -476,7 +556,8 @@ function openExisting(A, raw) {
   const t = Date.now(), W = writer(c.cad, A);
   D.tx(() => {
     if (!F.C.active) D.run('UPDATE cases SET active=1 WHERE cad=?', c.cad);
-    W.by(t, `Existing case CAD #${c.cad} opened on the ${A.unit} tablet by ${crewT(A)} · the same CAD number was entered again; no second case created`, crewT(A), 'key');
+    if (F.C.draft_discarded_at) D.run('UPDATE cases SET draft_discarded_at=NULL WHERE cad=?', c.cad);
+    W.by(t, `Existing case CAD #${c.cad} opened on the ${A.unit} tablet by ${crewT(A)} · the same CAD number was entered again; no second case created${F.state === 'draft' ? ' · the unsent case is taken up again' : ''}`, crewT(A), 'key');
     W.flush();
   });
   push(c.cad);
@@ -521,7 +602,7 @@ async function aiFinish(cad, n) {
   try {
     out = await AI.provider().analyse({
       cad,
-      ecg: { n, acq: e.acquired_at, variant: e.variant, same: !!e.same_as_previous, pri: e.primary_image, primary: { quality: pri ? pri.quality : 'good', source: pri ? pri.source : 'file', filePath: pri ? pri.file_name : null } },
+      ecg: { n, acq: e.acquired_at, variant: e.variant, same: !!e.same_as_previous, pri: e.primary_image, rate: e.device_hr || null, primary: { quality: pri ? pri.quality : 'good', source: pri ? pri.source : 'file', filePath: pri ? pri.file_name : null } },
       previous: pe ? { n: pe.n, acq: pe.acquired_at, ai: pa ? { st: pa.status } : null } : null,
       unavailable: D.sim().ai === 'down'
     });
@@ -566,8 +647,10 @@ function snapshot(cad, F) {
       decision: F.lastDec ? F.lastDec.kind : null, decisionAt: F.lastDec ? F.lastDec.decided_at : null
     },
     pt: {}, rec: {}, ecgs: [], dec: [], upd: [], audit: [], views: { er: {}, cardiologist: {} },
-    hopen: C.handover_opened_at || null,
-    closed: C.closed_at ? { at: C.closed_at, by: C.closed_by, reason: C.closure_reason || PW.CLOSE.crew.reason, source: C.closure_source || 'crew', kind: PW.closedKind(C) } : null
+    hopen: C.handover_opened_at || null, discarded: C.draft_discarded_at || null,
+    closed: C.closed_at ? { at: C.closed_at, by: C.closed_by, reason: C.closure_reason || PW.CLOSE.crew.reason, source: C.closure_source || 'crew', kind: PW.closedKind(C) } : null,
+    /* the corpuls feed: link, connection state, the latest vital signs with their times, a light history */
+    monitor: monitor.monitorOf(C)
   };
   for (const tb of ['patient_details', 'observations']) {
     D.all(`SELECT rowid, * FROM ${tb} WHERE cad=? ORDER BY received_at, rowid`, cad).forEach(r => {
@@ -586,7 +669,8 @@ function snapshot(cad, F) {
     const imgs = D.all('SELECT * FROM ecg_images WHERE cad=? AND ecg_n=? ORDER BY i', cad, e.n).map(x => ({
       i: x.i, kind: x.kind, q: x.quality, at: x.captured_at, rcv: x.received_at, after: !!x.added_after_send, src: x.source, url: `/files/${x.id}`
     }));
-    R.ecgs.push({ n: e.n, acq: e.acquired_at, variant: e.variant, pri: e.primary_image, same: !!e.same_as_previous, sent: e.sent_at, rcv: e.received_at, by: e.sent_by, why: e.time_reason || '', imgs, ai: ais[e.n] || null });
+    R.ecgs.push({ n: e.n, acq: e.acquired_at, variant: e.variant, pri: e.primary_image, same: !!e.same_as_previous, sent: e.sent_at, rcv: e.received_at, by: e.sent_by, why: e.time_reason || '', imgs, ai: ais[e.n] || null,
+      src: e.source || null, dev: e.device_id || null, seq: e.source_seq || null, tx: e.transmitted_at || null });
   });
   D.all('SELECT * FROM ecg_role_views WHERE cad=?', cad).forEach(v => { (R.views[v.role] || (R.views[v.role] = {}))[v.ecg_n + '|' + v.i] = v.viewed_at; });
   D.all('SELECT * FROM ecg_views WHERE cad=?', cad).forEach(v => { const k = v.ecg_n + '|' + v.i; if (!R.views.cardiologist[k]) R.views.cardiologist[k] = v.viewed_at; });
@@ -638,33 +722,27 @@ function restartScreens() { live.each(c => { for (const [ev, data] of hello(c)) 
 live.onPresence(() => live.broadcast('presence', live.presence(), c => c.role === 'control'));
 
 /* ---------- a pre-filled fictional case for demonstrations (test console) ----------
-   The tester types the CAD number (checked and normalised like the crew's entry; a duplicate is refused). The case is
-   then sent exactly as the crew MDT would send it: ECG 1 (the sample test image) and the minimum data go through the
-   same crew actions, so the ER gets the normal NEW STEMI CASE alarm and the mock AI analyses ECG 1. */
+   The tester types the CAD number (checked and normalised like the crew's entry; a duplicate is refused). The case then
+   goes the way the crew's would: created under the CAD number, linked to a simulated corpuls monitor of its own (so a
+   crew case in progress keeps the unit's monitor), ECG 1 acquired on it, the minimum data, SEND. The ER gets the normal
+   NEW STEMI CASE alarm and the mock AI analyses ECG 1. */
 function demoCase(A, rawCad) {
-  const fs = require('node:fs'), path = require('node:path'), crypto = require('node:crypto');
   const crew = { ...seed.crewUser(), device: A.device };
   const r = createCase(crew, { cad: rawCad, openedAt: Date.now() - 5000 }, 'manual-test-console');
   if (r.status !== 'created') return r;
-  const cad = r.cad, buf = fs.readFileSync(path.join(cfg.ROOT, 'samples', 'test-ecg-1-borderline-anterior.jpg'));
-  const imageId = D.uid('img'), file = imageId + '.jpg', t = Date.now();
-  fs.writeFileSync(path.join(cfg.IMAGE_DIR, file), buf);
-  D.run('INSERT INTO ecg_images(id,cad,uploaded_at,source,file_name,mime,bytes,sha256,uploaded_by) VALUES(?,?,?,?,?,?,?,?,?)',
-    imageId, cad, t - 3500, 'file', file, 'image/jpeg', buf.length, crypto.createHash('sha256').update(buf).digest('hex'), crewT(crew));
-  const id = k => `demo-${cad}-${k}`, mdT = t - 2000;
+  const cad = r.cad;
+  monitor.link(crew, cad, { device_id: `SIM-C3-DEMO-${cad.replace(/\D/g, '').slice(-5)}` });
+  monitor.simulate(cad, 'connect');
+  const ecg = monitor.simulate(cad, 'trigger-ecg', { sample: D.sim().find === 'clear' ? 'C' : 'A' });
+  if (!ecg || !ecg.ok) return { status: 'error', cad, error: (ecg && ecg.error) || 'The simulated ECG was not received.' };
+  const t = Date.now(), mdT = t - 2000;
   const md = {
     age: { v: '58 y', raw: { v: 58, est: false }, t: mdT },
     sex: { v: 'Male', raw: { v: 'Male' }, t: mdT },
-    complaint: { v: 'Chest pain', raw: { v: 'cp' }, t: mdT },
-    onset: { v: `${hm(t - 45 * 60000)} (approximate)`, raw: { v: t - 45 * 60000, approx: true }, t: mdT },
-    bp: { v: '142/88 mmHg', raw: { sys: 142, dia: 88 }, t: mdT },
-    hr: { v: '88 bpm', raw: { v: 88 }, t: mdT },
-    spo2: { v: '97 %', raw: { v: 97 }, t: mdT },
-    gcs: { v: '15', raw: { v: 15 }, t: mdT }
+    complaint: { v: 'Chest pain', raw: { k: 'cp' }, t: mdT },
+    onset: { v: `${hm(t - 45 * 60000)} (approximate)`, raw: { t: t - 45 * 60000, approx: true }, t: mdT }
   };
-  const variant = D.sim().find === 'clear' ? 'clear' : 'border';
-  applyOps(crew, [{ id: id('submit'), cad, k: 'submit', t: t - 1000, data: { sendAt: t - 1000, late: false, md,
-    ecg: { n: 1, acq: t - 3000, variant, pri: 1, same: false, timeWhy: null, imgs: [{ i: 1, kind: 'full', q: 'file', at: t - 3000, imageId }] } } }]);
+  applyOps(crew, [{ id: `demo-${cad}-submit`, cad, k: 'submit', t, data: { sendAt: t, late: false, md } }]);
   return r;
 }
 
@@ -673,7 +751,10 @@ function consoleCases() {
   return D.all('SELECT cad FROM cases ORDER BY created_at DESC LIMIT 100').map(r => caseSummary(facts(r.cad)));
 }
 
+/* the corpuls feed works on the same record, the same audit trail and the same pushes */
+monitor.init({ facts, writer, push, aiRun, crewT, storeImage: (cad, mime, buf, by) => storeImage(cad, mime, buf, by, 'corpuls') });
+
 module.exports = {
-  applyOps, snapshot, push, hello, restartScreens, demoCase, checkCad, createCase, openExisting, setOnScreens, completeCase,
-  listClosed, viewCase, consoleCases, aiResume, aiFinish, facts
+  applyOps, snapshot, push, hello, restartScreens, demoCase, checkCad, createCase, correctCad, discardDraft, openExisting, setOnScreens, completeCase,
+  listClosed, viewCase, consoleCases, aiResume, aiFinish, facts, monitor
 };

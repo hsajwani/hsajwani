@@ -1,5 +1,6 @@
 /* End-to-end acceptance test of the STEMI pathway on three screens at once, in the browser:
    crew MDT (landscape tablet 1180 × 820) → ER Doctor (desktop 1440 × 900) → Cardiologist (phone 393 × 852).
+   The ECGs and vital signs come from the simulated corpuls feed, driven through the test console's simulator.
    Scenarios: 1 crew SEND · 2 ER accept with a name · 3 ER ACTIVATE · 7 cardiologist acknowledge with a name ·
    10 repeat ECG · 8 CONFIRMED STEMI · 11 COMPLETE STEMI PATHWAY · 15 nothing reaches the cardiologist before the ER ·
    16 everything arrives without a refresh · 17 the alarms sound only for a new case / activation, until accepted.
@@ -29,7 +30,7 @@ async function main(S) {
     const erBase = await er.tones(), docBase = await doc.tones();
 
     /* ---------- 1. crew SEND → the ER is alerted, the cardiologist is not ---------- */
-    await H.crewNewCase(C, A, { images: 2 });
+    await H.crewNewCase(C, A);
     await H.shot(C, 'acc-01-crew-sent');
     ok('1', 'Crew: the case shows SENT TO ER after SEND', (await C.textContent('.status-panel')).includes('SENT TO ER') && (await C.textContent('.case-h')).includes('SENT TO ER'));
     ok('1', 'Crew: progress CREW → ER → CARDIOLOGY → DECISION shown', /CREW[\s\S]*ER[\s\S]*CARDIOLOGY[\s\S]*DECISION/i.test(await C.textContent('.progress')));
@@ -53,7 +54,7 @@ async function main(S) {
     const dbA = H.db(S.DATA, `SELECT er_doctor_name n, er_accepted_at t FROM cases WHERE cad='${A}'`)[0];
     ok('2', 'ER Doctor name and acceptance time saved for this CAD number', dbA.n === 'Dr. Test ER' && dbA.t > 0);
     ok('2', 'Crew: ER DOCTOR REVIEWING with the ER Doctor\'s name, without refresh', await waitText(C, 'ER DOCTOR REVIEWING') && (await C.textContent('.status-panel')).includes('Dr. Test ER'));
-    ok('2', 'ER: the original ECG is on screen at once, with both images', await E.isVisible('#c-viewer .ecgv__scroll img') && (await E.$$('#c-viewer .ecgv__imgs .thumb')).length === 2);
+    ok('2', 'ER: the original ECG (from corpuls) is on screen at once', await E.isVisible('#c-viewer .ecgv__scroll img') && (await E.textContent('#c-viewer .ecgv__cap')).includes('from corpuls'));
     await E.waitForFunction(() => /AI analysis completed/.test(document.querySelector('#c-ai').innerText), null, { timeout: 15000 }).catch(() => {});
     ok('2', 'ER: AI decision support shown with the statement, and no sound for the AI result', /AI interpretation is decision support\. The Cardiologist makes the final STEMI decision\./.test(await E.textContent('#c-ai')) && (await quiet(er.tones, 500)) === 0);
     await H.shot(E, 'acc-04-er-review', true);
@@ -94,27 +95,23 @@ async function main(S) {
     const rq = await C.waitForSelector('.modal >> text=REPEAT ECG REQUESTED', { timeout: 15000 }).then(() => true, () => false);
     ok('10', 'Crew: REPEAT ECG REQUESTED arrives at once, with the instruction', rq && (await C.textContent('.modal')).includes('Repeat with V7 to V9'));
     await C.click('[data-act="dec-ack"]');
-    ok('10', 'Crew: TAKE REPEAT ECG offered; COMPLETE STEMI PATHWAY not available', await C.isVisible('.status-panel [data-act="ecg-new"]') && !(await C.isVisible('[data-act="complete"]')));
-    await C.click('.status-panel [data-act="ecg-new"]');
-    await C.click('.modal [data-act="img-add"]'); await C.click('[data-act="img-gen"]');
-    await C.waitForSelector('[data-act="ecg-send"]:not([disabled])');
-    await C.click('[data-act="ecg-send"]');
+    ok('10', 'Crew: told to acquire the repeat 12-lead on corpuls; COMPLETE STEMI PATHWAY not available', /Acquire a new 12-lead on corpuls3/.test(await C.textContent('.status-panel')) && !(await C.isVisible('[data-act="complete"]')));
+    /* the crew acquires the repeat ECG on corpuls3 (the test console's simulator): nothing to upload */
+    ok('10', 'corpuls: the repeat 12-lead is acquired and sent as ECG 2', (await H.sim(S.BASE, A, 'trigger-ecg', { sample: 'B' })).body.n === 2);
     ok('10', 'Crew: REPEAT ECG SENT — CARDIOLOGIST REVIEWING', await waitText(C, 'REPEAT ECG SENT — CARDIOLOGIST REVIEWING'));
     const newDoc = await D.waitForSelector('.ecgv__new >> text=ECG 2', { timeout: 15000 }).then(() => true, () => false);
     ok('10', 'Cardiologist: ECG 2 arrives silently and is announced, not swapped in', newDoc && (await quiet(doc.tones, 500)) === 0 && (await D.textContent('.ecgv__cap')).includes('ECG 1 of 2'));
     ok('10', 'ER: ECG 2 arrives silently too', await E.waitForSelector('.ecg-tab >> text=ECG 2', { timeout: 15000 }).then(() => true, () => false) && (await quiet(er.tones, 300)) === 0);
     ok('10', 'Cardiologist: a decision is held until the new ECG 2 has been viewed', (await D.getAttribute('#c-dock [data-act="decide"]', 'aria-disabled')) === 'true');
-    /* new vital signs: arrive silently on both screens */
-    await C.click('[data-act="vitals"]');
-    await C.fill('#v-sys', '128'); await C.fill('#v-dia', '76');
-    await C.click('[data-act="vitals-save"]');
-    ok('16', 'ER: the new BP arrives without refresh, earlier value kept, no sound', await waitText(E, '128/76 mmHg') && (await E.textContent('#c-details')).includes('Earlier: 142/88 mmHg') && (await quiet(er.tones, 300)) === 0);
+    /* new vital signs from corpuls: arrive silently on both screens */
+    await H.sim(S.BASE, A, 'set', { sys: 128, dia: 76 }); await H.sim(S.BASE, A, 'send-vitals');
+    ok('16', 'ER: the new BP from corpuls arrives without refresh, the earlier reading kept, no sound', await waitText(E, '128/76') && /Earlier: 142\/88/.test(await E.textContent('#c-details')) && (await quiet(er.tones, 300)) === 0);
 
     /* ---------- 8. CONFIRMED STEMI ---------- */
     await D.click('#c-dock [data-act="view-latest"]');
     await D.waitForFunction(() => { const b = document.querySelector('#c-dock [data-act="decide"]'); return b && b.getAttribute('aria-disabled') !== 'true'; }, null, { timeout: 8000 }).catch(() => {});
     ok('8', 'Cardiologist: ECG 2 viewed; the decision is available and covers ECG 2', /ECG 2/.test(await D.textContent('#c-dock [data-act="decide"]')));
-    ok('16', 'Cardiologist: the new BP is there too, without refresh or sound', (await D.textContent('#c-details')).includes('128/76 mmHg') && (await quiet(doc.tones, 300)) === 0);
+    ok('16', 'Cardiologist: the new BP is there too, without refresh or sound', (await D.textContent('#c-details')).includes('128/76') && (await quiet(doc.tones, 300)) === 0);
     await D.click('#c-dock [data-act="decide"]');
     await D.click('.modal [data-act="d"][data-k="confirm"]');
     await D.fill('#d-note', 'Fictional test note');

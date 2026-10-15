@@ -1,4 +1,4 @@
-/* STEMI Coordination Platform · design system (0.5.0)
+/* STEMI Coordination Platform · design system (0.6.0)
    One stylesheet for every screen: crew MDT, ER workstation, cardiologist phone, test console.
    Calm neutral surfaces. Red only for critical and urgent states, CONFIRMED STEMI and errors; amber for uncertain or
    pending; green for success. Status is never shown by colour alone (always a word, usually an icon too).
@@ -361,7 +361,7 @@ button.qrow--crit:hover { background: #fde8e6; }
 .ecgv__scroll.is-zoomed { cursor: grab; }
 .ecgv__scroll.is-drag { cursor: grabbing; }
 .ecgv__scroll img { display: block; margin: auto; max-width: none; flex: none; user-select: none; -webkit-user-drag: none; image-rendering: auto; background: #1f262e; }
-.ecgv__hint { position: absolute; right: var(--s3); top: var(--s3); padding: 4px 9px; border-radius: var(--r-sm); background: rgba(16, 24, 40, .72); color: #fff; font-size: var(--fs-xs); pointer-events: none; }
+.ecgv__hint { position: absolute; right: var(--s3); bottom: var(--s3); padding: 4px 9px; border-radius: var(--r-sm); background: rgba(16, 24, 40, .72); color: #fff; font-size: var(--fs-xs); pointer-events: none; }
 .ecgv__imgs { display: flex; gap: var(--s2); padding: var(--s2) var(--s3); overflow-x: auto; border-top: 1px solid var(--line); background: var(--surface-2); }
 .thumb { flex: none; display: flex; flex-direction: column; gap: 4px; align-items: stretch; width: 128px; padding: 4px; border-radius: var(--r-md); border: 2px solid transparent; background: var(--surface); text-align: left; font-size: var(--fs-xs); color: var(--text-2); }
 .thumb img { width: 100%; aspect-ratio: 1600 / 1050; object-fit: contain; background: #1f262e; border-radius: 4px; display: block; }
@@ -393,6 +393,42 @@ button.qrow--crit:hover { background: #fde8e6; }
 .ecgfs .ecgv__cap b { color: #fff; }
 .ecgfs .thumb { background: #26303b; color: #c3cdd8; }
 .ecgfs .thumb b { color: #fff; }
+
+/* ---------- live monitor data from corpuls: compact, never above the ECG in importance ----------
+   live: green dot · not updating / connection lost: amber, the last values greyed but never erased · waiting / ended:
+   neutral. "Updated … ago" is a technical freshness indicator, not a clinical one. */
+.mon { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); box-shadow: var(--sh-1); min-width: 0; overflow: hidden; }
+.mon__h { display: flex; flex-wrap: wrap; gap: 2px var(--s3); align-items: baseline; padding: var(--s3) var(--s4) var(--s2); }
+.mon__st { font: 700 var(--fs-sm)/1.25 var(--font-ui); letter-spacing: .05em; text-transform: uppercase; display: inline-flex; gap: 8px; align-items: center; }
+.mon__sub { font-size: var(--fs-sm); color: var(--text-2); }
+.mon__dot { width: 10px; height: 10px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px rgba(6, 118, 71, .16); flex: none; display: inline-block; animation: livepulse 2.4s ease-in-out infinite; }
+@keyframes livepulse { 50% { box-shadow: 0 0 0 6px rgba(6, 118, 71, .04); } }
+.mon--ok .mon__st { color: var(--ok-text); }
+.mon--warn { border-color: var(--warn-line); }
+.mon--warn .mon__h { background: var(--warn-soft); }
+.mon--warn .mon__st, .mon--warn .mon__sub { color: var(--warn-text); }
+.mon--neutral .mon__st { color: var(--text-2); }
+.mtiles { display: flex; flex-wrap: wrap; gap: 1px; background: var(--line); border-top: 1px solid var(--line); }
+.mtile { background: var(--surface); padding: var(--s3) var(--s4); display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 84px; }
+.mtile--bp { flex: 1.9 1 150px; }
+.mtile__k { font: 700 var(--fs-xs)/1.2 var(--font-ui); letter-spacing: .06em; text-transform: uppercase; color: var(--text-3); }
+.mtile__v { font: 700 30px/1.1 var(--font-data); font-variant-numeric: tabular-nums; color: var(--text); white-space: nowrap; }
+.mtile__u { font-size: var(--fs-sm); color: var(--text-2); white-space: nowrap; }
+.mtile__src { font-size: var(--fs-xs); color: var(--warn-text); font-weight: 600; }
+.mtile.is-none .mtile__v, .mon.is-dim .mtile__v { color: var(--text-3); }
+.mon__f { padding: var(--s2) var(--s4); font-size: var(--fs-xs); color: var(--text-3); border-top: 1px solid var(--line); }
+.pstrip__item .u { font-size: var(--fs-xs); color: var(--text-3); }
+.pstrip__item.is-dim .v { color: var(--text-3); }
+.mon-st { font-size: var(--fs-sm); color: var(--text-2); align-items: center; }
+.mon-st--ok { color: var(--ok-text); font-weight: 600; }
+.mon-st--warn { color: var(--warn-text); }
+.mon-st .mon__dot { width: 8px; height: 8px; }
+.mon-line { font-size: var(--fs-sm); color: var(--text-2); margin: 0 0 var(--s2); }
+.mon-line--ok b { color: var(--ok-text); }
+.mon-line--warn { color: var(--warn-text); }
+.ecgv__src.is-mon { color: var(--ok-text); font-weight: 600; }
+@media (prefers-reduced-motion: reduce) { .mon__dot { animation: none; } }
+@media (max-width: 600px) { .mtile { flex-basis: 40%; } .mtile__v { font-size: 26px; } }
 
 /* ---------- AI decision support: compact, neutral, never over the ECG and never the decision ---------- */
 .ai { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); min-width: 0; }
