@@ -1,14 +1,16 @@
-/* The platform: what the approved prototype's page simulated (round 3 v0.2, shell.js), now on a server with a database.
-   It receives the devices' actions, stores them, writes the audit trail, alerts the cardiologist, runs the AI service
-   and pushes the shared case record to every screen. It decides nothing clinical. */
+/* The platform: it receives every screen's actions, keeps the shared case record (one record per CAD number, the same
+   record on every screen), writes the audit trail, raises the ER and cardiology alerts, runs the (mock) AI service and
+   pushes each changed case to the screens allowed to see it. It decides nothing clinical: every clinical step is a
+   person's action, checked against the pathway rules (server/pathway.js) before it is stored. */
 const D = require('./db');
 const cfg = require('./config');
 const live = require('./live');
 const seed = require('./seed');
 const AI = require('./ai');
+const PW = require('./pathway');
 const CADN = require('../public/shared/cad.js');
+const RULES = require('../public/shared/rules.js');
 
-const HN = { A: 'PCI Hospital A', B: 'PCI Hospital B', C: 'PCI Hospital C' };
 const MDL = { age: 'Age', sex: 'Sex', complaint: 'Presenting complaint', onset: 'Symptom onset', bp: 'BP', hr: 'HR', spo2: 'SpO₂', gcs: 'GCS' };
 const PATIENT_FIELDS = ['age', 'sex', 'complaint', 'onset'];
 const ptTable = k => (PATIENT_FIELDS.includes(k) ? 'patient_details' : 'observations');
@@ -17,325 +19,427 @@ const P = s => (s == null ? null : JSON.parse(s));
 const p2 = n => String(n).padStart(2, '0');
 const hm = t => { const d = new Date(t); return p2(d.getHours()) + ':' + p2(d.getMinutes()); };
 const hms = t => hm(t) + ':' + p2(new Date(t).getSeconds());
+const err = (status, message) => Object.assign(new Error(message), { status });
+/* a time from a device: kept when plausible (within the last 48 hours, not in the future), otherwise the server's */
+const sane = (t, rcv) => (Number.isFinite(+t) && +t > rcv - 48 * 3600e3 && +t <= rcv + 60e3 ? +t : rcv);
 
 const caseRow = cad => D.get('SELECT * FROM cases WHERE cad=?', cad);
-const userT = u => (u.role === 'crew' ? `${u.name}, ${u.title}` : `${u.name}, ${u.title}${u.org ? ', ' + u.org : ''}`);
-function onDutyCardiologist() {
-  /* the on-duty cardiologist of the provisional PCI hospital (Q-11). In this build: the cardiologist test user */
-  return D.get("SELECT * FROM users WHERE role='cardiologist' ORDER BY id LIMIT 1");
+const crewT = u => `${u.name}, ${u.title}`;
+const SYS = { role: 'system', id: null, device: null };
+
+/* everything the pathway rules need about one case */
+function facts(cad) {
+  const C = cad && caseRow(cad);
+  if (!C) return null;
+  const alert = D.get('SELECT * FROM cardiologist_alerts WHERE cad=?', cad);
+  const lastDec = D.get('SELECT * FROM decisions WHERE cad=? ORDER BY decided_at DESC, rowid DESC LIMIT 1', cad);
+  const nEcg = (D.get('SELECT MAX(n) n FROM ecgs WHERE cad=?', cad) || {}).n || 0;
+  /* made before 0.5.0: sent straight to the cardiologist, with no ER step */
+  const legacy = !C.er_alerted_at && !!alert;
+  const activated = C.cardiology_activated_at || (legacy ? alert.alerted_at : null);
+  const acked = C.cardiologist_acknowledged_at || (legacy ? C.acknowledged_at || alert.acknowledged_at : null);
+  const F = { C, alert, lastDec, nEcg, legacy, activated, acked };
+  F.state = PW.state(F);
+  return F;
 }
 
-/* ---------- audit and NEW updates ---------- */
-/* the role of an audit event: the logged-in user's role for their own actions, otherwise the system that acted */
-const auditRole = (who, user) => (user && who === userT(user) ? user.role : /^CAD/.test(who || '') ? 'cad-feed' : 'system');
-function writer(cad, user) {
+/* ---------- audit trail and the NEW updates list ---------- */
+function writer(cad, A) {
   const buf = [];
+  const add = (t, text, who, role, kind, uid) => buf.push({ t, text, who: who || '', role, kind: kind || 'evt', uid: uid || null });
   return {
-    au(t, text, who, kind) { const self = user && who === userT(user); buf.push({ t, text, who: who || '', kind: kind || 'evt', uid: self ? user.id : null, role: auditRole(who, user) }); },
-    upd(at, kind, text, ref) { D.run('INSERT INTO case_updates(id,cad,kind,text,ref_json,at) VALUES(?,?,?,?,?,?)', D.uid('u'), cad, kind, text, J(ref || {}), at); },
+    /* a person acting from this screen: the crew user, or the ER Doctor / Cardiologist under the name they entered */
+    by: (t, text, who, kind) => add(t, text, who, A.role === 'control' ? 'test-console' : A.role, kind, A.id),
+    /* the platform itself, or the AI service */
+    sys: (t, text, kind, who) => add(t, text, who || 'Platform', 'system', kind),
+    upd: (at, kind, text, ref) => D.run('INSERT INTO case_updates(id,cad,kind,text,ref_json,at) VALUES(?,?,?,?,?,?)', D.uid('u'), cad, kind, text, J(ref || {}), at),
     flush(fix) {
-      for (const a of buf) { if (fix) fix(a); D.run('INSERT INTO audit_events(cad,at,actor,user_id,role,action,kind) VALUES(?,?,?,?,?,?,?)', cad, a.t, a.who, a.uid, a.role, a.text, a.kind); }
+      for (const a of buf) {
+        if (fix) fix(a);
+        D.run('INSERT INTO audit_events(cad,at,actor,user_id,role,action,kind,device) VALUES(?,?,?,?,?,?,?,?)', cad, a.t, a.who, a.uid, a.role, a.text, a.kind, (A && A.device) || null);
+      }
       buf.length = 0;
-    },
-    buf
+    }
   };
 }
+const needName = raw => { const r = RULES.cleanName(raw); if (!r.ok) throw err(400, r.error); return r.name; };
+/* a clinical step names the ECG it covers; a newer ECG that arrived meanwhile must be reviewed first */
+function needLatest(F, on) {
+  if (!Number.isInteger(on)) throw err(400, 'The decision must name the ECG it covers.');
+  if (on !== F.nEcg) throw err(409, `ECG ${F.nEcg} has arrived since this screen was updated. Review ECG ${F.nEcg} before recording this.`);
+}
 
-/* ---------- actions from the crew tablet ---------- */
-function crewOp(user, o, cad, rcv, W) {
-  const t = o.t, d = o.data || {}, C = caseRow(cad), CREWT = userT(user), UNIT = C.unit;
+/* ---------- storing ECGs, images and the minimum data ---------- */
+function insertEcg(cad, e, sendAt, rcv, by, opId) {
+  D.run('INSERT INTO ecgs(cad,n,acquired_at,sent_at,received_at,primary_image,variant,same_as_previous,sent_by,time_reason,op_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+    cad, e.n, sane(e.acq, rcv), sane(sendAt, rcv), rcv, Number.isInteger(e.pri) ? e.pri : 1, e.variant ? String(e.variant).slice(0, 20) : null, e.same ? 1 : 0, by,
+    e.timeWhy ? RULES.cleanText(e.timeWhy, 200) : null, opId);
+  linkImages(cad, e.n, e.imgs, rcv, false, opId);
+}
+/* images are uploaded before the action that sends them; the action links them to their ECG */
+function linkImages(cad, n, imgs, rcv, after, opId) {
+  for (const x of imgs || []) {
+    const row = x && x.imageId && D.get('SELECT id FROM ecg_images WHERE id=? AND cad=?', x.imageId, cad);
+    if (!row) throw err(409, `Image ${x && x.i} of ECG ${n} was not found on the server`);
+    D.run('UPDATE ecg_images SET ecg_n=?, i=?, captured_at=?, kind=?, quality=?, received_at=?, added_after_send=?, op_id=? WHERE id=?',
+      n, x.i, sane(x.at, rcv), x.kind || 'full', x.q || 'good', rcv, after ? 1 : 0, opId, x.imageId);
+  }
+}
+function insertMd(cad, k, v, rcv, by, kind, why, opId) {
+  D.run(`INSERT INTO ${ptTable(k)}(id,cad,field,value_text,raw_json,taken_at,received_at,entered_by,entry_kind,reason,op_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+    D.uid('v'), cad, k, String(v.v == null ? '' : v.v).slice(0, 120), J(v.raw == null ? null : v.raw), sane(v.t, rcv), rcv, by, kind, why || '', opId);
+}
+
+/* ---------- actions from the crew MDT ---------- */
+function crewOp(A, o, F, rcv, W) {
+  const t = o.t, d = o.data || {}, C = F.C, cad = C.cad, ME = crewT(A), UNIT = C.unit;
   switch (o.k) {
-    case 'open':
-      if (!C.pathway_opened_at) {
-        D.run('UPDATE cases SET pathway_opened_at=?, pathway_opened_by=? WHERE cad=?', t, CREWT, cad);
-        W.au(t, `STEMI pathway opened on CAD ${cad} by ${UNIT}`, CREWT, 'key');
-      }
-      break;
+    case 'open': /* the pathway opening is recorded when the case is created; kept for tablets of 0.4 */
+      return true;
     case 'submit': {
-      if (C.server_received_at) break; /* already received: a resend changes nothing */
+      if (C.server_received_at) return true; /* already received: a resend changes nothing */
       const e = d.ecg;
-      D.run('INSERT INTO ecgs(cad,n,acquired_at,sent_at,received_at,primary_image,variant,same_as_previous,sent_by,time_reason,op_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
-        cad, 1, e.acq, d.sendAt, rcv, e.pri, e.variant, e.same ? 1 : 0, CREWT, e.timeWhy || null, o.id);
-      linkImages(cad, 1, e.imgs, rcv, false, o.id);
-      D.run('UPDATE cases SET submitted_at=?, server_received_at=?, delivered_late=? WHERE cad=?', d.sendAt, rcv, d.late ? 1 : 0, cad);
-      Object.entries(d.md || {}).forEach(([k, v]) => {
-        if (!MDL[k]) return;
-        D.run(`INSERT INTO ${ptTable(k)}(id,cad,field,value_text,raw_json,taken_at,received_at,entered_by,entry_kind,op_id) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-          D.uid('v'), cad, k, v.v, J(v.raw), v.t, rcv, CREWT, 'sent', o.id);
-      });
-      (d.ev || []).forEach(x => W.au(x.t, x.text, CREWT));
-      W.au(e.acq, `ECG 1 acquired${e.imgs.length > 1 ? ` · ${e.imgs.length} images` : ''}`, CREWT, 'key');
-      W.au(d.sendAt, `Case submitted by ${UNIT}: ECG 1 and minimum dataset`, CREWT, 'key');
-      W.au(rcv, `Server received case and ECG 1 (images stored, checksums recorded)${d.late ? ' · delivered late, downtime route already in use' : ''}`, 'Platform', 'key');
-      /* destination engine (placeholder policy, not AI): the prototype's fixed recommendation */
-      D.run('INSERT INTO destinations(id,cad,hospital,status,reason,at,received_at,set_by) VALUES(?,?,?,?,?,?,?,?)',
-        D.uid('d'), cad, 'A', 'rec', 'Nearest participating PCI centre within catchment; no diversion.', rcv + 1, rcv + 1, 'Destination engine');
-      W.au(rcv + 1, 'Provisional destination recommended: PCI Hospital A (placeholder policy)', 'Destination engine');
-      /* the alert never waits for the AI */
-      const doc = onDutyCardiologist();
-      D.run('INSERT INTO cardiologist_alerts(cad,cardiologist,hospital,alerted_at) VALUES(?,?,?,?)', cad, doc.name, 'A', rcv + 2);
-      W.au(rcv + 2, `Cardiologist alerted: ${doc.name}, on duty, PCI Hospital A · new case`, 'Platform', 'key');
+      if (!e || e.n !== 1 || !Array.isArray(e.imgs) || !e.imgs.length) throw err(400, 'ECG 1 with at least one image is needed to send the case.');
+      insertEcg(cad, e, d.sendAt, rcv, ME, o.id);
+      D.run('UPDATE cases SET submitted_at=?, server_received_at=?, delivered_late=?, er_alerted_at=? WHERE cad=?', sane(d.sendAt, rcv), rcv, d.late ? 1 : 0, rcv, cad);
+      Object.entries(d.md || {}).forEach(([k, v]) => { if (MDL[k] && v) insertMd(cad, k, v, rcv, ME, 'sent', '', o.id); });
+      W.by(sane(e.acq, rcv), `ECG 1 acquired${e.imgs.length > 1 ? ` · ${e.imgs.length} images` : ''}`, ME, 'key');
+      W.by(sane(d.sendAt, rcv), `Case sent to the ER by ${UNIT}: ECG 1 and the minimum data`, ME, 'key');
+      W.sys(rcv, `Server received the case and ECG 1 (images stored, checksums recorded)${d.late ? ' · delivered after a failed first attempt' : ''}`, 'key');
+      W.sys(rcv, 'ER alerted: NEW STEMI CASE awaiting ER Doctor acceptance · the Cardiologist is not alerted at this stage', 'key');
       aiRun(cad, 1);
-      break;
+      return true;
     }
     case 'ecg': {
       const e = d.ecg;
-      if (D.get('SELECT n FROM ecgs WHERE cad=? AND n=?', cad, e.n)) break;
-      D.run('INSERT INTO ecgs(cad,n,acquired_at,sent_at,received_at,primary_image,variant,same_as_previous,sent_by,time_reason,op_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
-        cad, e.n, e.acq, d.sendAt, rcv, e.pri, e.variant, e.same ? 1 : 0, CREWT, e.timeWhy || null, o.id);
-      linkImages(cad, e.n, e.imgs, rcv, false, o.id);
-      W.au(e.acq, `ECG ${e.n} acquired${e.imgs.length > 1 ? ` · ${e.imgs.length} images` : ''}`, CREWT, 'key');
-      W.au(d.sendAt, `ECG ${e.n} sent by ${UNIT}`, CREWT);
-      W.au(rcv, `ECG ${e.n} received by the server · cardiologist updated silently (no alarm)`, 'Platform', 'key');
+      if (!e || !Number.isInteger(e.n)) throw err(400, 'This ECG could not be read.');
+      if (D.get('SELECT 1 FROM ecgs WHERE cad=? AND n=?', cad, e.n)) return true;
+      if (e.n !== F.nEcg + 1) throw err(409, `The case has ${F.nEcg} ECG${F.nEcg === 1 ? '' : 's'}: the next ECG is ECG ${F.nEcg + 1}, not ECG ${e.n}.`);
+      if (!Array.isArray(e.imgs) || !e.imgs.length) throw err(400, `ECG ${e.n} needs at least one image.`);
+      insertEcg(cad, e, d.sendAt, rcv, ME, o.id);
+      W.by(sane(e.acq, rcv), `ECG ${e.n} acquired${e.imgs.length > 1 ? ` · ${e.imgs.length} images` : ''}`, ME, 'key');
+      W.by(sane(d.sendAt, rcv), F.state === 'repeat_requested' ? `Repeat ECG sent by ${UNIT} as requested by the Cardiologist: ECG ${e.n}` : `ECG ${e.n} sent by ${UNIT} (serial ECG)`, ME, 'key');
+      W.sys(rcv, `ECG ${e.n} received · ${F.activated ? 'the ER and the Cardiologist screens were' : 'the ER screen was'} updated silently (no alarm)`, 'key');
       W.upd(rcv, 'ecg', `ECG ${e.n} received`, { n: e.n });
       aiRun(cad, e.n);
-      break;
+      return true;
     }
     case 'img': {
-      if (!D.get('SELECT n FROM ecgs WHERE cad=? AND n=?', cad, d.n)) break;
-      linkImages(cad, d.n, [d.img], rcv, true, o.id);
-      W.au(rcv, `Image ${d.img.i} added to ECG ${d.n} by ${UNIT} · not a new ECG`, CREWT);
-      W.upd(rcv, 'img', `Additional image added to ECG ${d.n} (Image ${d.img.i})`, { n: d.n, i: d.img.i });
-      break;
+      const x = d.img;
+      if (!x || !Number.isInteger(d.n) || !Number.isInteger(x.i)) throw err(400, 'This image could not be read.');
+      if (!D.get('SELECT 1 FROM ecgs WHERE cad=? AND n=?', cad, d.n)) throw err(409, `ECG ${d.n} is not on the server.`);
+      const ex = D.get('SELECT id FROM ecg_images WHERE cad=? AND ecg_n=? AND i=?', cad, d.n, x.i);
+      if (ex) { if (ex.id === x.imageId) return true; throw err(409, `ECG ${d.n} already has an Image ${x.i}. Nothing is replaced: add it again as a new image.`); }
+      linkImages(cad, d.n, [x], rcv, true, o.id);
+      W.by(rcv, `Image ${x.i} added to ECG ${d.n} by ${UNIT} · an additional image of the same ECG, not a new ECG`, ME, 'key');
+      W.upd(rcv, 'img', `Additional image added to ECG ${d.n} (Image ${x.i})`, { n: d.n, i: x.i });
+      return true;
     }
     case 'md': {
-      if (!MDL[d.k]) break;
-      const tb = ptTable(d.k);
+      if (!MDL[d.k]) throw err(400, 'Unknown field.');
+      const kind = ['update', 'correct', 'clarify'].includes(d.kind) ? d.kind : 'update', tb = ptTable(d.k);
       const prev = D.get(`SELECT * FROM ${tb} WHERE cad=? AND field=? ORDER BY received_at DESC, rowid DESC LIMIT 1`, cad, d.k);
-      D.run(`INSERT INTO ${tb}(id,cad,field,value_text,raw_json,taken_at,received_at,entered_by,entry_kind,reason,op_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
-        D.uid('v'), cad, d.k, d.v, J(d.raw), d.at || t, rcv, CREWT, d.kind, d.why || '', o.id);
-      const L = MDL[d.k], was = prev ? ` (was ${prev.value_text} at ${hm(prev.taken_at)})` : '', why = d.why && d.why !== 'Correction of an earlier entry' ? d.why : '';
-      const txt = d.kind === 'correct' ? `${L} corrected to ${d.v}${was}${why ? ' · ' + why : ''}` : d.kind === 'clarify' ? `${L} clarified: ${d.v}${was}` : `${L} ${d.v}`;
-      W.au(rcv, d.kind === 'correct' ? `${L} corrected by crew: ${prev ? prev.value_text : ''} → ${d.v} · previous value kept${why ? ' · reason: ' + why : ''}`
-        : d.kind === 'clarify' ? `${L} clarified by crew: ${d.v}${prev ? ` · previous ${prev.value_text} kept` : ''}`
-          : `${L} updated by crew: ${d.v}${prev ? ` · previous ${prev.value_text} at ${hm(prev.taken_at)} kept` : ''}`, CREWT, 'key');
-      W.upd(rcv, 'md', txt, { k: d.k, corr: d.kind === 'correct' });
-      break;
+      const why = RULES.cleanText(d.why, 200), v = RULES.cleanText(d.v, 120), L = MDL[d.k];
+      if (!v) throw err(400, `${L}: no value.`);
+      insertMd(cad, d.k, { v, raw: d.raw, t: d.at || t }, rcv, ME, kind, why, o.id);
+      W.by(rcv, kind === 'correct' ? `${L} corrected by crew: ${prev ? prev.value_text : '–'} → ${v} · the previous value is kept${why ? ' · reason: ' + why : ''}`
+        : `${L} updated by crew: ${v}${prev ? ` · previous ${prev.value_text} (${hm(prev.taken_at)}) kept` : ''}`, ME, 'key');
+      W.upd(rcv, 'md', kind === 'correct' ? `${L} corrected to ${v}` : `${L} ${v}`, { k: d.k, corr: kind === 'correct' });
+      return true;
     }
-    case 'rec': {
-      const prev = D.get('SELECT * FROM treatments WHERE cad=? AND item_key=? ORDER BY received_at DESC, rowid DESC LIMIT 1', cad, d.k);
+    case 'rec': { /* a treatment update: shown silently to the ER and the Cardiologist */
+      const label = RULES.cleanText(d.label, 60), v = RULES.cleanText(d.v, 300), k = String(d.k || 'otx').replace(/[^a-z0-9-]/gi, '').slice(0, 24) || 'otx';
+      if (!label || !v) throw err(400, 'A treatment update needs a treatment and what was done.');
       D.run('INSERT INTO treatments(id,cad,item_key,label,category,value_text,not_obtained,taken_at,received_at,entered_by,entry_kind,op_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
-        D.uid('v'), cad, d.k, d.label, d.group, d.v, d.nv ? 1 : 0, d.at || t, rcv, CREWT, prev && !d.multi ? 'change' : 'new', o.id);
-      W.au(rcv, `${d.ev || d.label + ' documented'}: ${d.v}${prev && !d.multi ? ` · previous entry kept: ${prev.value_text}` : ''}`, CREWT, 'key');
-      W.upd(rcv, 'rec', `${d.label}: ${d.v}`, { k: d.k });
-      break;
+        D.uid('v'), cad, k, label, 'Treatments given', v, 0, sane(d.at, t), rcv, ME, 'new', o.id);
+      W.by(rcv, `Treatment update by crew — ${label}: ${v}`, ME, 'key');
+      W.upd(rcv, 'rec', `${label}: ${v}`, { k });
+      return true;
     }
-    case 'dest': {
-      const prev = D.get('SELECT * FROM destinations WHERE cad=? ORDER BY at DESC, rowid DESC LIMIT 1', cad);
-      if (!HN[d.hosp]) break;
-      D.run('INSERT INTO destinations(id,cad,hospital,status,why,from_hospital,at,received_at,set_by) VALUES(?,?,?,?,?,?,?,?,?)',
-        D.uid('d'), cad, d.hosp, d.st, d.why || '', d.from || null, t, rcv, CREWT);
-      const txt = d.st === 'chg' ? `Destination changed to ${HN[d.hosp]}${d.why ? ' · reason: ' + d.why : ''}` : `Destination confirmed: ${HN[d.hosp]}`;
-      W.au(rcv, txt + (prev && d.st === 'chg' ? ` · previous ${HN[prev.hospital]} kept` : ''), CREWT, 'key');
-      W.upd(rcv, 'dest', txt, {});
-      break;
-    }
-    case 'eta': {
-      D.run('INSERT INTO etas(id,cad,minutes,departed_at,at,received_at,set_by,why) VALUES(?,?,?,?,?,?,?,?)', D.uid('e'), cad, d.min, d.dep || null, t, rcv, CREWT, d.why);
-      const txt = d.why === 'dep' ? `Transport started (departed scene) · ETA ${d.min} min` : `ETA updated: ${d.min} min`;
-      W.au(rcv, txt, CREWT, 'key'); W.upd(rcv, 'eta', txt, {});
-      break;
-    }
-    case 'hopen': /* the case summary page was opened (recorded once) */
-      if (C.server_received_at && !C.handover_opened_at) { D.run('UPDATE cases SET handover_opened_at=? WHERE cad=?', t, cad); W.au(t, `Case summary opened by ${CREWT}`, CREWT, 'evt'); }
-      break;
+    case 'hopen': /* the Case Summary was opened (recorded once) */
+      if (!C.handover_opened_at) { D.run('UPDATE cases SET handover_opened_at=? WHERE cad=?', t, cad); W.by(t, `Case Summary opened by ${ME}`, ME, 'view'); }
+      return true;
     case 'decrcv': {
       const x = D.get('SELECT * FROM decisions WHERE id=? AND cad=?', d.id, cad);
-      if (x && !x.delivered_at) { D.run('UPDATE decisions SET delivered_at=? WHERE id=?', rcv, x.id); W.au(rcv, `Decision delivered to the ${UNIT} tablet and shown to the crew`, 'Platform', 'key'); }
-      break;
+      if (x && !x.delivered_at) { D.run('UPDATE decisions SET delivered_at=? WHERE id=?', rcv, x.id); W.sys(rcv, `Cardiologist decision (${RULES.DECISIONS[x.kind]}) shown on the ${UNIT} tablet`, 'key'); }
+      return true;
     }
     case 'decack': {
       const x = D.get('SELECT * FROM decisions WHERE id=? AND cad=?', d.id, cad);
-      if (x && !x.crew_ack_at) { D.run('UPDATE decisions SET crew_ack_at=? WHERE id=?', t, x.id); W.au(t, 'Crew acknowledged the decision', CREWT, 'key'); }
-      break;
+      if (x && !x.crew_ack_at) { D.run('UPDATE decisions SET crew_ack_at=? WHERE id=?', t, x.id); W.by(t, `Crew acknowledged the Cardiologist decision: ${RULES.DECISIONS[x.kind]}`, ME, 'key'); }
+      return true;
     }
-    case 'downtime':
-      if (!C.downtime_at) { D.run('UPDATE cases SET downtime_at=? WHERE cad=?', t, cad); W.au(t, 'STEMI downtime route in use · confirmed on the crew tablet', CREWT, 'key'); }
-      break;
+    case 'erack':
+      if (C.er_assessment === 'not_suspicious' && !C.er_outcome_seen_at) {
+        D.run('UPDATE cases SET er_outcome_seen_at=? WHERE cad=?', t, cad);
+        W.by(t, 'Crew acknowledged the ER review outcome: cardiology not activated', ME, 'key');
+      }
+      return true;
     case 'note':
-      W.au(t, String(d.text || '').slice(0, 500), CREWT, 'view');
-      break;
+      W.by(t, RULES.cleanText(d.text), ME, 'view');
+      return true;
     default:
       return false;
   }
-  return true;
 }
 
-/* images were uploaded before the action that sends them; the action links them to their ECG */
-function linkImages(cad, n, imgs, rcv, after, opId) {
-  for (const x of imgs || []) {
-    const row = x.imageId && D.get('SELECT id FROM ecg_images WHERE id=? AND cad=?', x.imageId, cad);
-    if (!row) throw Object.assign(new Error(`Image ${x.i} of ECG ${n} was not found on the server`), { status: 409 });
-    D.run('UPDATE ecg_images SET ecg_n=?, i=?, captured_at=?, kind=?, quality=?, received_at=?, added_after_send=?, op_id=? WHERE id=?',
-      n, x.i, x.at, x.kind || 'full', x.q || 'good', rcv, after ? 1 : 0, opId, x.imageId);
+/* ---------- a first view of each ECG image, per role ---------- */
+function viewed(A, d, F, t, W, name) {
+  const cad = F.C.cad, n = +d.n, i = +d.i, role = A.role, R = role === 'er' ? 'ER Doctor' : 'Cardiologist';
+  if (!D.get('SELECT 1 FROM ecg_images WHERE cad=? AND ecg_n=? AND i=?', cad, n, i)) return;
+  if (D.get('SELECT 1 FROM ecg_role_views WHERE cad=? AND role=? AND ecg_n=? AND i=?', cad, role, n, i)) return;
+  const first = !D.get('SELECT 1 FROM ecg_role_views WHERE cad=? AND role=? AND ecg_n=?', cad, role, n);
+  D.run('INSERT INTO ecg_role_views(cad,role,ecg_n,i,viewed_at,viewed_by) VALUES(?,?,?,?,?,?)', cad, role, n, i, t, name || '');
+  const who = name || `the ${R}`;
+  if (role === 'cardiologist' && !F.C.opened_at && F.acked) { D.run('UPDATE cases SET opened_at=? WHERE cad=?', t, cad); W.by(t, `ECG ${n} opened by ${who} (Cardiologist) · review started`, name, 'key'); }
+  else if (first) W.by(t, `ECG ${n} viewed by ${who} (${R})`, name, 'key');
+  else W.by(t, `Image ${i} of ECG ${n} viewed by ${who} (${R})`, name, 'view');
+}
+const optName = raw => { const r = RULES.cleanName(raw); return r.ok ? r.name : ''; };
+
+/* ---------- actions from the ER Doctor ---------- */
+function erOp(A, o, F, rcv, W) {
+  const t = o.t, d = o.data || {}, C = F.C, cad = C.cad;
+  switch (o.k) {
+    case 'er_shown':
+      if (F.state === 'sent_to_er' && !C.er_alert_shown_at) {
+        D.run('UPDATE cases SET er_alert_shown_at=? WHERE cad=?', rcv, cad);
+        W.sys(rcv, 'NEW STEMI CASE alert shown on the ER screen · audible alarm started', 'key');
+      }
+      return true;
+    case 'er_accept': {
+      const nm = needName(d.name);
+      if (F.state !== 'sent_to_er') return true; /* already accepted: nothing changes */
+      D.run('UPDATE cases SET er_doctor_name=?, er_accepted_at=? WHERE cad=?', nm, t, cad);
+      W.by(t, `ER Doctor accepted the case: ${nm} · audible alarm stopped`, nm, 'key');
+      return true;
+    }
+    case 'er_assess': {
+      const nm = needName(d.name || C.er_doctor_name);
+      needLatest(F, d.on);
+      if (d.kind === 'activate' || d.kind === 'uncertain') {
+        const lab = d.kind === 'activate' ? 'ACTIVATE CARDIOLOGIST' : 'UNCERTAIN';
+        D.run(`UPDATE cases SET er_assessment=?, er_assessment_at=?, er_assessed_by=?, er_assessment_ecg=?,
+               cardiology_activated_at=?, cardiology_activation_reason=?, cardiology_activated_by=? WHERE cad=?`,
+          d.kind, t, nm, d.on, t, `ER Doctor assessment: ${lab}`, nm, cad);
+        D.run('INSERT OR IGNORE INTO cardiologist_alerts(cad,cardiologist,hospital,alerted_at) VALUES(?,?,?,?)', cad, 'Cardiologist on call', 'On-call cardiology', rcv);
+        W.by(t, `ER Doctor assessment: ${lab} — ${nm} · on ECG ${d.on}`, nm, 'key');
+        if (d.kind === 'uncertain') W.by(t, 'ER Assessment: UNCERTAIN, Cardiology: ACTIVATED', nm, 'key');
+        W.by(t, `Cardiology activated by ER Doctor ${nm} · the same case sent to the Cardiologist queue`, nm, 'key');
+        W.sys(rcv, 'Cardiologist alerted: NEW CARDIOLOGY ACTIVATION', 'key');
+        return true;
+      }
+      if (d.kind === 'not_suspicious') {
+        const r = RULES.checkNotSuspicious(d.reason, d.comment);
+        if (!r.ok) throw err(400, r.error);
+        D.run(`UPDATE cases SET er_assessment='not_suspicious', er_assessment_at=?, er_assessed_by=?, er_assessment_ecg=?, er_non_activation_reason=?, er_non_activation_comment=? WHERE cad=?`,
+          t, nm, d.on, r.reason, r.comment || null, cad);
+        markClosed(cad, t, nm, null, PW.CLOSE.er);
+        W.by(t, `ER Doctor assessment: NOT SUSPICIOUS FOR STEMI — ${nm} · on ECG ${d.on}`, nm, 'key');
+        W.by(t, `Reason: ${r.reason}`, nm, 'key');
+        if (r.comment) W.by(t, `Comment: ${r.comment}`, nm, 'key');
+        W.by(t, 'Cardiology not activated', nm, 'key');
+        W.sys(t, `STEMI screening pathway closed following ER Doctor assessment — CAD #${cad} · read-only · the CAD incident itself is not changed`, 'key');
+        W.upd(t, 'closed', 'ER REVIEW COMPLETED — CARDIOLOGY NOT ACTIVATED', {});
+        return true;
+      }
+      throw err(400, 'Unknown ER assessment.');
+    }
+    case 'viewed':
+      viewed(A, d, F, t, W, optName(d.name));
+      return true;
+    case 'compare':
+      W.by(t, `Serial ECG comparison opened by ${optName(d.name) || 'the ER Doctor'} (ER Doctor): ${(d.ns || []).map(n => 'ECG ' + n).join(' | ')}`, optName(d.name), 'view');
+      return true;
+    case 'note':
+      W.by(t, RULES.cleanText(d.text), optName(d.name), 'view');
+      return true;
+    default:
+      return false;
   }
 }
 
-/* ---------- actions from the cardiologist ---------- */
-function docOp(user, o, cad, rcv, W) {
-  const t = o.t, d = o.data || {}, C = caseRow(cad), DOCN = user.name, DOCT = userT(user);
-  const A = D.get('SELECT * FROM cardiologist_alerts WHERE cad=?', cad);
+/* ---------- actions from the Cardiologist ---------- */
+function docOp(A, o, F, rcv, W) {
+  const t = o.t, d = o.data || {}, C = F.C, cad = C.cad;
   switch (o.k) {
     case 'shown':
-      if (A && !A.shown_at) { D.run('UPDATE cardiologist_alerts SET shown_at=? WHERE cad=?', rcv, cad); W.au(rcv, `NEW CARDIAC CASE alert shown on ${DOCN}'s device · audible alarm started`, 'Platform', 'key'); }
-      break;
-    case 'ack':
-      if (A && !A.acknowledged_at) {
-        D.run('UPDATE cardiologist_alerts SET acknowledged_at=?, acknowledged_by=? WHERE cad=?', t, DOCT, cad);
-        D.run('UPDATE cases SET acknowledged_at=? WHERE cad=?', t, cad);
-        W.au(t, `Cardiologist acknowledged: ACKNOWLEDGE & OPEN by ${DOCN} · audible alarm stopped`, DOCT, 'key');
+      if (F.state === 'cardiology_activated' && F.alert && !F.alert.shown_at) {
+        D.run('UPDATE cardiologist_alerts SET shown_at=? WHERE cad=?', rcv, cad);
+        W.sys(rcv, 'NEW CARDIOLOGY ACTIVATION alert shown on the Cardiologist screen · audible alarm started', 'key');
       }
-      break;
-    case 'viewed': {
-      if (D.get('SELECT 1 FROM ecg_views WHERE cad=? AND ecg_n=? AND i=?', cad, d.n, d.i)) break;
-      const firstOfEcg = !D.get('SELECT 1 FROM ecg_views WHERE cad=? AND ecg_n=?', cad, d.n);
-      D.run('INSERT INTO ecg_views(cad,ecg_n,i,viewed_at,viewed_by) VALUES(?,?,?,?,?)', cad, d.n, d.i, t, DOCT);
-      if (!C.opened_at && C.acknowledged_at) { D.run('UPDATE cases SET opened_at=? WHERE cad=?', t, cad); W.au(t, `ECG ${d.n} opened by ${DOCN} · review started`, DOCT, 'key'); }
-      else if (firstOfEcg) W.au(t, `ECG ${d.n} viewed by ${DOCN}`, DOCT, 'key');
-      else W.au(t, `Image ${d.i} of ECG ${d.n} first viewed by ${DOCN}`, DOCT, 'view');
-      D.all('SELECT id, kind, ref_json FROM case_updates WHERE cad=? AND seen_at IS NULL', cad).forEach(u => {
-        const r = P(u.ref_json) || {};
-        if ((u.kind === 'ecg' && r.n === d.n) || (u.kind === 'img' && r.n === d.n && r.i === d.i)) D.run('UPDATE case_updates SET seen_at=? WHERE id=?', t, u.id);
-      });
-      break;
+      return true;
+    case 'ack': {
+      const nm = needName(d.name);
+      if (F.state !== 'cardiology_activated') return true; /* already acknowledged */
+      D.run('UPDATE cases SET cardiologist_name=?, cardiologist_acknowledged_at=?, acknowledged_at=? WHERE cad=?', nm, t, t, cad);
+      if (F.alert) D.run('UPDATE cardiologist_alerts SET acknowledged_at=?, acknowledged_by=? WHERE cad=?', t, nm, cad);
+      W.by(t, `Cardiologist acknowledged: ACKNOWLEDGE & OPEN by ${nm} · audible alarm stopped`, nm, 'key');
+      return true;
     }
-    case 'seen': {
-      let n = 0;
-      for (const id of d.ids || []) n += Number(D.run('UPDATE case_updates SET seen_at=? WHERE id=? AND cad=? AND seen_at IS NULL', t, id, cad).changes);
-      if (n) W.au(t, `${n} new update${n > 1 ? 's' : ''} marked as seen by ${DOCN}`, DOCT, 'view');
-      break;
-    }
+    case 'viewed':
+      viewed(A, d, F, t, W, optName(d.name) || C.cardiologist_name || '');
+      return true;
+    case 'seen': /* 0.4's NEW list: kept so an older screen does not fail */
+      for (const id of d.ids || []) D.run('UPDATE case_updates SET seen_at=? WHERE id=? AND cad=? AND seen_at IS NULL', t, id, cad);
+      return true;
     case 'compare': {
-      const s = (d.ns || []).map(n => 'ECG ' + n).join(' | ');
+      const nm = optName(d.name) || C.cardiologist_name || '';
       if (!C.compared_at) D.run('UPDATE cases SET compared_at=? WHERE cad=?', t, cad);
-      W.au(t, `Serial comparison opened by ${DOCN}: ${s}`, DOCT, 'key');
-      break;
+      W.by(t, `Serial ECG comparison opened by ${nm || 'the Cardiologist'} (Cardiologist): ${(d.ns || []).map(n => 'ECG ' + n).join(' | ')}`, nm, 'view');
+      return true;
     }
     case 'decision': {
-      if (!['confirm', 'not', 'repeat'].includes(d.k)) break;
-      if (!C.acknowledged_at) throw Object.assign(new Error('Acknowledge the case before deciding'), { status: 409 });
+      if (!RULES.DECISIONS[d.k]) throw err(400, 'Unknown decision.');
+      const nm = needName(d.name || C.cardiologist_name);
+      needLatest(F, d.on);
+      const reason = RULES.cleanText(d.reason, 300), note = RULES.cleanText(d.note), adv = RULES.cleanText(d.adv), instr = RULES.cleanText(d.instr, 300);
+      if (d.k === 'not' && !reason) throw err(400, 'NOT STEMI needs a reason.');
+      const reasons = (Array.isArray(d.reasons) ? d.reasons : []).map(r => RULES.cleanText(r, 100)).filter(Boolean).slice(0, 8);
+      const also = (Array.isArray(d.also) ? d.also : []).filter(n => Number.isInteger(n) && n > 0 && n < d.on);
+      const within = Number.isInteger(d.within) && d.within > 0 && d.within <= 240 ? d.within : null;
+      const ai = ['Agree', 'Disagree', 'Did not use'].includes(d.ai) ? d.ai : null;
+      /* the decision is stored first; NOT STEMI then closes the pathway as a separate event */
       D.run(`INSERT INTO decisions(id,cad,kind,on_ecg,also_json,reason,note,advice,reasons_json,instruction,within_min,ai_feedback,decided_at,received_at,decided_by,decided_by_title,user_id)
              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-        D.uid('x'), cad, d.k, d.on, J(d.also || []), d.reason || '', d.note || '', d.adv || '', J(d.reasons || []), d.instr || '', d.within || null, d.ai || null, t, rcv, DOCN, DOCT, user.id);
-      const lab = { confirm: 'STEMI confirmed', not: 'Cardiologist decision: NOT STEMI —', repeat: 'Unclear: repeat ECG requested' }[d.k];
-      const rs = d.reasons || [];
-      W.au(t, `${lab} ${d.k === 'not' ? DOCT : 'by ' + DOCN} on ECG ${d.on}${d.reason ? ' · reason: ' + d.reason : ''}${rs.length ? ' · ' + rs.join(', ') : ''}${d.note ? ' · note: ' + d.note : ''}`, DOCT, 'key');
-      if (d.ai) W.au(t, `AI report feedback from ${DOCN}: ${d.ai}`, DOCT, 'view');
-      /* NOT STEMI ends the STEMI pathway at once: no cath-lab activation, no crew step. The CAD incident is not touched */
+        D.uid('x'), cad, d.k, d.on, J(also), reason, note, adv, J(reasons), instr, within, ai, t, rcv, nm, `${nm}, Cardiologist`, null);
+      D.run('UPDATE cases SET cardiologist_decision=?, cardiologist_decision_at=? WHERE cad=?', d.k, t, cad);
+      const extra = [reason && 'reason: ' + reason, reasons.length && reasons.join(', '), instr && 'instruction: ' + instr, within && `within ${within} min`, note && 'note to the crew: ' + note, adv && 'advice: ' + adv].filter(Boolean);
+      W.by(t, `Cardiologist decision: ${RULES.DECISIONS[d.k]} — ${nm} · on ECG ${d.on}${also.length ? ` (also reviewed: ${also.map(n => 'ECG ' + n).join(', ')})` : ''}${extra.length ? ' · ' + extra.join(' · ') : ''}`, nm, 'key');
+      if (ai) W.by(t, `AI report feedback from ${nm}: ${ai}`, nm, 'view');
       if (d.k === 'not') {
-        markClosed(cad, t, DOCT, user.id, CLOSE_NOT);
-        W.au(t, `STEMI pathway automatically closed following Cardiologist NOT STEMI decision — CAD #${cad} · the CAD incident itself is not changed`, 'Platform', 'key');
+        markClosed(cad, t, nm, null, PW.CLOSE.not);
+        W.sys(t, `STEMI pathway automatically closed following the Cardiologist NOT STEMI decision — CAD #${cad} · no cath-lab activation · read-only · the CAD incident itself is not changed`, 'key');
         W.upd(t, 'closed', 'NOT STEMI — PATHWAY CLOSED', {});
       }
-      break;
+      return true;
     }
-    case 'call':
-      W.au(t, d.end ? `Call with ${C.unit} ended · ${d.len}` : `Call started with ${C.unit}`, DOCT, 'view');
-      break;
     case 'note':
-      W.au(t, String(d.text || '').slice(0, 500), DOCT, 'view');
-      break;
+      W.by(t, RULES.cleanText(d.text), optName(d.name) || C.cardiologist_name || '', 'view');
+      return true;
     default:
       return false;
   }
-  return true;
 }
 
-/* ---------- applying a batch of actions from one device, in order; each action is stored once ---------- */
-function applyOps(user, ops) {
-  const cad = seed.activeCad();
-  const results = [];
+const HANDLERS = { crew: crewOp, er: erOp, cardiologist: docOp };
+
+/* ---------- applying a batch of actions from one screen, in order; each action is stored once ---------- */
+function applyOps(A, ops) {
+  const results = [], touched = new Set();
   for (const o of ops) {
-    if (!o || typeof o.id !== 'string' || typeof o.k !== 'string') { results.push({ id: o && o.id, ok: false, error: 'bad action' }); continue; }
-    if (!cad) { results.push({ id: o.id, ok: false, error: 'No case is open on the platform' }); continue; }
-    if (o.cad && o.cad !== cad) { results.push({ id: o.id, ok: false, error: 'This case is no longer the active test case' }); continue; }
+    if (!o || typeof o.id !== 'string' || typeof o.k !== 'string' || o.id.length > 80) { results.push({ id: o && o.id, ok: false, error: 'This action could not be read.', status: 400 }); continue; }
+    const cad = CADN.normalize(o.cad), F = cad && facts(cad);
+    if (!F || (A.role === 'crew' && F.C.unit !== A.unit)) { results.push({ id: o.id, ok: false, error: 'There is no case with this CAD number for this screen.', status: 404 }); continue; }
     const seen = D.get('SELECT received_at FROM ops WHERE op_id=?', o.id);
     if (seen) { results.push({ id: o.id, ok: true, dup: true, rcv: seen.received_at }); continue; }
-    /* a closed case (handover completed) is read-only: only viewing it is still recorded */
-    /* a closed STEMI pathway is read-only: only viewing it, and the crew confirming it has seen the decision, are recorded */
-    if (caseRow(cad).closed_at && !['viewed', 'seen', 'compare', 'decrcv', 'decack'].includes(o.k)) { results.push({ id: o.id, ok: false, error: 'This STEMI pathway is closed: it is read-only' }); continue; }
-    const rcv = Date.now(), W = writer(cad, user);
+    const rule = PW.guard(A.role, o.k, F);
+    if (rule) { results.push({ id: o.id, ok: false, error: rule, status: 409 }); continue; }
+    const rcv = Date.now(), W = writer(cad, A);
+    o.t = sane(o.t, rcv);
     try {
       D.tx(() => {
-        D.run('INSERT INTO ops(op_id,cad,user_id,role,kind,device_time,received_at,payload_json) VALUES(?,?,?,?,?,?,?,?)', o.id, cad, user.id, user.role, o.k, o.t, rcv, J(o.data || {}));
-        const ok = user.role === 'crew' ? crewOp(user, o, cad, rcv, W) : docOp(user, o, cad, rcv, W);
-        if (!ok) throw Object.assign(new Error(`"${o.k}" is not an action for the ${user.role} role`), { status: 403 });
-        /* an entry saved on the tablet while it was offline keeps both times: when it was saved and when the server received it */
-        const crewT = userT(user);
-        W.flush(rcv - o.t > 5000 && user.role === 'crew' ? a => { if (a.who === crewT) a.text += a.t === rcv ? ` · saved on the tablet ${hms(o.t)}, received on reconnection` : ` · received ${hms(rcv)}, on reconnection`; } : null);
+        D.run('INSERT INTO ops(op_id,cad,user_id,role,kind,device_time,received_at,payload_json) VALUES(?,?,?,?,?,?,?,?)', o.id, cad, A.id || A.device, A.role, o.k, o.t, rcv, J(o.data || {}));
+        const fn = HANDLERS[A.role];
+        if (!fn || !fn(A, o, F, rcv, W)) throw err(403, `"${o.k}" is not an action for the ${A.role} screen.`);
+        /* an entry saved on the tablet while it was offline keeps both times: when it was saved and when it was received */
+        const me = A.role === 'crew' ? crewT(A) : null;
+        W.flush(me && rcv - o.t > 5000 ? a => { if (a.who === me) a.text += a.t === rcv ? ` · saved on the tablet ${hms(o.t)}, received on reconnection` : ` · received ${hms(rcv)}, on reconnection`; } : null);
       });
       results.push({ id: o.id, ok: true, rcv });
+      touched.add(cad);
     } catch (e) {
-      results.push({ id: o.id, ok: false, error: e.message, status: e.status || 500 });
+      results.push({ id: o.id, ok: false, error: e.status ? e.message : 'The server could not store this action.', status: e.status || 500 });
       if (!e.status) console.error('action failed', o.k, e);
     }
   }
-  push();
+  touched.forEach(push);
   return results;
 }
 
-/* ---------- closing the STEMI pathway (never the operational CAD incident: ICCC / ACC and ePCR own that) ----------
-   Two ways: the crew presses COMPLETE STEMI PATHWAY, or the cardiologist's NOT STEMI decision closes it automatically.
-   Either way the whole case stays stored, moves to Completed and is read-only. No handover documentation is asked for:
-   arrival, transfer of care and final observations belong to ICCC / ePCR. */
-const CLOSE_CREW = { reason: 'STEMI pathway completed', source: 'crew' };
-const CLOSE_NOT = { reason: 'Cardiologist decision: NOT STEMI', source: 'automatic following Cardiologist decision' };
-/* inside a transaction: mark the pathway closed */
+/* ---------- closing the STEMI pathway (never the operational CAD incident: ICCC and ePCR own that) ----------
+   Three ways: the ER Doctor's NOT SUSPICIOUS FOR STEMI (cardiology not activated), the Cardiologist's NOT STEMI (closed
+   automatically), or the crew's COMPLETE STEMI PATHWAY after CONFIRMED STEMI. The case stays stored, moves to Completed
+   and is read-only. No handover documentation is asked for: it belongs to ICCC / ePCR. */
 function markClosed(cad, t, byT, userId, why) {
   D.run("UPDATE cases SET status='closed', closed_at=?, closed_by=?, closed_user_id=?, closure_reason=?, closure_source=? WHERE cad=?", t, byT, userId, why.reason, why.source, cad);
 }
-function closeCase(user, rawCad) {
-  const cad = seed.activeCad(), C = caseRow(cad);
-  if (!C || (rawCad && CADN.normalize(rawCad) !== cad)) return { status: 'notactive' };
-  if (C.closed_at) return { status: 'closed', cad, already: true };
-  if (!C.server_received_at) return { status: 'incomplete', cad, missing: ['The case has not been sent yet'] };
-  /* only after CONFIRMED STEMI: NOT STEMI closes the pathway by itself, and a repeat ECG request keeps it under review */
-  const last = D.get('SELECT kind FROM decisions WHERE cad=? ORDER BY decided_at DESC, rowid DESC LIMIT 1', cad);
-  if (!last || last.kind !== 'confirm') return { status: 'incomplete', cad, missing: ['COMPLETE STEMI PATHWAY is available only after the cardiologist decides CONFIRMED STEMI'] };
-  const t = Date.now(), CREWT = userT(user), W = writer(cad, user);
+function completeCase(A, raw) {
+  const cad = CADN.normalize(raw), F = cad && facts(cad);
+  if (!F || F.C.unit !== A.unit) return { status: 'missing', cad };
+  if (F.C.closed_at) return { status: 'closed', cad, kind: PW.closedKind(F.C) };
+  if (F.state !== 'confirmed') return { status: 'incomplete', cad, state: F.state, error: 'COMPLETE STEMI PATHWAY is available only while the current Cardiologist decision is CONFIRMED STEMI.' };
+  const t = Date.now(), ME = crewT(A), W = writer(cad, A);
   D.tx(() => {
-    markClosed(cad, t, CREWT, user.id, CLOSE_CREW);
-    W.au(t, `STEMI pathway completed and closed by ${CREWT} (${C.unit}) — CAD #${cad} · the CAD incident itself is not changed`, CREWT, 'key');
-    W.upd(t, 'closed', 'STEMI PATHWAY COMPLETED · closed by the crew', {});
+    markClosed(cad, t, ME, A.id, PW.CLOSE.crew);
+    W.by(t, `STEMI pathway completed and closed by ${ME} (${F.C.unit}) — CAD #${cad} · read-only · the CAD incident itself is not changed`, ME, 'key');
+    W.upd(t, 'closed', 'STEMI PATHWAY COMPLETED', {});
     W.flush();
   });
-  push();
-  return { status: 'closed', cad };
+  push(cad);
+  return { status: 'completed', cad };
 }
-/* not-stemi | completed */
-const closedKind = C => (C.closure_reason === CLOSE_NOT.reason ? 'not-stemi' : 'completed');
+
+/* ---------- who may see which case ---------- */
+/* on the live screens (the test console sees every case, including those taken off the screens) */
+function canSee(A, F) {
+  if (A.role === 'control') return true;
+  if (!F.C.active) return false;
+  if (A.role === 'crew') return F.C.unit === A.unit;
+  if (A.role === 'er') return !!F.C.server_received_at;
+  if (A.role === 'cardiologist') return !!F.activated;
+  return false;
+}
+/* opened by CAD number (completed cases): the cardiologist finds an ER-closed case only by searching for it, and sees
+   that cardiology was not activated */
+function canView(A, F, searching) {
+  if (A.role === 'control') return true;
+  if (A.role === 'crew') return F.C.unit === A.unit;
+  if (A.role === 'er') return !!F.C.server_received_at;
+  if (A.role === 'cardiologist') return !!F.activated || (searching && RULES.isClosed(F.state));
+  return false;
+}
+function caseSummary(F) {
+  const C = F.C, cur = (tb, k) => D.get(`SELECT value_text v FROM ${tb} WHERE cad=? AND field=? ORDER BY received_at DESC, rowid DESC LIMIT 1`, C.cad, k);
+  const e1 = D.get('SELECT acquired_at FROM ecgs WHERE cad=? AND n=1', C.cad);
+  const v = k => { const r = cur(ptTable(k), k); return r ? r.v : null; };
+  return {
+    cad: C.cad, unit: C.unit, state: F.state, legacy: F.legacy, active: !!C.active, created: C.created_at,
+    closedAt: C.closed_at || null, closedBy: C.closed_by || null, kind: C.closed_at ? PW.closedKind(C) : null,
+    pt: { age: v('age'), sex: v('sex'), complaint: v('complaint') }, ecgAt: e1 ? e1.acquired_at : null,
+    er: { name: C.er_doctor_name || null, assessment: C.er_assessment || null, reason: C.er_non_activation_reason || null },
+    cardio: { activated: F.activated || null, name: C.cardiologist_name || (F.legacy && F.alert && F.alert.acknowledged_by) || null, decision: F.lastDec ? F.lastDec.kind : null }
+  };
+}
 /* completed cases, found by CAD number (part of it is enough); newest first */
-function listClosed(q) {
-  const n = CADN.normalize(q).replace(/[^0-9A-Z-]/g, '');
-  return D.all('SELECT cad, unit, closed_at, closed_by, closure_reason FROM cases WHERE closed_at IS NOT NULL AND cad LIKE ? ORDER BY closed_at DESC LIMIT 50', `%${n}%`).map(r => {
-    const d = D.get('SELECT kind FROM decisions WHERE cad=? ORDER BY decided_at DESC, rowid DESC LIMIT 1', r.cad);
-    return { cad: r.cad, unit: r.unit, closedAt: r.closed_at, closedBy: r.closed_by, kind: closedKind(r), dec: d ? d.kind : null };
-  });
+function listClosed(A, q) {
+  const n = CADN.normalize(q || '').replace(/[^0-9A-Z-]/g, ''), out = [];
+  for (const r of D.all('SELECT cad FROM cases WHERE closed_at IS NOT NULL AND cad LIKE ? ORDER BY closed_at DESC LIMIT 200', `%${n}%`)) {
+    const F = facts(r.cad);
+    if (F && canView(A, F, n.length >= 4)) out.push(caseSummary(F));
+    if (out.length >= 50) break;
+  }
+  return out;
 }
-/* a completed case, read-only, for the history view */
-function viewClosed(raw) {
-  const C = caseRow(CADN.normalize(raw));
-  return C && C.closed_at ? snapshot(C.cad) : null;
+/* one case by CAD number, read-only, for a screen allowed to open it */
+function viewCase(A, raw) {
+  const F = facts(CADN.normalize(raw));
+  return F && canView(A, F, true) ? snapshot(F.C.cad, F) : null;
 }
 
 /* ---------- the case under the CAD number the crew entered manually ---------- */
-const casePublic = C => ({ cad: C.cad, active: !!C.active, submittedAt: C.server_received_at || null, unit: C.unit, openedAt: C.pathway_opened_at || C.created_at });
-/* is this CAD number valid, and is there already a case under it? (the tablet asks before the case is sent) */
+const casePublic = C => ({ cad: C.cad, active: !!C.active, submittedAt: C.server_received_at || null, unit: C.unit, openedAt: C.pathway_opened_at || C.created_at, closedAt: C.closed_at || null });
+/* is this CAD number valid, and is there already a case under it? (the tablet asks before sending) */
 function checkCad(raw) {
   const c = CADN.check(raw);
   if (!c.ok) return { ok: false, cad: c.cad, error: c.error, detail: c.detail };
   const C = caseRow(c.cad);
   return { ok: true, cad: c.cad, exists: !!C, ...(C ? { existing: casePublic(C) } : {}) };
 }
-/* the active case changed: every screen but the crew tablets starts afresh (the tablet that made the change already holds it) */
-function announce(cad, toCrew) {
-  live.broadcast('init', { now: Date.now(), cad, epoch: D.epoch() }, toCrew ? null : c => c.role !== 'crew');
-  push();
-}
-/* create the case when the crew first sends it. The CAD number is the one the EMT typed, normalised; a second case under
-   the same number is never created and an existing case is never overwritten. Resending the same create (same tablet case
+/* create the case when the crew sends it. The CAD number is the one the EMT typed, normalised; a second case under the
+   same number is never created and an existing case is never overwritten. Resending the same create (same tablet case
    id) is harmless. → { status: 'created' | 'same' | 'exists' | 'invalid', ... } */
-function createCase(user, b, source) {
+function createCase(A, b, source) {
   const c = CADN.check(b && b.cad);
   if (!c.ok) return { status: 'invalid', cad: c.cad, error: c.error, detail: c.detail };
   const cad = c.cad, cid = String((b && b.cid) || '').slice(0, 64) || null, rcv = Date.now();
@@ -344,61 +448,63 @@ function createCase(user, b, source) {
     if (cid && ex.created_cid === cid) return { status: 'same', cad };
     return { status: 'exists', cad, existing: casePublic(ex) };
   }
-  const crew = user.role === 'crew' ? user : D.get("SELECT * FROM users WHERE role='crew' ORDER BY id LIMIT 1");
-  const CREWT = userT(crew), UNIT = crew.unit, src = source || 'manual-crew';
-  const ok = t => (Number.isFinite(t) && t > rcv - 24 * 3600000 && t <= rcv + 60000 ? t : rcv);
+  const crew = A.role === 'crew' ? A : { ...seed.crewUser(), device: A.device };
+  const ME = crewT(crew), UNIT = crew.unit, src = source || 'manual-crew';
+  const ok = t => (Number.isFinite(t) && t > rcv - 24 * 3600e3 && t <= rcv + 60e3 ? t : rcv);
   const openedAt = ok(+b.openedAt), hist = (Array.isArray(b.hist) ? b.hist : []).slice(-10).map(h => ({ v: CADN.normalize(h && h.v), t: ok(+(h && h.t)) })).filter(h => h.v);
   const enteredAt = hist.length ? hist[hist.length - 1].t : openedAt;
-  const how = src === 'manual-crew' ? 'CAD number entered manually by crew (not from dispatch)' : 'CAD number entered manually in the test console (demo case, not from dispatch)';
+  const how = src === 'manual-crew' ? 'CAD number manually entered by crew from dispatch/MDT information' : 'CAD number entered in the test console (fictional demo case)';
   const W = writer(cad, crew);
   D.tx(() => {
-    D.run('UPDATE cases SET active=0 WHERE active=1');
     D.run(`INSERT INTO cases(cad,active,unit,emirate,crew_name,incident_type,created_at,pathway_opened_at,pathway_opened_by,cad_source,cad_entered_at,cad_entered_by,created_cid)
-           VALUES(?,1,?,?,?,?,?,?,?,?,?,?,?)`, cad, UNIT, crew.emirate || '', CREWT, 'STEMI pathway', rcv, openedAt, CREWT, src, enteredAt, CREWT, cid);
-    W.au(openedAt, `STEMI case opened by ${CREWT} (${UNIT}) — CAD #${cad} · ${how}`, CREWT, 'key');
-    hist.forEach((h, i) => { if (i > 0 && h.v !== hist[i - 1].v) W.au(h.t, `CAD number corrected by crew before sending: CAD #${hist[i - 1].v} → CAD #${h.v} · nothing had been sent`, CREWT, 'key'); });
-    W.au(rcv, `Case created on the platform under CAD #${cad} (CAD number checked: no existing case with this number)`, 'Platform', 'key');
+           VALUES(?,1,?,?,?,?,?,?,?,?,?,?,?)`, cad, UNIT, crew.emirate || '', ME, 'STEMI pathway', rcv, openedAt, ME, src, enteredAt, ME, cid);
+    W.by(openedAt, `STEMI case opened by ${ME} (${UNIT}) — CAD #${cad} · ${how}`, ME, 'key');
+    hist.forEach((h, i) => { if (i > 0 && h.v !== hist[i - 1].v) W.by(h.t, `CAD number corrected by crew before sending: CAD #${hist[i - 1].v} → CAD #${h.v} · nothing had been sent`, ME, 'key'); });
+    W.sys(rcv, `Case created on the platform under CAD #${cad} (CAD number checked: no existing case with this number)`, 'key');
     W.flush();
   });
-  announce(cad, src !== 'manual-crew');
+  push(cad);
   return { status: 'created', cad };
 }
-/* CASE ALREADY EXISTS → OPEN EXISTING CASE: the existing case becomes the active case on the tablet; nothing is created */
-function openExisting(user, raw) {
+/* CASE ALREADY EXISTS → OPEN EXISTING CASE: the existing case opens on the tablet; nothing is created or changed */
+function openExisting(A, raw) {
   const c = CADN.check(raw);
   if (!c.ok) return { status: 'invalid', cad: c.cad, error: c.error, detail: c.detail };
-  const C = caseRow(c.cad);
-  if (!C) return { status: 'missing', cad: c.cad };
-  const t = Date.now(), W = writer(c.cad, user);
+  const F = facts(c.cad);
+  if (!F) return { status: 'missing', cad: c.cad };
+  if (F.C.unit !== A.unit) return { status: 'other-unit', cad: c.cad };
+  const t = Date.now(), W = writer(c.cad, A);
   D.tx(() => {
-    D.run('UPDATE cases SET active=0 WHERE active=1 AND cad<>?', c.cad);
-    D.run('UPDATE cases SET active=1 WHERE cad=?', c.cad);
-    W.au(t, `Existing case CAD #${c.cad} opened on the ${user.unit || 'crew'} tablet by ${userT(user)} · the same CAD number was entered again; no second case created`, userT(user), 'key');
+    if (!F.C.active) D.run('UPDATE cases SET active=1 WHERE cad=?', c.cad);
+    W.by(t, `Existing case CAD #${c.cad} opened on the ${A.unit} tablet by ${crewT(A)} · the same CAD number was entered again; no second case created`, crewT(A), 'key');
     W.flush();
   });
-  announce(c.cad, false);
+  push(c.cad);
   return { status: 'opened', cad: c.cad, rec: snapshot(c.cad) };
 }
-/* the test console closes the active case (it stays in the database); the crew then opens the next case with its own CAD number */
-function closeActive() {
-  const cad = seed.activeCad();
-  if (!cad) return false;
-  const W = writer(cad, null);
-  D.run('UPDATE cases SET active=0 WHERE cad=?', cad);
-  W.au(Date.now(), `Case CAD #${cad} closed from the test console (kept in the database)`, 'Test console', 'key'); W.flush();
-  announce(null, true);
+/* the test console takes a case off every live screen, or returns it. Clinically nothing changes: the STEMI pathway is
+   NOT closed (only COMPLETE STEMI PATHWAY, NOT STEMI or the ER Doctor's NOT SUSPICIOUS FOR STEMI close it) */
+function setOnScreens(A, raw, on) {
+  const cad = CADN.normalize(raw), C = cad && caseRow(cad);
+  if (!C) return false;
+  if (!!C.active === !!on) return true;
+  const W = writer(cad, A);
+  D.run('UPDATE cases SET active=? WHERE cad=?', on ? 1 : 0, cad);
+  W.by(Date.now(), on ? `Case CAD #${cad} returned to the live screens from the test console` : `Case CAD #${cad} taken off the live screens from the test console · kept in the database · the STEMI pathway is not closed`, 'Test console', 'key');
+  W.flush();
+  push(cad);
   return true;
 }
 
-/* ---------- the AI service: starts once the ECG is stored, never delays the alert, never sounds ---------- */
+/* ---------- the AI service: starts once the ECG is stored, never delays an alert, never sounds ---------- */
 function aiRun(cad, n) {
   setTimeout(() => {
     if (!caseRow(cad)) return;
     const start = Date.now();
     D.run('INSERT OR IGNORE INTO ai_interpretations(cad,ecg_n,status,started_at,provider) VALUES(?,?,?,?,?)', cad, n, 'proc', start, cfg.AI_PROVIDER);
-    const W = writer(cad, null);
-    W.au(start, `AI analysis of ECG ${n} started (Primary image)`, 'AI service');
-    W.flush(); push();
+    const W = writer(cad, SYS);
+    W.sys(start, `AI analysis of ECG ${n} started (Primary image)`, 'evt', 'AI service (simulated)');
+    W.flush(); push(cad);
     if (D.sim().ai === 'proc') return; /* held at "processing" by the test console */
     setTimeout(() => aiFinish(cad, n).catch(e => console.error('AI', e)), cfg.MOCK_AI_DELAY_MS);
   }, 1200);
@@ -407,6 +513,7 @@ async function aiFinish(cad, n) {
   const a = D.get('SELECT * FROM ai_interpretations WHERE cad=? AND ecg_n=?', cad, n);
   if (!a || a.status !== 'proc') return;
   const e = D.get('SELECT * FROM ecgs WHERE cad=? AND n=?', cad, n);
+  if (!e) return;
   const pri = D.get('SELECT * FROM ecg_images WHERE cad=? AND ecg_n=? AND i=?', cad, n, e.primary_image) || D.get('SELECT * FROM ecg_images WHERE cad=? AND ecg_n=? ORDER BY i LIMIT 1', cad, n);
   const pe = n > 1 ? D.get('SELECT * FROM ecgs WHERE cad=? AND n=?', cad, n - 1) : null;
   const pa = pe ? D.get('SELECT * FROM ai_interpretations WHERE cad=? AND ecg_n=?', cad, n - 1) : null;
@@ -414,22 +521,21 @@ async function aiFinish(cad, n) {
   try {
     out = await AI.provider().analyse({
       cad,
-      ecg: { n, acq: e.acquired_at, variant: e.variant, same: !!e.same_as_previous, pri: e.primary_image, primary: { quality: pri.quality, source: pri.source, filePath: pri.file_name } },
+      ecg: { n, acq: e.acquired_at, variant: e.variant, same: !!e.same_as_previous, pri: e.primary_image, primary: { quality: pri ? pri.quality : 'good', source: pri ? pri.source : 'file', filePath: pri ? pri.file_name : null } },
       previous: pe ? { n: pe.n, acq: pe.acquired_at, ai: pa ? { st: pa.status } : null } : null,
       unavailable: D.sim().ai === 'down'
     });
-  } catch (err) {
-    console.error('AI service failed', err);
+  } catch (x) {
+    console.error('AI service failed', x);
     out = { st: 'down', result: { ver: 'AI service error' } };
   }
   const t = Date.now();
   D.run('UPDATE ai_interpretations SET status=?, completed_at=?, version=?, result_json=? WHERE cad=? AND ecg_n=?', out.st, t, out.result.ver || '', J(out.result), cad, n);
   const txt = { ok: `AI analysis completed · ECG ${n}`, lim: `AI interpretation limited — ECG quality insufficient · ECG ${n}`, wh: `AI interpretation limited — ECG quality insufficient · ECG ${n}`, down: `AI interpretation unavailable · ECG ${n}` }[out.st];
-  const kept = n > 1 ? ` · new ECG analysis; the analysis of ECG ${n - 1} is kept` : '', imp = out.result.imp ? ` · impression: ${out.result.imp}` : '';
-  const W = writer(cad, null);
-  W.au(t, `${txt} (acquired ${hms(e.acquired_at)})${kept}${imp} · the same analysis sent to the crew tablet and the cardiologist`, 'AI service (decision support, simulated)', 'key');
+  const W = writer(cad, SYS);
+  W.sys(t, `${txt} (acquired ${hms(e.acquired_at)})${out.result.imp ? ` · impression: ${out.result.imp}` : ''} · the same analysis is shown on every screen · decision support only`, 'key', 'AI service (decision support, simulated)');
   W.upd(t, 'ai', txt, { n });
-  W.flush(); push();
+  W.flush(); push(cad);
 }
 /* analyses held at "processing" finish once the test console lets them, and after a server restart */
 function aiResume() {
@@ -437,56 +543,40 @@ function aiResume() {
   D.all("SELECT cad, ecg_n FROM ai_interpretations WHERE status='proc'").forEach(r => setTimeout(() => aiFinish(r.cad, r.ecg_n).catch(console.error), 1500));
 }
 
-/* ---------- reminders and escalation: thresholds are governance configurable and NOT set, so only the test console fires them ---------- */
-function reminder() {
-  const cad = seed.activeCad(), A = D.get('SELECT * FROM cardiologist_alerts WHERE cad=?', cad);
-  if (!A || A.acknowledged_at) return false;
-  const t = Date.now(), n = D.get("SELECT COUNT(*) c FROM alert_followups WHERE cad=? AND kind='reminder'", cad).c + 1;
-  D.run("INSERT INTO alert_followups(cad,kind,level,target,at) VALUES(?,?,?,?,?)", cad, 'reminder', n, A.cardiologist, t);
-  const W = writer(cad, null); W.au(t, `Acknowledgement reminder ${n} sent to ${A.cardiologist} (interval: governance configurable, not set · fired from the test console)`, 'Platform', 'key'); W.flush();
-  push(); return true;
-}
-function escalate() {
-  const cad = seed.activeCad(), A = D.get('SELECT * FROM cardiologist_alerts WHERE cad=?', cad);
-  if (!A || A.acknowledged_at) return false;
-  const t = Date.now(), lv = D.get("SELECT COUNT(*) c FROM alert_followups WHERE cad=? AND kind='escalation'", cad).c + 1;
-  const to = lv === 1 ? 'Backup cardiologist (Dr Y, fictional)' : 'ACC duty officer (fictional)';
-  D.run("INSERT INTO alert_followups(cad,kind,level,target,at) VALUES(?,?,?,?,?)", cad, 'escalation', lv, to, t);
-  const W = writer(cad, null); W.au(t, `Escalation level ${lv}: ${to} alerted · case not acknowledged (threshold: governance configurable, not set · fired from the test console)`, 'Platform', 'key'); W.flush();
-  push(); return true;
-}
-
-/* ---------- presence: the server knows when a device stops reaching it ---------- */
-live.onPresence((role, up, wasAt) => {
-  const cad = seed.activeCad(), C = caseRow(cad);
-  if (!C || (up && !wasAt)) { push(); return; }
-  const t = Date.now(), who = role === 'crew' ? `${C.unit} tablet` : `${onDutyCardiologist().name}'s device`;
-  const W = writer(cad, null); W.au(t, up ? `${who} reconnected · changes synchronised` : `${who} lost connection to the platform`, 'Platform', 'key'); W.flush();
-  push();
-});
-
-/* ---------- the shared case record, in the shape both screens read ---------- */
-function snapshot(cad) {
-  const C = caseRow(cad);
-  if (!C) return null;
+/* ---------- the shared case record, in the shape every screen reads ---------- */
+function snapshot(cad, F) {
+  F = F || facts(cad);
+  if (!F) return null;
+  const C = F.C, A = F.alert;
   const R = {
-    cad, unit: C.unit, emirate: C.emirate, crew: C.crew_name,
+    cad, unit: C.unit, emirate: C.emirate, crew: C.crew_name, state: F.state, legacy: F.legacy, active: !!C.active, created: C.created_at,
     cadEntry: { src: C.cad_source || 'simulated-feed', at: C.cad_entered_at, by: C.cad_entered_by },
-    incident: { type: C.incident_type, disp: C.dispatched_at, atPt: C.at_patient_at },
-    path: C.pathway_opened_at ? { at: C.pathway_opened_at, by: C.pathway_opened_by } : null,
+    path: { at: C.pathway_opened_at || C.created_at, by: C.pathway_opened_by || C.crew_name },
     sub: C.server_received_at ? { send: C.submitted_at, rcv: C.server_received_at, late: !!C.delivered_late } : null,
-    downtime: C.downtime_at ? { at: C.downtime_at } : null,
-    pt: {}, rec: {}, ecgs: [], dest: [], eta: [], alert: null, ack: C.acknowledged_at, opened: C.opened_at, views: {}, cmp: C.compared_at,
-    dec: [], upd: [], audit: [], ops: {}, presence: live.presence()
+    er: {
+      alerted: C.er_alerted_at || null, shown: C.er_alert_shown_at || null, name: C.er_doctor_name || null, accepted: C.er_accepted_at || null,
+      assessment: C.er_assessment || null, at: C.er_assessment_at || null, by: C.er_assessed_by || null, on: C.er_assessment_ecg || null,
+      reason: C.er_non_activation_reason || null, comment: C.er_non_activation_comment || null, crewAck: C.er_outcome_seen_at || null
+    },
+    cardio: {
+      activated: F.activated || null, by: C.cardiology_activated_by || null,
+      reason: C.cardiology_activation_reason || (F.legacy ? 'Sent directly to the cardiologist (case made before ER review was introduced)' : null),
+      alerted: A ? A.alerted_at : null, shown: A ? A.shown_at : null, ack: F.acked || null,
+      name: C.cardiologist_name || (F.legacy && A ? A.acknowledged_by : null) || null, opened: C.opened_at || null,
+      decision: F.lastDec ? F.lastDec.kind : null, decisionAt: F.lastDec ? F.lastDec.decided_at : null
+    },
+    pt: {}, rec: {}, ecgs: [], dec: [], upd: [], audit: [], views: { er: {}, cardiologist: {} },
+    hopen: C.handover_opened_at || null,
+    closed: C.closed_at ? { at: C.closed_at, by: C.closed_by, reason: C.closure_reason || PW.CLOSE.crew.reason, source: C.closure_source || 'crew', kind: PW.closedKind(C) } : null
   };
   for (const tb of ['patient_details', 'observations']) {
     D.all(`SELECT rowid, * FROM ${tb} WHERE cad=? ORDER BY received_at, rowid`, cad).forEach(r => {
-      (R.pt[r.field] || (R.pt[r.field] = [])).push({ id: r.id, v: r.value_text, raw: P(r.raw_json), t: r.taken_at, rcv: r.received_at, by: r.entered_by, kind: r.entry_kind, why: r.reason || '', op: r.op_id });
+      (R.pt[r.field] || (R.pt[r.field] = [])).push({ id: r.id, v: r.value_text, raw: P(r.raw_json), t: r.taken_at, rcv: r.received_at, by: r.entered_by, kind: r.entry_kind, why: r.reason || '' });
     });
   }
   D.all('SELECT rowid, * FROM treatments WHERE cad=? ORDER BY received_at, rowid', cad).forEach(r => {
     const x = R.rec[r.item_key] || (R.rec[r.item_key] = { label: r.label, group: r.category, vers: [] });
-    x.vers.push({ id: r.id, v: r.value_text, nv: !!r.not_obtained, t: r.taken_at, rcv: r.received_at, by: r.entered_by, kind: r.entry_kind, op: r.op_id });
+    x.vers.push({ id: r.id, v: r.value_text, nv: !!r.not_obtained, t: r.taken_at, rcv: r.received_at, by: r.entered_by, kind: r.entry_kind });
   });
   const ais = {};
   D.all('SELECT * FROM ai_interpretations WHERE cad=?', cad).forEach(a => {
@@ -494,83 +584,96 @@ function snapshot(cad) {
   });
   D.all('SELECT * FROM ecgs WHERE cad=? ORDER BY n', cad).forEach(e => {
     const imgs = D.all('SELECT * FROM ecg_images WHERE cad=? AND ecg_n=? ORDER BY i', cad, e.n).map(x => ({
-      i: x.i, kind: x.kind, q: x.quality, at: x.captured_at, rcv: x.received_at, after: !!x.added_after_send, src: x.source, url: `/files/${x.id}`, op: x.op_id
+      i: x.i, kind: x.kind, q: x.quality, at: x.captured_at, rcv: x.received_at, after: !!x.added_after_send, src: x.source, url: `/files/${x.id}`
     }));
-    R.ecgs.push({ n: e.n, acq: e.acquired_at, variant: e.variant, pri: e.primary_image, same: !!e.same_as_previous, sent: e.sent_at, rcv: e.received_at, by: e.sent_by, op: e.op_id, imgs, ai: ais[e.n] || null });
+    R.ecgs.push({ n: e.n, acq: e.acquired_at, variant: e.variant, pri: e.primary_image, same: !!e.same_as_previous, sent: e.sent_at, rcv: e.received_at, by: e.sent_by, why: e.time_reason || '', imgs, ai: ais[e.n] || null });
   });
-  R.dest = D.all('SELECT rowid, * FROM destinations WHERE cad=? ORDER BY at, rowid', cad).map(d => ({ id: d.id, hosp: d.hospital, st: d.status, reason: d.reason, why: d.why || '', t: d.at, rcv: d.received_at, by: d.set_by, from: d.from_hospital }));
-  R.eta = D.all('SELECT rowid, * FROM etas WHERE cad=? ORDER BY at, rowid', cad).map(e => ({ id: e.id, min: e.minutes, dep: e.departed_at, t: e.at, rcv: e.received_at, by: e.set_by, why: e.why }));
-  const A = D.get('SELECT * FROM cardiologist_alerts WHERE cad=?', cad);
-  if (A) {
-    const fu = D.all('SELECT * FROM alert_followups WHERE cad=? ORDER BY at', cad);
-    R.alert = { at: A.alerted_at, who: A.cardiologist, hosp: A.hospital, dlv: A.shown_at, ack: A.acknowledged_at,
-      rem: fu.filter(f => f.kind === 'reminder').map(f => f.at), esc: fu.filter(f => f.kind === 'escalation').map(f => ({ t: f.at, to: f.target, lv: f.level })) };
-  }
-  D.all('SELECT * FROM ecg_views WHERE cad=?', cad).forEach(v => { R.views[v.ecg_n + '|' + v.i] = v.viewed_at; });
+  D.all('SELECT * FROM ecg_role_views WHERE cad=?', cad).forEach(v => { (R.views[v.role] || (R.views[v.role] = {}))[v.ecg_n + '|' + v.i] = v.viewed_at; });
+  D.all('SELECT * FROM ecg_views WHERE cad=?', cad).forEach(v => { const k = v.ecg_n + '|' + v.i; if (!R.views.cardiologist[k]) R.views.cardiologist[k] = v.viewed_at; });
   R.dec = D.all('SELECT rowid, * FROM decisions WHERE cad=? ORDER BY decided_at, rowid', cad).map(x => ({
     id: x.id, k: x.kind, at: x.decided_at, rcv: x.received_at, by: x.decided_by, byT: x.decided_by_title, on: x.on_ecg, also: P(x.also_json) || [],
     reason: x.reason || '', note: x.note || '', adv: x.advice || '', reasons: P(x.reasons_json) || [], instr: x.instruction || '', within: x.within_min, ai: x.ai_feedback, dlv: x.delivered_at, crewAck: x.crew_ack_at
   }));
-  R.upd = D.all('SELECT rowid, * FROM case_updates WHERE cad=? ORDER BY at, rowid', cad).map(u => ({ id: u.id, at: u.at, kind: u.kind, text: u.text, ref: P(u.ref_json) || {}, seen: u.seen_at }));
+  R.upd = D.all('SELECT rowid, * FROM case_updates WHERE cad=? ORDER BY at, rowid', cad).map(u => ({ id: u.id, at: u.at, kind: u.kind, text: u.text, ref: P(u.ref_json) || {} }));
   R.audit = D.all('SELECT * FROM audit_events WHERE cad=? ORDER BY at, id', cad).map((a, i) => ({ t: a.at, text: a.action, who: a.actor || '', role: a.role || '', kind: a.kind, i }));
-  D.all('SELECT op_id, received_at FROM ops WHERE cad=?', cad).forEach(o => { R.ops[o.op_id] = o.received_at; });
-  /* the STEMI pathway's closure (the CAD incident itself is never closed here) */
-  R.hopen = C.handover_opened_at || null;
-  R.closed = C.closed_at ? { at: C.closed_at, by: C.closed_by, reason: C.closure_reason || CLOSE_CREW.reason, source: C.closure_source || 'crew', kind: closedKind(C) } : null;
   return R;
 }
 
-/* push the active case to every open screen */
+/* ---------- pushing: each changed case goes to every screen allowed to see it ---------- */
+const dirty = new Set();
 let pushQ = null;
-function push() {
+function push(cad) {
+  if (cad) dirty.add(cad);
   if (pushQ) return;
   pushQ = setImmediate(() => {
     pushQ = null;
-    const cad = seed.activeCad(), rec = cad ? snapshot(cad) : null, at = Date.now();
-    live.broadcast('snap', { rec, at, presence: live.presence() });
+    const cads = [...dirty], at = Date.now();
+    dirty.clear();
+    for (const cad of cads) {
+      const F = facts(cad), rec = F ? snapshot(cad, F) : null;
+      live.each(c => {
+        if (F && canSee(c.actor, F)) { live.write(c, 'case', { cad, rec, at }); c.cads.add(cad); }
+        else if (c.cads.has(cad)) { live.write(c, 'case', { cad, rec: null, at }); c.cads.delete(cad); }
+      });
+    }
   });
 }
+/* what a screen gets when it connects: every open case it may see (the test console also gets the last closed ones) */
+function hello(c) {
+  const A = c.actor, at = Date.now(), list = [];
+  const rows = A.role === 'control'
+    ? D.all('SELECT cad FROM cases WHERE closed_at IS NULL UNION SELECT cad FROM (SELECT cad FROM cases WHERE closed_at IS NOT NULL ORDER BY closed_at DESC LIMIT 12)')
+    : D.all('SELECT cad FROM cases WHERE closed_at IS NULL AND active=1 ORDER BY created_at');
+  c.cads.clear();
+  for (const r of rows) {
+    const F = facts(r.cad);
+    if (F && canSee(A, F)) { list.push(snapshot(r.cad, F)); c.cads.add(r.cad); }
+  }
+  const out = [['init', { now: at, epoch: D.epoch(), role: A.role }], ['cfg', { sim: D.sim() }], ['cases', { list, at }]];
+  if (A.role === 'control') out.push(['presence', live.presence()]);
+  return out;
+}
+/* after the test data is reset: every screen starts afresh */
+function restartScreens() { live.each(c => { for (const [ev, data] of hello(c)) live.write(c, ev, data); }); }
+live.onPresence(() => live.broadcast('presence', live.presence(), c => c.role === 'control'));
 
 /* ---------- a pre-filled fictional case for demonstrations (test console) ----------
-   The tester types the CAD number in the test console (it is checked and normalised like the crew's entry, and a
-   duplicate is refused). The case is then sent exactly as the crew tablet would: ECG 1 (the sample test image), the
-   minimum dataset and aspirin go through the same crew actions, so the cardiologist gets the normal NEW CARDIAC CASE
-   alert and the mock AI analyses ECG 1. The crew can then add ECG 2 and update vital signs live. */
-function demoCase(rawCad) {
+   The tester types the CAD number (checked and normalised like the crew's entry; a duplicate is refused). The case is
+   then sent exactly as the crew MDT would send it: ECG 1 (the sample test image) and the minimum data go through the
+   same crew actions, so the ER gets the normal NEW STEMI CASE alarm and the mock AI analyses ECG 1. */
+function demoCase(A, rawCad) {
   const fs = require('node:fs'), path = require('node:path'), crypto = require('node:crypto');
-  const crew = D.get("SELECT * FROM users WHERE role='crew' ORDER BY id LIMIT 1");
+  const crew = { ...seed.crewUser(), device: A.device };
   const r = createCase(crew, { cad: rawCad, openedAt: Date.now() - 5000 }, 'manual-test-console');
   if (r.status !== 'created') return r;
-  const cad = r.cad;
-  const buf = fs.readFileSync(path.join(cfg.ROOT, 'samples', 'test-ecg-1-borderline-anterior.jpg'));
-  const imageId = D.uid('img'), file = imageId + '.jpg';
+  const cad = r.cad, buf = fs.readFileSync(path.join(cfg.ROOT, 'samples', 'test-ecg-1-borderline-anterior.jpg'));
+  const imageId = D.uid('img'), file = imageId + '.jpg', t = Date.now();
   fs.writeFileSync(path.join(cfg.IMAGE_DIR, file), buf);
-  const t = Date.now();
   D.run('INSERT INTO ecg_images(id,cad,uploaded_at,source,file_name,mime,bytes,sha256,uploaded_by) VALUES(?,?,?,?,?,?,?,?,?)',
-    imageId, cad, t - 3500, 'file', file, 'image/jpeg', buf.length, crypto.createHash('sha256').update(buf).digest('hex'), userT(crew));
+    imageId, cad, t - 3500, 'file', file, 'image/jpeg', buf.length, crypto.createHash('sha256').update(buf).digest('hex'), crewT(crew));
   const id = k => `demo-${cad}-${k}`, mdT = t - 2000;
   const md = {
-    age: { v: '58 y', raw: { v: 58, est: null }, t: mdT },
+    age: { v: '58 y', raw: { v: 58, est: false }, t: mdT },
     sex: { v: 'Male', raw: { v: 'Male' }, t: mdT },
-    complaint: { v: 'Chest pain', raw: { v: 'cp', det: '' }, t: mdT },
+    complaint: { v: 'Chest pain', raw: { v: 'cp' }, t: mdT },
     onset: { v: `${hm(t - 45 * 60000)} (approximate)`, raw: { v: t - 45 * 60000, approx: true }, t: mdT },
-    bp: { v: '142/88', raw: { sys: 142, dia: 88, at: mdT }, t: mdT },
-    hr: { v: '88 bpm', raw: { v: 88, at: mdT }, t: mdT },
-    spo2: { v: '97 %', raw: { v: 97, at: mdT }, t: mdT },
+    bp: { v: '142/88 mmHg', raw: { sys: 142, dia: 88 }, t: mdT },
+    hr: { v: '88 bpm', raw: { v: 88 }, t: mdT },
+    spo2: { v: '97 %', raw: { v: 97 }, t: mdT },
     gcs: { v: '15', raw: { v: 15 }, t: mdT }
   };
   const variant = D.sim().find === 'clear' ? 'clear' : 'border';
-  applyOps(crew, [
-    { id: id('submit'), cad, k: 'submit', t: t - 1000, data: { sendAt: t - 1000, late: false, md, ev: [{ t: mdT, text: 'Minimum dataset entered' }],
-      ecg: { n: 1, acq: t - 3000, variant, pri: 1, same: false, timeWhy: null, imgs: [{ i: 1, kind: 'full', q: 'file', at: t - 3000, imageId }] } } },
-    { id: id('asp'), cad, k: 'rec', t: t - 500, data: { k: 'asp', label: 'Aspirin', group: 'Treatments given', v: `Given · 300 mg · ${hm(t - 500)}`, nv: false, at: t - 500, multi: false, ev: 'Aspirin documented' } }
-  ]);
+  applyOps(crew, [{ id: id('submit'), cad, k: 'submit', t: t - 1000, data: { sendAt: t - 1000, late: false, md,
+    ecg: { n: 1, acq: t - 3000, variant, pri: 1, same: false, timeWhy: null, imgs: [{ i: 1, kind: 'full', q: 'file', at: t - 3000, imageId }] } } }]);
   return r;
 }
 
-function hello() {
-  const cad = seed.activeCad();
-  return [['init', { now: Date.now(), cad, epoch: D.epoch() }], ['cfg', { sim: D.sim() }], ['snap', { rec: cad ? snapshot(cad) : null, at: Date.now(), presence: live.presence() }]];
+/* every case for the test console, newest first */
+function consoleCases() {
+  return D.all('SELECT cad FROM cases ORDER BY created_at DESC LIMIT 100').map(r => caseSummary(facts(r.cad)));
 }
 
-module.exports = { applyOps, snapshot, push, hello, demoCase, checkCad, createCase, openExisting, closeActive, closeCase, listClosed, viewClosed, reminder, escalate, aiResume, aiFinish, HN };
+module.exports = {
+  applyOps, snapshot, push, hello, restartScreens, demoCase, checkCad, createCase, openExisting, setOnScreens, completeCase,
+  listClosed, viewCase, consoleCases, aiResume, aiFinish, facts
+};

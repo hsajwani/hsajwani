@@ -4,37 +4,34 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="theme-color" content="#16222b">
-<title>Cardiologist · Unified STEMI Platform (test)</title>
+<meta name="theme-color" content="#142030">
+<title>Cardiologist · STEMI Coordination (test)</title>
 <link rel="stylesheet" href="/assets/shared/fonts/fonts.css">
-<link rel="stylesheet" href="/assets/cardiologist/style.css">
-<link rel="stylesheet" href="/assets/cardiologist/app.css">
+<link rel="stylesheet" href="/assets/shared/ds.css">
 <!--APP-->
 </head>
 <body>
-<div class="stage" id="stage">
-  <div class="device dev-phone" id="device">
-    <div class="screen" id="screen">
-      <div id="view"></div>
-      <div id="alertl"></div>
-      <div id="layer"></div>
-      <div id="toast" class="toast" hidden></div>
-    </div>
-  </div>
+<div class="app">
+  <div id="top"></div>
+  <div id="banner"></div>
+  <main class="page" id="main" tabindex="-1"></main>
 </div>
-<div class="sndwarn" id="sndwarn" hidden role="alert">NEW CASE ALARM SOUND IS BLOCKED · Tap here to turn the sound on</div>
+<div id="alert"></div>
+<button class="sndwarn" id="sndwarn" type="button" hidden>ACTIVATION ALARM SOUND IS BLOCKED · Tap here to turn the sound on</button>
 <div class="gate" id="gate">
-  <div class="gate-in">
-    <div class="gate-app">Unified STEMI Platform · Cardiologist</div>
-    <h1>Start receiving cases</h1>
-    <p>This turns on the audible new-case alarm on this phone. The alarm sounds only for a new case and stops only when you press ACKNOWLEDGE &amp; OPEN.</p>
-    <button id="gate-go" type="button">START · ENABLE ALARM SOUND</button>
-    <small>You will hear a short test tone. Keep this page open in Safari, the screen on, the volume up and the silent switch off. A locked phone or a page in the background cannot sound the alarm in this test build.</small>
-    <div class="test">TEST BUILD · FICTIONAL DATA ONLY</div>
+  <div class="gate__in">
+    <div class="gate__app"><span class="brand__mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12h4l2-5 4 10 2.5-7L16 12h6"/></svg></span>STEMI Coordination · Cardiologist</div>
+    <h1>Start receiving cardiology activations</h1>
+    <p>This turns on the audible alarm on this device. It sounds only when an ER Doctor activates cardiology for a case, and stops when you press ACKNOWLEDGE &amp; OPEN.</p>
+    <button class="btn btn--block" id="gate-go" type="button">START · ENABLE ALARM SOUND</button>
+    <small>You will hear a short test tone. Keep this page open, the screen on, the volume up and the silent switch off. A locked phone or a page in the background cannot sound the alarm in this test build.</small>
+    <span class="test-note">TEST BUILD · FICTIONAL DATA ONLY</span>
   </div>
 </div>
+<script src="/assets/shared/rules.js"></script>
+<script src="/assets/shared/ui.js"></script>
+<script src="/assets/shared/clinical.js"></script>
 <script src="/assets/shared/live.js"></script>
-<script src="/assets/shared/ecg.js"></script>
 <script src="/assets/cardiologist/app.js"></script>
 </body>
 </html>

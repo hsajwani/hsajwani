@@ -1,284 +1,165 @@
-/* Automated run of the first acceptance test (Hamad's 19 steps, CAD number entered manually) with two real browsers talking to a real server:
-   a desktop browser as the crew MDT and a phone-sized browser as the cardiologist's iPhone. It also checks that the
-   alarm sounds only for the new case, that both pages survive a refresh, and that the crew's entries made without a
-   connection arrive in order on reconnection.
-   Needs Playwright (not needed to run the app):  npm install --no-save playwright && npx playwright install chromium
-   Run:  npm run test:acceptance        Screenshots go to scripts/out/.  Fictional test data only. */
-const { spawn } = require('node:child_process');
-const fs = require('node:fs');
-const path = require('node:path');
-const os = require('node:os');
-let chromium;
-try { ({ chromium } = require('playwright')); } catch (_) { console.error('Playwright is not installed. See the comment at the top of this file.'); process.exit(2); }
+/* End-to-end acceptance test of the STEMI pathway on three screens at once, in the browser:
+   crew MDT (landscape tablet 1180 × 820) → ER Doctor (desktop 1440 × 900) → Cardiologist (phone 393 × 852).
+   Scenarios: 1 crew SEND · 2 ER accept with a name · 3 ER ACTIVATE · 7 cardiologist acknowledge with a name ·
+   10 repeat ECG · 8 CONFIRMED STEMI · 11 COMPLETE STEMI PATHWAY · 15 nothing reaches the cardiologist before the ER ·
+   16 everything arrives without a refresh · 17 the alarms sound only for a new case / activation, until accepted.
+   Run: npm run test:acceptance   (cloud container: NODE_PATH=$(npm root -g) npm run test:acceptance)
+   Its own server, port and temporary database: the development server and data/ are not touched. Fictional data only. */
+const H = require('./lib/harness');
+const { chromium } = H.playwright();
+const R = H.Results('Acceptance');
+const ok = R.ok, sleep = H.sleep;
 
-const ROOT = path.resolve(__dirname, '..');
-const OUT = path.join(__dirname, 'out');
-const PORT = 3000 + Math.floor(Math.random() * 900) + 50;
-const BASE = `http://localhost:${PORT}`;
-/* the phone opens the computer's network address over plain HTTP, as the iPhone will: not a secure context, so any
-   browser feature that needs HTTPS fails here as it would on the iPhone */
-const LAN = Object.values(os.networkInterfaces()).flat().find(a => a && a.family === 'IPv4' && !a.internal);
-const DOC_BASE = LAN ? `http://${LAN.address}:${PORT}` : BASE;
-const DATA = fs.mkdtempSync(path.join(os.tmpdir(), 'stemi-acc-'));
-fs.mkdirSync(OUT, { recursive: true });
-
-const p2 = n => String(n).padStart(2, '0');
-const TODAY = new Date();
-/* the CAD number the EMT types (fictional), in the brief's format */
-const CAD = `${TODAY.getFullYear()}${p2(TODAY.getMonth() + 1)}${p2(TODAY.getDate())}-0123-1`;
-const DBQ = sql => JSON.parse(require('node:child_process').execFileSync(process.execPath, ['--disable-warning=ExperimentalWarning', '-e',
-  `const {DatabaseSync}=require('node:sqlite');const d=new DatabaseSync(${JSON.stringify(path.join(DATA, 'stemi-test.db'))});console.log(JSON.stringify(d.prepare(${JSON.stringify(sql)}).all()))`]).toString());
-const results = [];
-const ok = (n, what, cond, detail) => { results.push({ n, what, pass: !!cond, detail: detail || '' }); console.log(`${cond ? 'PASS' : 'FAIL'}  ${String(n).padStart(2)}  ${what}${detail ? ' · ' + detail : ''}`); };
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-
-/* count every tone the cardiologist's page plays, with its time, so "no sound for updates" is checked, not assumed */
-const SOUND_PROBE = `(() => { window.__tones = []; const AC = window.AudioContext || window.webkitAudioContext; if (!AC) return;
-  const orig = AC.prototype.createOscillator; AC.prototype.createOscillator = function () { window.__tones.push(Date.now()); return orig.call(this); }; })();`;
-
-async function main() {
-  const server = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', 'server/index.js'], { cwd: ROOT, env: { ...process.env, PORT: String(PORT), DATA_DIR: DATA, MOCK_AI_DELAY_MS: '2500', HEARTBEAT_MS: '2000' }, stdio: ['ignore', 'pipe', 'pipe'] });
-  let log = ''; server.stdout.on('data', d => { log += d; }); server.stderr.on('data', d => { log += d; });
-  for (let i = 0; i < 50 && !log.includes('Test console'); i++) await sleep(100);
-
+async function main(S) {
   const browser = await chromium.launch();
   const errors = [];
-  const crewCtx = await browser.newContext({ viewport: { width: 1440, height: 860 } });
-  const docCtx = await browser.newContext({ viewport: { width: 393, height: 740 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true,
-    userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1' });
-  await docCtx.addInitScript(SOUND_PROBE);
-  async function login(ctx, email, who, base) {
-    const p = await ctx.newPage();
-    p.on('pageerror', e => errors.push(`${who}: ${e.message}`));
-    p.on('console', m => { if (m.type() === 'error') errors.push(`${who} console: ${m.text()}`); });
-    await p.goto((base || BASE) + '/login');
-    await p.fill('#email', email); await p.fill('#pw', 'stemi-test');
-    await Promise.all([p.waitForNavigation(), p.click('button[type=submit]')]);
-    return p;
-  }
-  const shot = (p, name) => p.screenshot({ path: path.join(OUT, name + '.png') });
-  const crew = await login(crewCtx, 'crew@test.local', 'crew');
-  const doc = await login(docCtx, 'cardio@test.local', 'cardiologist', DOC_BASE);
-  await doc.click('#gate-go');
-  if (LAN) ok(0, 'Phone page opened from the network address over plain HTTP, as on the iPhone', !(await doc.evaluate(() => window.isSecureContext)), DOC_BASE + '/cardiologist');
-  else console.log('NOTE  this computer has no network address: the phone page ran on localhost');
-  const tones = () => doc.evaluate(() => window.__tones.length);
+  try {
+    const crew = await H.crewPage(browser, S.BASE, errors);
+    const er = await H.clinPage(browser, S.BASE, 'er', errors);
+    const doc = await H.clinPage(browser, S.BASE, 'cardiologist', errors);
+    const C = crew.page, E = er.page, D = doc.page, A = H.cad(201);
+    /* scenario 16: nothing below reloads a page */
+    const navs = { crew: 0, er: 0, doc: 0 };
+    C.on('framenavigated', f => { if (f === C.mainFrame()) navs.crew++; });
+    E.on('framenavigated', f => { if (f === E.mainFrame()) navs.er++; });
+    D.on('framenavigated', f => { if (f === D.mainFrame()) navs.doc++; });
+    const text = p => p.evaluate(() => document.body.innerText);
+    const waitText = (p, s, t) => p.waitForFunction(x => document.body.innerText.includes(x), s, { timeout: t || 15000 }).then(() => true, () => false);
+    const quiet = async (tones, ms) => { const a = await tones(); await sleep(ms || 3400); return (await tones()) - a; };
+    const erBase = await er.tones(), docBase = await doc.tones();
 
-  /* 1-3: open a new STEMI case; the EMT enters the CAD number manually */
-  await crew.waitForSelector('text=LIVE — CONNECTED');
-  ok(1, 'Crew interface open and live', await crew.isVisible('text=LIVE — CONNECTED'));
-  ok('1a', 'No CAD number generated: no case until the crew opens one', !DBQ('SELECT cad FROM cases').length && await crew.isVisible('[data-act="open-path"]'));
-  await crew.click('[data-act="open-path"]');
-  await crew.waitForSelector('#cadin');
-  ok(2, 'New STEMI case opened: the CAD NUMBER field is shown', await crew.isVisible('text=CAD NUMBER'));
-  const MSG = 'text=Enter a valid CAD number before continuing.';
-  await crew.click('[data-act="cad-ok"]');
-  ok('C1', 'Blank CAD number refused with an inline message', await crew.isVisible(MSG) && await crew.isVisible('#cadin'));
-  await crew.fill('#cadin', CAD.slice(0, 13)); await crew.click('[data-act="cad-ok"]');
-  ok('C2', 'Incomplete CAD number refused with an inline message', await crew.isVisible(MSG) && await crew.isVisible('#cadin'), CAD.slice(0, 13));
-  const typed = `   cad# ${CAD}   `;
-  await crew.fill('#cadin', typed); await crew.click('[data-act="cad-ok"]');
-  await crew.waitForSelector('[data-act="upload"]', { timeout: 5000 });
-  const head = (await crew.textContent('.ch-l1')).replace(/\s+/g, ' ');
-  ok(3, 'CAD number entered manually and shown at the top of the workspace', head.includes(`CAD #${CAD}`), head.trim().slice(0, 70));
-  ok('C3', 'Extra spaces and the "cad#" prefix normalised', head.includes(`CAD #${CAD}`) && !/cad#/.test(head), JSON.stringify(typed) + ' → CAD #' + CAD);
-  await crew.reload(); await crew.waitForSelector('text=LIVE — CONNECTED');
-  ok('C3b', 'Entered CAD number kept after a refresh before SEND (case still only on the tablet)', (await crew.textContent('#view')).includes(`CAD #${CAD}`) && !DBQ('SELECT cad FROM cases').length);
-  await crew.click('[data-act="open-case"]'); await crew.waitForSelector('[data-act="upload"]');
-  /* 4: Upload test ECG 1 from a file */
-  const [fc] = await Promise.all([crew.waitForEvent('filechooser'), crew.click('[data-act="upload"]')]);
-  await fc.setFiles(path.join(ROOT, 'samples/test-ecg-1-borderline-anterior.jpg'));
-  await crew.waitForSelector('text=Image check on this tablet', { timeout: 5000 }).catch(() => {});
-  ok(4, 'Test ECG 1 uploaded from a file', await crew.isVisible('.rv-img img'));
-  /* 5: the minimum dataset through the real drawers */
-  const tap = s => crew.click(s);
-  const keys = async ks => { for (const k of ks) await tap(`[data-key="${k}"]`); };
-  await tap('[data-act="open"][data-k="age"]'); await keys(['5', '4']); await tap('[data-act="md-done"]');
-  await tap('[data-act="set"][data-k="sex"][data-v="Male"]');
-  await tap('[data-act="open"][data-k="complaint"]'); await tap('[data-act="cpick"][data-v="cp"]');
-  await tap('[data-act="open"][data-k="onset"]'); await tap('[data-act="tq"][data-m="30"]'); await tap('[data-act="md-done"]');
-  await tap('[data-act="open"][data-k="bp"]'); await keys(['1', '1', '8', '7', '4']); await tap('[data-act="md-done"]');
-  await tap('[data-act="open"][data-k="hr"]'); await keys(['8', '4']); await tap('[data-act="md-done"]');
-  await tap('[data-act="open"][data-k="spo2"]'); await keys(['9', '6']); await tap('[data-act="md-done"]');
-  await tap('[data-act="set"][data-k="gcs"][data-v="15"]');
-  ok(5, 'Minimum dataset entered', await crew.isEnabled('[data-act="send"]'));
-  await shot(crew, '05-crew-ready-to-send');
-  /* 6 */
-  const tSend = Date.now();
-  await tap('[data-act="send"]');
-  /* 7-8: the exact CAD number the EMT entered is in the new-case alert */
-  await doc.waitForSelector('.nca', { timeout: 10000 });
-  const tAlert = Date.now();
-  ok(6, 'SEND pressed', true);
-  const alertCad = (await doc.textContent('.nca-cad')).trim();
-  ok(7, 'New case appeared on the phone automatically with the exact CAD number entered', await doc.isVisible('text=NEW CARDIAC CASE') && alertCad === `CAD #${CAD}`, `${alertCad} · ${tAlert - tSend} ms after SEND`);
-  const rows = DBQ('SELECT cad, cad_source FROM cases');
-  ok('C4', 'Case stored under the normalised CAD number, source: manual crew entry', rows.length === 1 && rows[0].cad === CAD && rows[0].cad_source === 'manual-crew', JSON.stringify(rows));
-  await sleep(3500);
-  const t1 = await tones();
-  ok(8, 'Audible alarm sounding (tones played on the phone)', t1 >= 8, `${t1} tones in ~3.5 s`);
-  await shot(doc, '08-phone-new-case-alarm');
-  await sleep(1700);
-  ok(8.1, 'Alarm keeps sounding until acknowledged', (await tones()) > t1);
-  /* 9-10 */
-  await doc.click('.nca-go');
-  await sleep(2500);
-  const tAck = await tones();
-  await sleep(2500);
-  ok(9, 'ACKNOWLEDGE & OPEN pressed', !(await doc.isVisible('.nca')));
-  ok(10, 'Alarm stopped', (await tones()) === tAck, `${tAck} tones in total`);
-  /* 11 */
-  await crew.waitForSelector('text=/is reviewing|acknowledged/', { timeout: 8000 });
-  ok(11, 'Crew status changed automatically to acknowledged / reviewing', await crew.isVisible('text=/is reviewing|acknowledged/'));
-  await shot(crew, '11-crew-reviewing');
-  const crewHead = (await crew.textContent('.ch-l1')).replace(/\s+/g, ' ');
-  ok('C5', 'CAD number locked on the crew screen after SEND', /locked after send/i.test(crewHead) && !(await crew.isVisible('.ch-l1 [data-act="cad-edit"]')), crewHead.trim().slice(0, 80));
-  /* 12: BP */
-  await tap('[data-act="mdup"][data-k="bp"]'); await keys(['9', '4', '/', '6', '0']); await tap('[data-act="md-done"]');
-  ok(12, 'BP updated', true);
-  /* 13: medication */
-  await tap('[data-act="rec"][data-id="asp"]'); await tap('[data-act="ropt"][data-i="0"]'); await tap('[data-act="rsave"]');
-  ok(13, 'Medication added (aspirin)', true);
-  /* 14: ECG 2 from a file */
-  await tap('[data-act="add-ecg"] >> nth=0');
-  const [fc2] = await Promise.all([crew.waitForEvent('filechooser'), crew.click('[data-act="upload"]')]);
-  await fc2.setFiles(path.join(ROOT, 'samples/test-ecg-2-evolving-anterior.jpg'));
-  await crew.waitForSelector('[data-act="send"]:not([disabled])');
-  await tap('[data-act="send"]');
-  ok(14, 'ECG 2 uploaded and sent', true);
-  /* 15 */
-  await doc.waitForSelector('text=/NEW — ECG 2 received/', { timeout: 10000 });
-  await sleep(1500);
-  const strip = await doc.textContent('.nstrip').catch(() => '');
-  const three = /BP/.test(strip) && /Aspirin/.test(strip) && /ECG 2/.test(strip);
-  ok(15, 'BP, medication and ECG 2 appeared on the phone without refresh and without sound', three && (await tones()) === tAck, strip.replace(/\s+/g, ' ').slice(0, 160));
-  await shot(doc, '15-phone-new-updates');
-  /* 16 */
-  await doc.locator('[data-act="cmp"]:visible').first().click();
-  await doc.waitForSelector('.panes');
-  ok(16, 'ECG 1 and ECG 2 compared side by side', (await doc.$$('.panes .pane')).length === 2);
-  await shot(doc, '16-phone-compare');
-  /* 17: wait for the analysis of ECG 2, then look at it in the case view */
-  await doc.click('[data-act="cmp-back"]');
-  await doc.locator('[data-act="ecg"][data-n="2"]:visible').first().click();
-  await doc.waitForSelector('#r-ai >> text=AI analysis completed', { timeout: 15000 });
-  const aiDoc = await doc.textContent('#r-ai');
-  await crew.waitForSelector('#r-ai >> text=AI analysis completed', { timeout: 10000 });
-  const aiCrew = await crew.textContent('#r-ai');
-  const imp = 'Pattern concerning for evolving acute anterior STEMI';
-  ok(17, 'AI interpretation visible, the same on both screens', aiDoc.includes(imp) && aiCrew.includes(imp) && /decision support/i.test(aiDoc) && /decision support/i.test(aiCrew));
-  await doc.evaluate(() => { const el = document.querySelector('#r-ai'); if (el) el.scrollIntoView(); });
-  await shot(doc, '17-phone-ai');
-  const docHead = (await doc.textContent('#r-head')).replace(/\s+/g, ' ');
-  ok('C6', 'The same CAD number in the phone\'s case header', docHead.includes(`CAD #${CAD}`), docHead.trim().slice(0, 60));
-  /* 18 */
-  await doc.click('[data-act="decide"]');
-  await doc.click('[data-act="d-confirm"]');
-  await doc.click('[data-act="c-go"]');
-  const tDec = Date.now();
-  ok(18, 'CONFIRMED STEMI selected', true);
-  /* 19 */
-  await crew.waitForSelector('.decv >> text=CONFIRMED STEMI', { timeout: 8000 });
-  ok(19, 'Decision appeared on the crew screen immediately', true, `${Date.now() - tDec} ms`);
-  await shot(crew, '19-crew-decision');
-  await crew.click('[data-act="dec-ack"]');
+    /* ---------- 1. crew SEND → the ER is alerted, the cardiologist is not ---------- */
+    await H.crewNewCase(C, A, { images: 2 });
+    await H.shot(C, 'acc-01-crew-sent');
+    ok('1', 'Crew: the case shows SENT TO ER after SEND', (await C.textContent('.status-panel')).includes('SENT TO ER') && (await C.textContent('.case-h')).includes('SENT TO ER'));
+    ok('1', 'Crew: progress CREW → ER → CARDIOLOGY → DECISION shown', /CREW[\s\S]*ER[\s\S]*CARDIOLOGY[\s\S]*DECISION/i.test(await C.textContent('.progress')));
+    const band = await E.waitForSelector(`.alarmband >> text=CAD #${A}`, { timeout: 15000 }).then(() => true, () => false);
+    ok('1', 'ER: NEW STEMI CASE alert arrives without refresh, with CAD, patient basics and ECG time', band && /58 y · Male · Chest pain/.test(await E.textContent('.alarmband')) && /ECG acquired/.test(await E.textContent('.alarmband')));
+    await H.shot(E, 'acc-02-er-alert');
+    await sleep(3500);
+    const t1 = await er.tones();
+    ok('17', 'ER: audible alarm sounding', t1 - erBase >= 8, `${t1 - erBase} tones`);
+    ok('17', 'ER: the alarm continues until the case is accepted', (await quiet(er.tones, 1800)) > 0);
+    ok('1', 'Cardiologist: nothing arrives at this stage — no alert, no case, no sound', !(await D.isVisible('.activation')) && !(await text(D)).includes(A) && (await doc.tones()) === docBase);
+    ok('15', 'Cardiologist queue does not list the pre-ER case', (await D.textContent('#q-new')).includes('No new activations'));
 
-  /* duplicate CAD: a second case under the same number is not created; the existing case can be opened */
-  await tap('[data-act="home"]'); await sleep(400); await shot(crew, 'D0-crew-home-with-case');
-  await tap('[data-act="new-case"]'); await tap('[data-act="newcase-go"]');
-  await crew.waitForSelector('#cadin');
-  await crew.fill('#cadin', `CAD#${CAD}`); await crew.click('[data-act="cad-ok"]');
-  await crew.waitForSelector('.dlg.dup', { timeout: 5000 }).catch(() => {});
-  const dupTxt = await crew.textContent('#layer').catch(() => '');
-  ok('D1', 'Same CAD entered again: CASE ALREADY EXISTS with the CAD number and OPEN EXISTING CASE', /CASE ALREADY EXISTS/.test(dupTxt) && dupTxt.includes(`CAD #${CAD}`) && /OPEN EXISTING CASE/.test(dupTxt));
-  await shot(crew, 'D1-crew-case-already-exists');
-  const dupPost = await crewCtx.request.post(BASE + '/api/cases', { data: { cad: ` cad#${CAD} `, cid: 'another-tablet-case' } });
-  const blankPost = await crewCtx.request.post(BASE + '/api/cases', { data: { cad: '   ', cid: 'x' } });
-  ok('D2', 'The platform refuses a duplicate (409) and a blank CAD number (400); still one case', dupPost.status() === 409 && blankPost.status() === 400 && DBQ('SELECT cad FROM cases').length === 1, `duplicate ${dupPost.status()} · blank ${blankPost.status()}`);
-  await tap('[data-act="dup-open"]');
-  await crew.waitForSelector('#view .chip >> text=CONFIRMED STEMI', { timeout: 8000 }).catch(() => {});
-  await shot(crew, 'D3-crew-existing-case-opened');
-  const reopened = (await crew.textContent('#view')).replace(/\s+/g, ' ');
-  ok('D3', 'OPEN EXISTING CASE shows the existing case (decision kept, nothing overwritten)', reopened.includes(`CAD #${CAD}`) && /CONFIRMED STEMI/.test(reopened) && DBQ('SELECT cad FROM cases').length === 1);
+    /* ---------- 2. ER accept with the name "Dr. Test ER" ---------- */
+    await E.click(`.alarmcase:has-text("${A}") [data-act="accept"]`);
+    await H.shot(E, 'acc-03-er-name');
+    await H.giveName(E, 'Dr. Test ER');
+    const acc = await E.waitForSelector('.accepted', { timeout: 10000 }).then(() => true, () => false);
+    ok('2', 'ER: the case opens with ACCEPTED BY Dr. Test ER · Accepted at HH:MM', acc && /ACCEPTED BY Dr\. Test ER/.test(await E.textContent('.accepted')) && /Accepted at \d\d:\d\d/.test(await E.textContent('.accepted')));
+    ok('17', 'ER: the alarm stops on acceptance', (await quiet(er.tones)) === 0);
+    const dbA = H.db(S.DATA, `SELECT er_doctor_name n, er_accepted_at t FROM cases WHERE cad='${A}'`)[0];
+    ok('2', 'ER Doctor name and acceptance time saved for this CAD number', dbA.n === 'Dr. Test ER' && dbA.t > 0);
+    ok('2', 'Crew: ER DOCTOR REVIEWING with the ER Doctor\'s name, without refresh', await waitText(C, 'ER DOCTOR REVIEWING') && (await C.textContent('.status-panel')).includes('Dr. Test ER'));
+    ok('2', 'ER: the original ECG is on screen at once, with both images', await E.isVisible('#c-viewer .ecgv__scroll img') && (await E.$$('#c-viewer .ecgv__imgs .thumb')).length === 2);
+    await E.waitForFunction(() => /AI analysis completed/.test(document.querySelector('#c-ai').innerText), null, { timeout: 15000 }).catch(() => {});
+    ok('2', 'ER: AI decision support shown with the statement, and no sound for the AI result', /AI interpretation is decision support\. The Cardiologist makes the final STEMI decision\./.test(await E.textContent('#c-ai')) && (await quiet(er.tones, 500)) === 0);
+    await H.shot(E, 'acc-04-er-review', true);
 
-  /* extra: refresh survives, offline entries arrive in order, the audit trail has the key events */
-  await crew.reload(); await doc.reload(); await doc.click('#gate-go');
-  await crew.waitForSelector('text=LIVE — CONNECTED'); await doc.waitForSelector('text=LIVE — CONNECTED');
-  await sleep(1000);
-  ok('R1', 'After refresh the crew still shows the case, its CAD number and the decision', await crew.isVisible('text=CONFIRMED STEMI') && (await crew.textContent('.ch-l1')).includes(`CAD #${CAD}`));
-  ok('R2', 'After refresh the phone still shows the case, the same CAD number and the decision', (await doc.textContent('body')).includes('CONFIRMED STEMI') && (await doc.textContent('body')).includes(`CAD #${CAD}`));
-  await doc.locator('[data-act="open"]:visible').first().click();
-  await crewCtx.setOffline(true);
-  await crew.waitForSelector('text=CONNECTION LOST', { timeout: 20000 });
-  ok('O1', 'Crew shows CONNECTION LOST when the link drops', true);
-  await tap('[data-act="mdup"][data-k="hr"]'); await keys(['1', '0', '2']); await tap('[data-act="md-done"]');
-  await shot(crew, 'O1-crew-offline');
-  await sleep(1000);
-  await crewCtx.setOffline(false);
-  await crew.waitForSelector('text=LIVE — CONNECTED', { timeout: 20000 });
-  await doc.waitForSelector('text=/HR updated|NEW — HR/', { timeout: 15000 }).catch(() => {});
-  const docBody = await doc.textContent('body');
-  ok('O2', 'Entry saved offline reached the phone after reconnection', docBody.includes('102'));
+    /* ---------- 3. ER: ACTIVATE CARDIOLOGIST → the cardiologist's alarm ---------- */
+    await E.click('[data-act="assess"][data-k="activate"]');
+    await E.click('[data-act="assess-go"]');
+    ok('3', 'ER: CARDIOLOGY ACTIVATED — AWAITING CARDIOLOGIST', await waitText(E, 'CARDIOLOGY ACTIVATED — AWAITING CARDIOLOGIST'));
+    const act = await D.waitForSelector(`.activation >> text=CAD #${A}`, { timeout: 15000 }).then(() => true, () => false);
+    const actTxt = act ? await D.textContent('.activation') : '';
+    ok('3', 'Cardiologist: NEW CARDIOLOGY ACTIVATION with CAD, ER Doctor, ER assessment, activation and ECG times', act && /NEW CARDIOLOGY ACTIVATION/.test(actTxt) && actTxt.includes('Dr. Test ER') && actTxt.includes('ACTIVATE CARDIOLOGIST') && /Activated/.test(actTxt) && /ECG acquired/.test(actTxt));
+    await H.shot(D, 'acc-05-card-activation');
+    await sleep(3500);
+    ok('17', 'Cardiologist: audible alarm sounding for the activation', (await doc.tones()) - docBase >= 8);
+    ok('17', 'ER: the activation makes no sound on the ER screen', (await quiet(er.tones, 500)) === 0);
+    ok('3', 'Crew: CARDIOLOGY ACTIVATED, without refresh', await waitText(C, 'CARDIOLOGY ACTIVATED'));
 
-  /* Test 2 — CONFIRMED STEMI does not close the pathway; Test 4 — the crew completes it from the CASE SUMMARY */
-  const t0 = await tones();
-  const st0 = DBQ(`SELECT status, closed_at FROM cases WHERE cad='${CAD}'`)[0];
-  ok('P1', 'CONFIRMED STEMI: the pathway stays active (no automatic closure)', !st0.closed_at && !st0.status && await crew.isVisible('[data-act="mdup"][data-k="hr"]'));
-  await tap('.ch [data-act="handover"]');
-  await crew.waitForSelector('#h-sum', { timeout: 5000 });
-  const sumTxt = (await crew.textContent('.vbody.ho')).replace(/\s+/g, ' ');
-  ok('P2', 'CASE SUMMARY shows the STEMI pathway only: CAD, ECGs, AI, acknowledgement, decision, timeline', sumTxt.includes(`CAD #${CAD}`) && /Cardiologist acknowledgement/.test(sumTxt) && /CONFIRMED STEMI/.test(sumTxt) && /ECG 1 —/.test(sumTxt) && /ECG 2 —/.test(sumTxt) && /The Cardiologist makes the final STEMI decision/.test(sumTxt) && /STEMI timeline/.test(sumTxt));
-  ok('P3', 'No handover / ePCR documentation is asked for', !/Receiving clinician|Arrival time|Transfer of care|Final vitals|Handover time/i.test(sumTxt) && await crew.isEnabled('[data-act="ho-complete"]'));
-  await shot(crew, 'P3-crew-case-summary');
-  await tap('[data-act="ho-complete"]');
-  const dlgTxt = (await crew.textContent('#layer')).replace(/\s+/g, ' ');
-  ok('P4', 'Confirmation: COMPLETE STEMI PATHWAY? with the CAD number, CANCEL and COMPLETE', /COMPLETE STEMI PATHWAY\?/.test(dlgTxt) && dlgTxt.includes(`CAD #${CAD}`) && /CANCEL/.test(dlgTxt) && /COMPLETE/.test(dlgTxt));
-  await tap('[data-act="ho-close"]');
-  await crew.waitForSelector('text=Completed cases', { timeout: 8000 });
-  await doc.waitForSelector('text=STEMI PATHWAY COMPLETED', { timeout: 8000 }).catch(() => {});
-  const crewHome = (await crew.textContent('#view')).replace(/\s+/g, ' ');
-  const st1 = DBQ(`SELECT status, closed_at, closed_by, closure_reason, closure_source FROM cases WHERE cad='${CAD}'`)[0];
-  ok('P5', 'Completed: closure time, crew user, reason and source recorded; off the active list, under Completed', st1.status === 'closed' && st1.closed_at && /K\. Ahmed/.test(st1.closed_by) && st1.closure_reason === 'STEMI pathway completed' && st1.closure_source === 'crew' && !/My active cases/.test(crewHome) && crewHome.includes(`CAD #${CAD}`), JSON.stringify(st1));
-  await sleep(1500);
-  const docTxt = (await doc.textContent('body')).replace(/\s+/g, ' ');
-  ok('P6', 'Cardiologist sees STEMI PATHWAY COMPLETED automatically, read-only, with no sound', /STEMI PATHWAY COMPLETED/.test(docTxt) && !(await doc.isVisible('[data-act="decide"]')) && !(await doc.isVisible('[data-act="newdec"]')) && (await tones()) === t0, `${(await tones()) - t0} tones`);
-  await shot(doc, 'P6-phone-pathway-completed');
-  const closedOp = await crewCtx.request.post(BASE + '/api/ops', { data: { ops: [{ id: 'after-close-1', cad: CAD, k: 'md', t: Date.now(), data: { k: 'hr', v: '60 bpm', raw: { v: 60 }, kind: 'update' } }] } });
-  const cr = (await closedOp.json()).results[0];
-  ok('P7', 'The platform refuses changes to a closed STEMI pathway', cr && cr.ok === false && /closed/.test(cr.error), cr && cr.error);
-  await crew.reload(); await crew.waitForSelector('text=Completed cases');
-  await crew.fill('#histq', CAD.slice(-6)); await sleep(800);
-  await crew.click(`[data-act="hist-open"][data-cad="${CAD}"]`);
-  await crew.waitForSelector('#h-sum', { timeout: 5000 });
-  const hist = (await crew.textContent('.vbody.ho')).replace(/\s+/g, ' ');
-  ok('P8', 'After refresh: found by CAD number under Completed, read-only, everything kept', /STEMI PATHWAY COMPLETED/.test(hist) && /ECG 2 —/.test(hist) && !(await crew.isVisible('[data-act="ho-complete"]')));
-  await tap('[data-act="hist-back"]');
+    /* ---------- 7. cardiologist ACKNOWLEDGE & OPEN with the name "Dr. Test Cardiology" ---------- */
+    await D.click('.activation [data-act="ack"]');
+    await H.giveName(D, 'Dr. Test Cardiology');
+    const opened = await D.waitForSelector('#c-viewer .ecgv__scroll img', { timeout: 10000 }).then(() => true, () => false);
+    ok('7', 'Cardiologist: the case opens on the ECG', opened && !(await D.isVisible('.activation')));
+    ok('17', 'Cardiologist: the alarm stops on ACKNOWLEDGE & OPEN', (await quiet(doc.tones)) === 0);
+    const dbC = H.db(S.DATA, `SELECT cardiologist_name n, cardiologist_acknowledged_at t FROM cases WHERE cad='${A}'`)[0];
+    ok('7', 'Cardiologist name and acknowledgement time saved for this CAD number', dbC.n === 'Dr. Test Cardiology' && dbC.t > 0);
+    ok('7', 'Crew: CARDIOLOGIST REVIEWING with the name', await waitText(C, 'CARDIOLOGIST REVIEWING') && (await C.textContent('.status-panel')).includes('Dr. Test Cardiology'));
+    ok('7', 'ER: sees the cardiologist acknowledged, silently', await waitText(E, 'Dr. Test Cardiology · acknowledged') && (await quiet(er.tones, 300)) === 0);
+    ok('7', 'Cardiologist: ER Doctor and ER assessment shown with the case', /ER: ACTIVATE CARDIOLOGIST/.test(await D.textContent('#c-er')) && (await D.textContent('#c-er')).includes('Dr. Test ER'));
+    await H.shot(D, 'acc-06-card-case');
 
-  const info = await (await crewCtx.request.get(BASE + '/api/me')).json();
-  ok('A0', 'Session still valid', info.user && info.user.role === 'crew');
+    /* ---------- 10. UNCLEAR — REQUEST REPEAT ECG ---------- */
+    await D.click('#c-dock [data-act="decide"]');
+    await D.click('.modal [data-act="d"][data-k="repeat"]');
+    await D.click('[data-act="d-rep"][data-v="Poor ECG quality"]');
+    await D.fill('#d-ins', 'Repeat with V7 to V9');
+    await H.shot(D, 'acc-07-card-repeat');
+    await D.click('[data-act="d-go"]');
+    const rq = await C.waitForSelector('.modal >> text=REPEAT ECG REQUESTED', { timeout: 15000 }).then(() => true, () => false);
+    ok('10', 'Crew: REPEAT ECG REQUESTED arrives at once, with the instruction', rq && (await C.textContent('.modal')).includes('Repeat with V7 to V9'));
+    await C.click('[data-act="dec-ack"]');
+    ok('10', 'Crew: TAKE REPEAT ECG offered; COMPLETE STEMI PATHWAY not available', await C.isVisible('.status-panel [data-act="ecg-new"]') && !(await C.isVisible('[data-act="complete"]')));
+    await C.click('.status-panel [data-act="ecg-new"]');
+    await C.click('.modal [data-act="img-add"]'); await C.click('[data-act="img-gen"]');
+    await C.waitForSelector('[data-act="ecg-send"]:not([disabled])');
+    await C.click('[data-act="ecg-send"]');
+    ok('10', 'Crew: REPEAT ECG SENT — CARDIOLOGIST REVIEWING', await waitText(C, 'REPEAT ECG SENT — CARDIOLOGIST REVIEWING'));
+    const newDoc = await D.waitForSelector('.ecgv__new >> text=ECG 2', { timeout: 15000 }).then(() => true, () => false);
+    ok('10', 'Cardiologist: ECG 2 arrives silently and is announced, not swapped in', newDoc && (await quiet(doc.tones, 500)) === 0 && (await D.textContent('.ecgv__cap')).includes('ECG 1 of 2'));
+    ok('10', 'ER: ECG 2 arrives silently too', await E.waitForSelector('.ecg-tab >> text=ECG 2', { timeout: 15000 }).then(() => true, () => false) && (await quiet(er.tones, 300)) === 0);
+    ok('10', 'Cardiologist: a decision is held until the new ECG 2 has been viewed', (await D.getAttribute('#c-dock [data-act="decide"]', 'aria-disabled')) === 'true');
+    /* new vital signs: arrive silently on both screens */
+    await C.click('[data-act="vitals"]');
+    await C.fill('#v-sys', '128'); await C.fill('#v-dia', '76');
+    await C.click('[data-act="vitals-save"]');
+    ok('16', 'ER: the new BP arrives without refresh, earlier value kept, no sound', await waitText(E, '128/76 mmHg') && (await E.textContent('#c-details')).includes('Earlier: 142/88 mmHg') && (await quiet(er.tones, 300)) === 0);
 
-  const con = await crewCtx.newPage();
-  await con.goto(BASE + '/control'); await con.waitForSelector('#steps li'); await sleep(800);
-  await con.screenshot({ path: path.join(OUT, 'Z-test-console.png'), fullPage: true });
-  const tab = await docCtx.browser().newContext({ viewport: { width: 1280, height: 860 } });
-  const dt = await login(tab, 'cardio@test.local', 'cardiologist-desktop'); await dt.click('#gate-go'); await dt.locator('[data-act="open"]:visible').first().click(); await sleep(800);
-  await dt.screenshot({ path: path.join(OUT, 'Z-cardiologist-desktop.png') });
-  await browser.close();
-  server.kill();
-  const audit = require('node:child_process').execFileSync(process.execPath, ['--disable-warning=ExperimentalWarning', '-e',
-    `const {DatabaseSync}=require('node:sqlite');const d=new DatabaseSync(${JSON.stringify(path.join(DATA, 'stemi-test.db'))});console.log(JSON.stringify(d.prepare("SELECT action FROM audit_events ORDER BY at, id").all().map(r=>r.action)))`]).toString();
-  const A = JSON.parse(audit);
-  const need = [`STEMI case opened by K. Ahmed, Paramedic (Ambulance 214) — CAD #${CAD} · CAD number entered manually by crew`, 'ECG 1 acquired', 'Case submitted', 'Server received case', 'Cardiologist alerted', 'alert shown', 'Cardiologist acknowledged', 'ECG 1 opened', 'BP updated', 'Aspirin documented', 'ECG 2 received', 'AI analysis completed', 'Serial comparison opened', 'STEMI confirmed', 'Decision delivered', `Existing case CAD #${CAD} opened`,
-    'Case summary opened', `STEMI pathway completed and closed by K. Ahmed, Paramedic (Ambulance 214) — CAD #${CAD}`];
-  const missing = need.filter(n => !A.some(a => a.includes(n)));
-  ok('A1', 'Audit trail holds every major event', !missing.length, missing.length ? 'missing: ' + missing.join(', ') : `${A.length} events`);
-  /* requests that fail while the crew context is deliberately offline are expected */
-  const real = errors.filter(e => !/ERR_INTERNET_DISCONNECTED/.test(e));
-  ok('E', 'No script errors on either device', !real.length, real.slice(0, 5).join(' | '));
-  fs.writeFileSync(path.join(OUT, 'audit-trail.txt'), A.join('\n') + '\n');
-  fs.rmSync(DATA, { recursive: true, force: true });
-  const failed = results.filter(r => !r.pass);
-  console.log(`\n${results.length - failed.length}/${results.length} checks passed. Screenshots and audit trail in scripts/out/`);
-  process.exit(failed.length ? 1 : 0);
+    /* ---------- 8. CONFIRMED STEMI ---------- */
+    await D.click('#c-dock [data-act="view-latest"]');
+    await D.waitForFunction(() => { const b = document.querySelector('#c-dock [data-act="decide"]'); return b && b.getAttribute('aria-disabled') !== 'true'; }, null, { timeout: 8000 }).catch(() => {});
+    ok('8', 'Cardiologist: ECG 2 viewed; the decision is available and covers ECG 2', /ECG 2/.test(await D.textContent('#c-dock [data-act="decide"]')));
+    ok('16', 'Cardiologist: the new BP is there too, without refresh or sound', (await D.textContent('#c-details')).includes('128/76 mmHg') && (await quiet(doc.tones, 300)) === 0);
+    await D.click('#c-dock [data-act="decide"]');
+    await D.click('.modal [data-act="d"][data-k="confirm"]');
+    await D.fill('#d-note', 'Fictional test note');
+    await D.click('[data-act="d-go"]');
+    const cf = await C.waitForSelector('.modal >> text=CONFIRMED STEMI', { timeout: 15000 }).then(() => true, () => false);
+    ok('8', 'Crew: CONFIRMED STEMI arrives at once, with the note', cf && (await C.textContent('.modal')).includes('Fictional test note'));
+    await H.shot(C, 'acc-08-crew-confirmed');
+    await C.click('[data-act="dec-ack"]');
+    ok('8', 'Crew: CONFIRMED STEMI; COMPLETE STEMI PATHWAY available', (await C.textContent('.status-panel')).includes('CONFIRMED STEMI') && await C.isVisible('[data-act="complete"]'));
+    ok('8', 'ER: sees CONFIRMED STEMI, silently', await waitText(E, 'CONFIRMED STEMI') && (await quiet(er.tones, 300)) === 0);
+    ok('8', 'Cardiologist: CONFIRMED STEMI shown; a new decision can still be recorded', await waitText(D, 'CONFIRMED STEMI') && await D.isVisible('#c-dock [data-act="decide-new"]'));
+
+    /* ---------- 11. COMPLETE STEMI PATHWAY ---------- */
+    await C.click('.status-panel [data-act="complete"]');
+    const ct = await C.textContent('.modal');
+    ok('11', 'Crew: confirmation text as specified, with CANCEL / COMPLETE and nothing to fill in', /COMPLETE STEMI PATHWAY\?/.test(ct) && ct.includes('This will close the STEMI pathway for:') && ct.includes(`CAD #${A}`) && ct.includes('The STEMI case will remain available as read-only.') && !(await C.$('.modal input, .modal textarea')));
+    await H.shot(C, 'acc-09-crew-complete');
+    await C.click('[data-act="complete-go"]');
+    ok('11', 'Crew: STEMI PATHWAY COMPLETED, read-only (no updates, no new ECG)', await waitText(C, 'STEMI PATHWAY COMPLETED') && !(await C.isVisible('[data-act="vitals"]')) && !(await C.isVisible('[data-act="ecg-new"]')));
+    const dbX = H.db(S.DATA, `SELECT closed_at, closed_by, closure_reason r, closure_source s FROM cases WHERE cad='${A}'`)[0];
+    ok('11', 'Closure saved: time, crew user, reason, source', dbX.closed_at > 0 && /K\. Ahmed/.test(dbX.closed_by) && dbX.r === 'STEMI pathway completed' && dbX.s === 'crew');
+    ok('11', 'ER and Cardiologist see the completion without refresh, read-only, no sound', await waitText(E, 'STEMI PATHWAY COMPLETED') && await waitText(D, 'STEMI PATHWAY COMPLETED') && !(await D.isVisible('#c-dock [data-act="decide-new"]')) && (await quiet(er.tones, 300)) === 0 && (await quiet(doc.tones, 300)) === 0);
+
+    /* ---------- the Case Summary and the completed list ---------- */
+    await C.click('[data-act="summary"]');
+    const sum = await text(C);
+    ok('11', 'Crew Case Summary: CASE, ER REVIEW, CARDIOLOGY, ECGs, TIMELINE — nothing to fill in', ['Case', 'ER review', 'Cardiology', 'ECGs', 'Timeline'].every(h => sum.includes(h)) && sum.includes('Dr. Test ER') && sum.includes('Dr. Test Cardiology') && !(await C.$('#main input, #main textarea')));
+    await H.shot(C, 'acc-10-crew-summary', true);
+    await C.click('[data-act="sum-back"]'); await C.click('[data-act="home"]');
+    ok('11', 'Crew: the case moved from Active to Completed', await C.waitForSelector(`#q-done >> text=CAD #${A}`, { timeout: 8000 }).then(() => true, () => false) && !(await C.textContent('#q-act')).includes(A));
+    await E.click('[data-act="queue"]');
+    ok('11', 'ER: the case is in Completed', await E.waitForSelector(`#q-done >> text=CAD #${A}`, { timeout: 8000 }).then(() => true, () => false));
+
+    /* ---------- 16 and 17 overall ---------- */
+    ok('16', 'No screen was reloaded during the whole pathway', navs.crew === 0 && navs.er === 0 && navs.doc === 0, JSON.stringify(navs));
+    const aud = H.auditOf(S.DATA, A).map(a => a.action);
+    ok('17', 'Audit: each alarm started when shown and stopped on acceptance / acknowledgement', aud.some(a => a.startsWith('NEW STEMI CASE alert shown on the ER screen · audible alarm started')) && aud.some(a => a.startsWith('ER Doctor accepted the case: Dr. Test ER · audible alarm stopped')) && aud.some(a => a.startsWith('NEW CARDIOLOGY ACTIVATION alert shown')) && aud.some(a => a.includes('ACKNOWLEDGE & OPEN by Dr. Test Cardiology · audible alarm stopped')));
+    ok('', 'Audit wording: CAD number manually entered by crew from dispatch/MDT information', aud.some(a => a.includes('CAD number manually entered by crew from dispatch/MDT information')));
+    ok('', 'No page ever showed "CAD CANCELLED"', ![await text(C), await text(E), await text(D)].some(t => /CAD CANCELLED/i.test(t)));
+    ok('', 'No script errors on any screen', !errors.length, errors.slice(0, 3).join(' | '));
+  } finally { await browser.close(); }
 }
-main().catch(e => { console.error(e); process.exit(1); });
+
+(async () => {
+  const S = await H.startServer();
+  try { await main(S); } catch (e) { console.error(e); R.ok('', 'The test ran to the end', false, e.message); } finally { await S.stop(); }
+  process.exit(R.summary() ? 1 : 0);
+})();

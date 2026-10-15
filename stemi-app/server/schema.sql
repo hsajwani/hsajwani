@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS users (
   id            TEXT PRIMARY KEY,
   email         TEXT UNIQUE NOT NULL,
   password_hash TEXT NOT NULL,
-  role          TEXT NOT NULL CHECK (role IN ('crew','cardiologist')),
+  role          TEXT NOT NULL CHECK (role IN ('crew','cardiologist')),  -- 0.5.0: only crew logs in; ER and cardiologist type their name
   name          TEXT NOT NULL,          -- e.g. K. Ahmed / Dr X (fictional)
   title         TEXT NOT NULL,          -- Paramedic / Cardiologist
   org           TEXT,                   -- PCI Hospital A (placeholder)
@@ -28,8 +28,13 @@ CREATE TABLE IF NOT EXISTS cases (
   closed_at           INTEGER,
   closed_by           TEXT,             -- the crew user, or the cardiologist whose NOT STEMI decision closed it
   closed_user_id      TEXT,
-  closure_reason      TEXT,             -- 'STEMI pathway completed' | 'Cardiologist decision: NOT STEMI'
-  closure_source      TEXT,             -- 'crew' | 'automatic following Cardiologist decision'
+  closure_reason      TEXT,             -- 'STEMI pathway completed' | 'Cardiologist decision: NOT STEMI' | 'ER Doctor assessment: NOT SUSPICIOUS FOR STEMI'
+  closure_source      TEXT,             -- 'crew' | 'automatic following Cardiologist decision' | 'ER Doctor screening decision'
+  -- 0.5.0 (added on start by server/db.js; empty in older cases, which went straight to the cardiologist):
+  -- er_alerted_at, er_alert_shown_at, er_doctor_name, er_accepted_at, er_assessment (activate | uncertain | not_suspicious),
+  -- er_assessment_at, er_assessed_by, er_assessment_ecg, er_non_activation_reason, er_non_activation_comment, er_outcome_seen_at,
+  -- cardiology_activated_at, cardiology_activation_reason, cardiology_activated_by,
+  -- cardiologist_name, cardiologist_acknowledged_at, cardiologist_decision, cardiologist_decision_at
   active              INTEGER NOT NULL DEFAULT 1,
   unit                TEXT NOT NULL,
   emirate             TEXT NOT NULL,
@@ -102,9 +107,15 @@ CREATE TABLE IF NOT EXISTS alert_followups (
   id INTEGER PRIMARY KEY AUTOINCREMENT, cad TEXT NOT NULL REFERENCES cases(cad),
   kind TEXT NOT NULL, level INTEGER, target TEXT, at INTEGER NOT NULL
 );
+-- ecg_views: the cardiologist's first view of each image (0.4.0 and earlier). From 0.5.0 ecg_role_views records the
+-- first view per role (er | cardiologist), so the ER Doctor's and the Cardiologist's reviews are kept apart
 CREATE TABLE IF NOT EXISTS ecg_views (
   cad TEXT NOT NULL, ecg_n INTEGER NOT NULL, i INTEGER NOT NULL, viewed_at INTEGER NOT NULL, viewed_by TEXT,
   PRIMARY KEY (cad, ecg_n, i)
+);
+CREATE TABLE IF NOT EXISTS ecg_role_views (
+  cad TEXT NOT NULL, role TEXT NOT NULL, ecg_n INTEGER NOT NULL, i INTEGER NOT NULL, viewed_at INTEGER NOT NULL, viewed_by TEXT,
+  PRIMARY KEY (cad, role, ecg_n, i)
 );
 
 -- acknowledgement and decision are separate events
@@ -156,7 +167,8 @@ CREATE TABLE IF NOT EXISTS case_updates (
 );
 
 -- the audit timeline: timestamp, user, role, action, CAD number
--- role: crew | cardiologist for a person's action; system for the platform, AI service and destination engine; cad-feed for CAD
+-- role: crew | er | cardiologist for a person's action (actor = the name they entered); system for the platform and the
+-- AI service; test-console for the test console; device: the prototype device session that sent the action
 CREATE TABLE IF NOT EXISTS audit_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT, cad TEXT NOT NULL, at INTEGER NOT NULL,
   actor TEXT, user_id TEXT, role TEXT, action TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'evt'

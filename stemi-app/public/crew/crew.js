@@ -1,1545 +1,901 @@
-(()=>{
-'use strict';
-const $=(s,r=document)=>r.querySelector(s);
-const $$=(s,r=document)=>[...r.querySelectorAll(s)];
-const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const RM=matchMedia('(prefers-reduced-motion: reduce)');
+/* Crew MDT (landscape tablet first; also desktop and portrait).
+   OPEN STEMI PATHWAY → CAD NUMBER (entered manually from the dispatch / MDT information) → ECG → MINIMUM DATA → SEND.
+   The case goes to the ER first; the ER Doctor decides whether the Cardiologist is activated. The crew follows the case
+   live: CREW → ER → CARDIOLOGY → DECISION. After SEND the CAD number and the sent data are locked; new vital signs,
+   treatment updates and serial ECGs are added, never replacing anything. The unsent case and anything waiting for the
+   connection are kept on this tablet (OFFLINE — CHANGES SAVED LOCALLY). Nothing here decides anything clinical. */
+(() => {
+  'use strict';
+  const { $, $$, esc, icon, hm, hms, when, now, toast, modal, dlg, badge, conn, topbar, patch, empty, rid } = UI;
+  const ROLE = 'crew', AU = UI.APP.user || {}, ME = `${AU.name}, ${AU.title}`;
+  const LSK = 'stemi.crew.v2', MAXI = 4;
+  const COMPLAINTS = [
+    { k: 'cp', l: 'Chest pain or discomfort', s: 'Chest pain' },
+    { k: 'sob', l: 'Shortness of breath', s: 'Shortness of breath' },
+    { k: 'epi', l: 'Epigastric or upper abdominal pain', s: 'Epigastric pain' },
+    { k: 'syn', l: 'Collapse or syncope', s: 'Collapse or syncope' },
+    { k: 'pal', l: 'Palpitations', s: 'Palpitations' },
+    { k: 'ecg', l: 'Abnormal ECG on the monitor', s: 'Abnormal ECG' },
+    { k: 'oth', l: 'Other (describe)', s: 'Other' }
+  ];
+  const FIELDS = [
+    { k: 'age', l: 'Age' }, { k: 'sex', l: 'Sex' }, { k: 'complaint', l: 'Presenting complaint' }, { k: 'onset', l: 'Symptom onset' },
+    { k: 'bp', l: 'Blood pressure' }, { k: 'hr', l: 'Heart rate' }, { k: 'spo2', l: 'SpO₂' }, { k: 'gcs', l: 'GCS' }
+  ];
+  const NV = { age: ['Unknown'], sex: ['Unknown'], onset: ['Unknown'], bp: ['Not obtained', 'Unable to obtain'], hr: ['Not obtained', 'Unable to obtain'], spo2: ['Not obtained', 'Unable to obtain'], gcs: ['Not obtained', 'Unable to assess'] };
+  const TREAT = [
+    { k: 'asp', l: 'Aspirin', opts: ['Given', 'Taken before our arrival', 'Not given'] },
+    { k: 'gtn', l: 'GTN', opts: ['Given', 'Not given'] },
+    { k: 'ana', l: 'Analgesia', opts: ['Given', 'Not given'] },
+    { k: 'oxy', l: 'Oxygen', opts: ['Given', 'Not given'] },
+    { k: 'otx', l: 'Other treatment', opts: ['Given'] }
+  ];
+  const S = { cases: new Map(), view: 'home', cad: null, stat: null, draft: null, out: [], ecgd: {}, up: false, started: false, epoch: null,
+    hist: null, histQ: '', histErr: false, sim: { find: 'border', q: 'good' }, main: '', mdTried: false, prevState: {}, shownDec: new Set() };
+  let LIVE = null, seq = 0, TD = null, pickFor = null, sentPick = null;
+  const p2 = n => String(n).padStart(2, '0');
+  const hhmm = t => { const x = new Date(t); return `${p2(x.getHours())}:${p2(x.getMinutes())}`; };
+  /* a time picked on the tablet ("HH:MM") as today's time; a time later than now means yesterday */
+  const fromClock = (v, slackMs) => { const [h, m, s] = v.split(':').map(Number), x = new Date(now()); x.setHours(h || 0, m || 0, s || 0, 0); const t = x.getTime(); return t > now() + (slackMs || 60e3) ? t - 864e5 : t; };
 
-/* ---------- the clock: the server's time, set when the live link opens (T0 = server time at base = this device's time) ---------- */
-let T0=Date.now();
-let base=Date.now();
-const now=()=>T0+(Date.now()-base);
-const p2=n=>String(n).padStart(2,'0');
-const hm=t=>{const d=new Date(t);return p2(d.getHours())+':'+p2(d.getMinutes())};
-const hms=t=>{const d=new Date(t);return hm(t)+':'+p2(d.getSeconds())};
-const dur=ms=>{ms=Math.max(0,ms);const s=Math.floor(ms/1000),m=Math.floor(s/60);return m>=60?Math.floor(m/60)+':'+p2(m%60)+':'+p2(s%60):m+':'+p2(s%60)};
-const MIN=60000;
-const rmin=t=>Math.floor(t/MIN)*MIN;
-const ago=t=>{const m=Math.round((now()-t)/MIN);if(m<=0)return 'now';if(m<60)return m+' min ago';return Math.floor(m/60)+' h '+(m%60?m%60+' min ':'')+'ago'};
-
-/* ---------- icons ---------- */
-const S=p=>`<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">${p}</svg>`;
-const IC={
- check:S('<path d="M5 12.6l4.3 4.3L19.2 7" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>'),
- person:S('<circle cx="12" cy="8.2" r="3.7" fill="currentColor"/><path d="M4.6 20c.8-3.8 3.7-5.9 7.4-5.9s6.6 2.1 7.4 5.9z" fill="currentColor"/>'),
- info:S('<circle cx="12" cy="6.8" r="1.7" fill="currentColor"/><path d="M12 10.6v7.4" stroke="currentColor" stroke-width="2.8" stroke-linecap="round"/>'),
- warn:S('<path d="M12 3.3L21.8 20.4H2.2z" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linejoin="round"/><path d="M12 9.6v5" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/><circle cx="12" cy="17.3" r="1.35" fill="currentColor"/>'),
- bang:S('<path d="M12 5.6v8.2" stroke="currentColor" stroke-width="3.2" stroke-linecap="round"/><circle cx="12" cy="18.2" r="1.9" fill="currentColor"/>'),
- slash:S('<circle cx="12" cy="12" r="8.2" fill="none" stroke="currentColor" stroke-width="2.3"/><path d="M6.3 17.7L17.7 6.3" stroke="currentColor" stroke-width="2.3"/>'),
- home:S('<path d="M3.5 11.2L12 4l8.5 7.2V20h-6v-5.5h-5V20h-6z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>'),
- plus:S('<path d="M12 4.5v15M4.5 12h15" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>'),
- cam:S('<path d="M4 7.5h3.2L9 5h6l1.8 2.5H20a1 1 0 0 1 1 1V18a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V8.5a1 1 0 0 1 1-1z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><circle cx="12" cy="12.8" r="3.6" fill="none" stroke="currentColor" stroke-width="2"/>'),
- lock:S('<rect x="5" y="10.5" width="14" height="10" rx="1.6" fill="currentColor"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5" fill="none" stroke="currentColor" stroke-width="2.2"/>'),
- send:S('<path d="M4 12h13M12.5 6.5L18 12l-5.5 5.5" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>'),
- back:S('<path d="M19 12H6M11.5 6.5L6 12l5.5 5.5" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>'),
- close:S('<path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/>'),
- del:S('<path d="M9 6h11v12H9l-6-6z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M12 9.5l5 5M17 9.5l-5 5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>'),
- scan:S('<path d="M4 8V5h3M17 5h3v3M20 16v3h-3M7 19H4v-3" fill="none" stroke="currentColor" stroke-width="2.2"/><path d="M7.5 8.5v7M10 8.5v7M12.5 8.5v7M15.5 8.5v7" stroke="currentColor" stroke-width="1.8"/>'),
- hosp:S('<path d="M4 20V7.2l8-3.2 8 3.2V20z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M12 8.5v6.5M8.8 11.7h6.4" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>'),
- ecg:S('<path d="M2 13h4l2-5 3 10 2.5-13 2.5 8h6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>'),
- light:S('<path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-3.6 10.8c.7.6 1.1 1.4 1.1 2.2h5c0-.8.4-1.6 1.1-2.2A6 6 0 0 0 12 3z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>'),
- up:S('<path d="M12 16V5M7 9.5L12 4.5l5 5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M4.5 15v4.5h15V15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"/>'),
- zoom:S('<circle cx="10.5" cy="10.5" r="6" fill="none" stroke="currentColor" stroke-width="2.2"/><path d="M15 15l5 5M10.5 8v5M8 10.5h5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>')
-};
-const G=k=>`<span class="g g-${k}" aria-hidden="true">${({done:IC.check,ack:IC.person,info:IC.info,warn:IC.warn,fail:IC.bang,nv:IC.slash})[k]||''}</span>`;
-const nvChip=t=>`<span class="nvc">${IC.slash}${esc(t)}</span>`;
-
-/* ---------- fictional reference data ---------- */
-/* the logged-in test user (crew@test.local): fictional */
-const AU=window.APP.user;
-const UNIT=AU.unit||'Ambulance', EMIRATE=AU.emirate||'', ME=AU.name, ROLE=AU.title;
-/* the CAD number of this tablet's case. The EMT enters it manually from the MDT / dispatch information when opening the
-   STEMI pathway (no CAD integration in this phase, Q-70); CADN (shared/cad.js) normalises and checks it, as the server does.
-   CASE.srv is false while the case exists on this tablet only: the platform creates it under the CAD number at the first Send. */
-let CAD='',EPOCH='';
-const CADN=window.CADN;
-const HOSP={
- A:{name:'PCI Hospital A',eta:18,doc:'Dr X'},
- B:{name:'PCI Hospital B',eta:26,doc:'Dr Z'},
- C:{name:'PCI Hospital C',eta:34,doc:'Dr W'}
-};
-const COMPLAINTS=[
- {id:'cp',l:'Chest pain or discomfort',s:'Chest pain'},
- {id:'sob',l:'Shortness of breath',s:'Shortness of breath'},
- {id:'epi',l:'Epigastric or upper abdominal pain',s:'Epigastric pain'},
- {id:'syn',l:'Collapse or syncope',s:'Collapse or syncope'},
- {id:'pal',l:'Palpitations',s:'Palpitations'},
- {id:'ecg',l:'Abnormal ECG on the monitor',s:'Abnormal ECG'},
- {id:'oth',l:'Other (describe)',s:'Other'}
-];
-const MD=[
- {k:'age',label:'Age',kind:'num',unit:'years',nv:['Unknown']},
- {k:'sex',label:'Sex',kind:'sex',nv:['Unknown']},
- {k:'complaint',label:'Presenting complaint',sub:'or reason for ECG',kind:'complaint',nv:[]},
- {k:'onset',label:'Symptom onset',kind:'time',nv:['Unknown']},
- {k:'bp',label:'Latest BP',kind:'bp',unit:'mmHg',nv:['Not obtained','Unable to obtain']},
- {k:'hr',label:'Heart rate',kind:'num',unit:'bpm',nv:['Not obtained','Unable to obtain']},
- {k:'spo2',label:'SpO₂',kind:'num',unit:'%',nv:['Not obtained','Unable to obtain']},
- {k:'gcs',label:'GCS',kind:'gcs',nv:['Unable to assess','Not obtained']}
-];
-const MDK=Object.fromEntries(MD.map(f=>[f.k,f]));
-const QUAL={
- good:{k:'good',g:'info',t:'Suitable',body:'<p>All 12 leads, calibration pulse and rhythm strip visible.</p>',checks:[['done','12 leads visible'],['done','Calibration pulse'],['done','Readable'],['done','No glare'],['done','No leads obscured']],server:'complete'},
- glare:{k:'lim',g:'warn',t:'Limited',body:'<p><b>Glare over limb leads I, II, III.</b></p><p>The cardiologist gets the ECG as it is. The AI may report only part of it.</p>',checks:[['done','12 leads visible'],['done','Calibration pulse'],['done','Readable'],['warn','Glare: I, II, III'],['done','No leads obscured']],server:'limited',issue:'glare over limb leads I, II, III'},
- /* an image file uploaded from this computer: this test build does not check it, and says so */
- file:{k:'good',g:'info',t:'Not checked',body:'<p><b>Uploaded image file.</b></p><p>This test build does not check uploaded images. The cardiologist gets the image as it is.</p>',checks:[['info','Image check not run on uploaded files (test build)']],server:'complete'},
- cut:{k:'bad',g:'warn',t:'Not suitable',body:'<p><b>Leads V4 to V6 cut off.</b></p><p>The cardiologist still gets this ECG. The AI will not interpret it. Send now and send a repeat ECG when you can.</p>',checks:[['warn','V4 to V6 cut off'],['done','Calibration pulse'],['done','Readable'],['done','No glare'],['done','No leads obscured']],server:'withheld',issue:'leads V4 to V6 cut off'}
-};
-
-/* crew pick lists here are illustrative only (Q-56); dose defaults come from the case example in the brief */
-const REC=[
- {g:'Treatments given',items:[
-  {id:'asp',label:'Aspirin',ev:'Aspirin documented',opts:[
-    {l:'Given',dose:'300 mg',time:1,sum:L=>`Given · ${L.dose||'dose not entered'} · ${hm(L.at)}`},
-    {l:'Taken before our arrival',sum:()=>'Taken before our arrival'},
-    {l:'Not given',sum:()=>'Not given'}]},
-  {id:'gtn',label:'GTN',ev:'GTN documented',opts:[
-    {l:'Given',dose:'0.4 mg sublingual',time:1,sum:L=>`Given · ${L.dose||'dose not entered'} · ${hm(L.at)}`},
-    {l:'Not given',sum:()=>'Not given'}]},
-  {id:'ana',label:'Analgesia',ev:'Analgesia documented',opts:[
-    {l:'Given',text:'Drug, dose and route',time:1,need:'text',sum:L=>`Given · ${L.text} · ${hm(L.at)}`},
-    {l:'Not given',sum:()=>'Not given'}]},
-  {id:'otx',label:'Other medications and treatments',ev:'Treatment documented',opts:[
-    {l:'Add a treatment',text:'What was given',time:1,need:'text',sum:L=>`${L.text} · ${hm(L.at)}`},
-    {l:'None',sum:()=>'None'}]}
- ]},
- {g:'Risks',items:[
-  {id:'anti',label:'Anticoagulants',ev:'Anticoagulants documented',opts:[
-    {l:'None',sum:()=>'None'},
-    {l:'Takes an anticoagulant',chips:['Warfarin','Apixaban','Rivaroxaban','Dabigatran','Edoxaban','Other'],need:'chips',sum:L=>`Takes ${[...L.chips].join(', ')}`},
-    {l:'Unknown',nv:1}]},
-  {id:'all',label:'Allergies',ev:'Allergies documented',opts:[
-    {l:'No known allergies',sum:()=>'No known allergies'},
-    {l:'Has allergies',text:'Allergies and reaction',need:'text',sum:L=>`Allergies: ${L.text}`},
-    {l:'Unknown',nv:1}]}
- ]},
- {g:'Observations',items:[
-  {id:'obs',label:'Full set of observations',ev:'Observations added',multi:1,hide:1,opts:[
-    {l:'Add a set',vitals:1,time:1,need:'vitals',sum:L=>`BP ${L.parts[0].v}/${L.parts[1].v} · HR ${L.parts[2].v} · SpO₂ ${L.parts[3].v} % · ${hm(L.at)}`}]},
-  {id:'rr',label:'Respiratory rate',ev:'RR added',opts:[
-    {l:'Enter',num:'/min',time:1,need:'num',sum:L=>`${L.parts[0].v} /min · ${hm(L.at)}`},
-    {l:'Not obtained',nv:1},{l:'Unable to obtain',nv:1}]},
-  {id:'tmp',label:'Temperature',ev:'Temperature added',opts:[
-    {l:'Enter',num:'°C',dec:1,time:1,need:'num',sum:L=>`${L.parts[0].v} °C · ${hm(L.at)}`},
-    {l:'Not obtained',nv:1},{l:'Unable to obtain',nv:1}]},
-  {id:'pain',label:'Pain assessment',ev:'Pain assessment added',opts:[
-    {l:'Score 0 to 10',score:1,text:'Character, site, radiation (optional)',time:1,need:'score',sum:L=>`${L.score}/10${L.text?' · '+L.text:''} · ${hm(L.at)}`},
-    {l:'Unable to assess',nv:1}]}
- ]},
- {g:'History',items:[
-  {id:'pmh',label:'Past medical history',ev:'Past history added',opts:[
-    {l:'Has conditions',chips:['Previous MI','PCI or stent','CABG','Diabetes','Hypertension','Kidney disease','Stroke','Other'],need:'chips',sum:L=>[...L.chips].join(', ')},
-    {l:'None known',sum:()=>'None known'},
-    {l:'Unknown',nv:1}]},
-  {id:'hx',label:'Clinical history',ev:'Clinical history added',opts:[
-    {l:'Write',text:'History of this episode',long:1,need:'text',def:'Central crushing chest pain with sweating and nausea. Onset about 35 minutes before our arrival.',sum:L=>L.text}]}
- ]},
- {g:'Condition and comments',items:[
-  {id:'cond',label:'Patient condition',ev:'Patient condition updated',multi:1,opts:[
-    {l:'Improved',text:'Details (optional)',time:1,sum:L=>`Improved${L.text?' · '+L.text:''} · ${hm(L.at)}`},
-    {l:'Unchanged',text:'Details (optional)',time:1,sum:L=>`Unchanged${L.text?' · '+L.text:''} · ${hm(L.at)}`},
-    {l:'Deteriorated',text:'What changed',time:1,need:'text',sum:L=>`Deteriorated · ${L.text} · ${hm(L.at)}`}]},
-  {id:'cmt',label:'Comment to the cardiologist',ev:'Crew comment added',multi:1,opts:[
-    {l:'Write',text:'Comment',long:1,need:'text',sum:L=>L.text}]}
- ]},
- {g:'Times',items:[
-  {id:'fmc',label:'First medical contact',q:'Q-03',ev:'First medical contact recorded',opts:[
-    {l:'Set time',tpick:1,sum:L=>hm(L.tm)}]}
- ]},
- {g:'Transport',items:[{id:'dst',label:'Destination and ETA',auto:'dest'}]}
-];
-const RECK=Object.fromEntries(REC.flatMap(g=>g.items).map(i=>[i.id,i]));
-
-/* ---------- state ---------- */
-const SC0={online:false,related:false,quality:'good',receipt:'ok',ai:'ok',hospA:'fresh',ids:false,orient:'auto',light:false};
-/* SC.online mirrors the tablet's link to the platform (set by the page's Connection control) */
-let SC={...SC0};
-let lastView=null, lastCase=null;
-let CASE=null, view='C-01', focus='C-07', layer=null, ntab='screen', noteId='', timers=[];
-const setT=(ms,fn)=>{const id=setTimeout(()=>{timers=timers.filter(x=>x!==id);fn()},ms);timers.push(id);return id};
-const clearTimers=()=>{timers.forEach(clearTimeout);timers=[]};
-
-function newCase(){
-  return {openedAt:now(),savedAt:now(),cad:'',cadAt:null,cadHist:[],cadEdit:{val:'',err:'',detail:'',busy:false},cadDup:null,srv:false,cid:'t'+rid()+rid(),life:{},related:false,relBanner:false,
-    md:{age:null,sex:null,complaint:null,onset:null,bp:null,hr:null,spo2:null,gcs:null},mdDone:false,mdh:{},
-    ecgs:[],draft:null,state:'DRAFT',waitFrom:null,alert:null,ack:null,opened:null,esc:[],rem:[],decs:[],dest:null,rec:{},events:[],failure:null,repeatAsked:false,repeatFor:null,cancelled:false,aiSel:null,aiNew:null};
-}
-
-/* ---------- the live link to the platform: operations go up, the shared case record (SRV) comes down.
-   Nothing here decides anything clinical; it only carries what the crew saved and what the platform recorded. ---------- */
-let SRV=null,OUTQ=[],opSeq=0,lastSync=null;
-let LIVE=null,flushing=false;
-const rid=()=>Math.random().toString(36).slice(2,10);
-/* actions go to the server; one that cannot be delivered waits on this tablet, in order, and is sent on reconnection */
-function sendOps(ops){
-  LIVE.send(ops).then(r=>{(r.results||[]).forEach(x=>{if(!x.ok)toast(esc(x.error||'The server did not accept this entry'),true)})},
-    ()=>{OUTQ.unshift(...ops);saveLocal()});
-}
-/* entries saved before the platform has created the case wait on the tablet until it has */
-const localOnly=()=>!!CASE&&CASE.srv===false;
-function flush(){
-  if(flushing||!OUTQ.length||!SC.online||localOnly())return;
-  flushing=true;const q=OUTQ.splice(0);saveLocal();
-  LIVE.send(q).then(r=>{(r.results||[]).forEach(x=>{if(!x.ok)toast(esc(x.error||'The server did not accept this entry'),true)})},()=>{OUTQ.unshift(...q)}).finally(()=>{flushing=false;saveLocal()});
-}
-const post=m=>{if(m.t==='op')sendOps([m.op]);else if(m.t==='ops')sendOps(m.ops)};
-function op(k,data,t){if(CASE&&CASE.life&&CASE.life.closed&&k!=='decrcv'&&k!=='decack'){toast('This STEMI pathway is closed: it is read-only.',true);return {id:''}}const o={id:'c'+rid()+'-'+(++opSeq),cad:CAD,k,data:data||{},t:t==null?now():t};if(SC.online&&!OUTQ.length&&!flushing&&!localOnly())post({t:'op',op:o});else OUTQ.push(o);saveLocal();return o}
-const delivered=id=>!!(id&&SRV&&SRV.ops&&SRV.ops[id]);
-const dlvAt=id=>SRV&&SRV.ops?SRV.ops[id]:null;
-const ev=(text,who,t)=>{CASE.events.push({t:t==null?now():t,text,who:who||ME})};
-const touch=()=>{if(!CASE)return;CASE.savedAt=now();if(!CASE.mdDone&&answered()===8){CASE.mdDone=true;CASE.mdAt=now();ev('Minimum dataset entered',ME)}};
-const answered=()=>CASE?MD.filter(f=>CASE.md[f.k]).length:0;
-const idText=()=>CAD?'CAD #'+CAD:'CAD number not entered';
-/* the CAD number can be corrected until the case is sent; after Send it is locked (an authorised, audited correction
-   after Send is not built in this phase). cadDup: the platform found a case under it, so it must be corrected or opened */
-const cadLocked=()=>!!CASE&&(CASE.srv!==false||(CASE.ecgs.length>0&&!CASE.cadDup));
-const focusCad=()=>setTimeout(()=>{const i=$('#cadin');if(i&&!i.disabled){i.focus();const n=i.value.length;try{i.setSelectionRange(n,n)}catch(_){}}},30);
-const lastEcg=()=>CASE&&CASE.ecgs[CASE.ecgs.length-1];
-/* several images per ECG: e.imgs=[{i,at,q,img}], e.pri = number of the Primary image, e.sel = the image shown large on C-05.
-   An image keeps its number; a recapture takes the number of the image it replaces, and a new image takes the lowest free number. */
-const MAXI=3; /* the prototype's maximum; the real maximum is configuration (Q-63) */
-const priImg=e=>e.imgs.find(x=>x.i===e.pri)||e.imgs[0];
-const selImg=e=>e.imgs.find(x=>x.i===e.sel)||priImg(e);
-const freeSlot=e=>{let i=1;while(e.imgs.some(x=>x.i===i))i++;return i};
-const ecgAt=e=>Math.min(...e.imgs.map(x=>x.at));
-const nImgs=e=>e.imgs.length>1?` (${e.imgs.length} images)`:'';
-const complaintShort=a=>{const c=COMPLAINTS.find(x=>x.id===a.v);return c?c.s:'';};
-function ptSummary(){
-  const m=CASE.md, parts=[];
-  if(m.age)parts.push(m.age.nv?'Age unknown':(m.age.est?'≈ ':'')+m.age.v+' y');
-  if(m.sex)parts.push(m.sex.nv?'Sex unknown':m.sex.v);
-  if(m.complaint)parts.push(complaintShort(m.complaint));
-  return parts.length?parts.join(' · '):'Patient details not entered yet';
-}
-function hospInfo(k){
-  const h=HOSP[k], o=CASE?CASE.openedAt:now();
-  if(k==='A'&&SC.hospA==='stale')return {...h,lab:'Unknown, not updated',labSub:'Last update 06:40',unk:true,cardio:'Available',path:'Active'};
-  if(k==='A')return {...h,lab:'Available',labSub:`Updated ${hm(o-11*MIN)} by Coordinator`,cardio:'Available',path:'Active'};
-  if(k==='B')return {...h,lab:'Available',labSub:`Updated ${hm(o-34*MIN)} by Coordinator`,cardio:'Available',path:'Active'};
-  return {...h,lab:'Unknown, not updated',labSub:'Last update 08:10',unk:true,cardio:'Available',path:'Active'};
-}
-function recommend(){
-  if(SC.hospA==='stale')return {hosp:'B',reason:'PCI Hospital A cath lab status is unknown (not updated since 06:40), so it is not treated as available. PCI Hospital B is the next nearest participating PCI centre within catchment; no diversion.'};
-  return {hosp:'A',reason:'Nearest participating PCI centre within catchment; no diversion.'};
-}
-function completeness(){return !CASE||!Object.keys(CASE.rec).length?'Minimum dataset only':'Record in progress'}
-
-/* ---------- ECG: the same fictional printout generator as the cardiologist's screen, so both devices show identical photos.
-   Variants per ECG come from the page's simulation (findings); image 1 is the whole printout, 2 the chest leads, 3 the rhythm strip. ---------- */
-const ECG=window.ECG,{AIROWS,AIST,aiVal,aiStLine}=window.AIX;
-const KIND=['full','chest','rhythm'];
-let SIMV={ai:'ok',find:'border',q:'good',receipt:'ok'};
-const variantFor=n=>SIMV.find==='border'?(n===1?'border':'evolved'):(n===1?'clear':'clear2');
-const shot=(v,i,q,acq)=>ECG.photo(v,KIND[(i-1)%3],i===1?q:'good',acq).url;
-const guideSVG=()=>{
-  const x1=80,x2=1520,y1=227,y2=973,c=48,col=[487,820,1153],row=[468,638,806];
-  return `<svg class="vf-guide" viewBox="0 0 1600 1200" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
-   <g fill="none" stroke="rgba(255,255,255,.55)" stroke-width="3" stroke-dasharray="14 12">${row.map(y=>`<path d="M${x1} ${y}H${x2}"/>`).join('')}${col.map(xx=>`<path d="M${xx} ${y1}V${row[2]}"/>`).join('')}</g>
-   <g fill="none" stroke="#fff" stroke-width="10" stroke-linecap="round"><path d="M${x1} ${y1+c}V${y1}H${x1+c}M${x2-c} ${y1}H${x2}V${y1+c}M${x2} ${y2-c}V${y2}H${x2-c}M${x1+c} ${y2}H${x1}V${y2-c}"/></g></svg>`;
-};
-
-/* ---------- rendering helpers ---------- */
-const idTag=id=>SC.ids&&id?`<button class="idtag" data-note="${id}" title="Open the spec for ${id}">${id}</button>`:'';
-const STATECLS={'NOT STEMI — PATHWAY CLOSED':'done','STEMI PATHWAY COMPLETED':'done','DRAFT':'draft','TRANSMITTING':'tx','AWAITING CARDIOLOGIST':'await','UNDER REVIEW':'review','TRANSMISSION FAILED':'failed','DOWNTIME CASE':'downtime','CANCELLED':'cancelled','CONFIRMED STEMI':'conf','NOT STEMI':'review','REPEAT ECG REQUESTED':'await'};
-function stateChip(){
-  const s=CASE.state, k=STATECLS[s]||'draft';
-  const gl=STATECLS[s]==='done'&&s!=='NOT STEMI'?G('done'):s==='TRANSMITTING'?G('prog'):s==='UNDER REVIEW'?G('ack'):s==='TRANSMISSION FAILED'?G('fail'):s==='DOWNTIME CASE'?G('warn'):s==='AWAITING CARDIOLOGIST'?G('pend'):s==='NOT STEMI'?G('done'):s==='REPEAT ECG REQUESTED'?G('info'):'';
-  return `<span class="chip st-${k}">${gl}${s}</span>`;
-}
-/* LIVE — CONNECTED with the time of the last update from the platform, or CONNECTION LOST */
-const netHtml=()=>SC.online?`<span class="dot"></span><span class="nt"><b>LIVE — CONNECTED</b><small data-tick="sync">Last update ${lastSync?hms(lastSync):'–'}</small></span>`:`<span class="dot"></span><span class="nt"><b>CONNECTION LOST</b><small>Attempting to reconnect</small></span>`;
-function topbar(){
-  return `<div class="tb">
-   <button class="tb-home" data-act="home" ${view==='C-01'?'aria-current="page"':''}>${IC.home}<span>My cases</span></button>
-   <div class="tb-unit"><b>${UNIT}</b><span>${EMIRATE}</span></div><div class="sp"></div>
-   <div class="tb-me">${ME} · ${ROLE}</div>
-   <div class="tb-net ${SC.online?'on':'off'}" role="status">${netHtml()}</div>
-   <div class="tb-clock mono" data-tick="clock">${hm(now())}</div></div>`;
-}
-function caseHeader(ws){
-  const c=CASE;
-  const l1=c.cad?`<span class="mono">CAD #${esc(c.cad)}</span><span class="cadsrc">${G('done')}${cadLocked()?'Entered manually · locked after send':'Entered manually'}</span>${cadLocked()?'':'<button class="lnk" data-act="cad-edit">Correct</button>'}`
-    :`<span class="mono cad-none">CAD number not entered</span><button class="lnk" data-act="cad-edit">Enter CAD number</button>`;
-  const l2=`<b>${esc(ptSummary())}</b>`;
-  const add=ws?`<button class="btn btn-s" data-act="handover">Case summary</button><button class="btn btn-s" data-act="add-ecg">${IC.ecg}New ECG</button>`:'';
-  return `<div class="ch"><div class="ch-id"><div class="ch-l1">${l1}</div><div class="ch-l2">${l2}</div></div>
-    <div class="ch-st">${stateChip()}<span class="ch-clock mono" data-tick="caseclock">Open ${dur(now()-c.openedAt)}</span>${add}</div></div>`;
-}
-const lostBanner=()=>SC.online?'':`<div class="lostb" role="alert">${G('warn')}<div><b>CONNECTION LOST · Attempting to reconnect.</b><span>Statuses on this screen may not be current${lastSync?` (last update ${hms(lastSync)})`:''}. Everything you save stays on this tablet and is sent, in order, when the connection returns.</span></div></div>`;
-/* Hamad, 4 Oct 2026: Open STEMI pathway → enter the CAD number → capture or upload the ECG → minimum dataset → Send */
-function stepper(cur){
-  const c=CASE,n=answered(),cap=!!c.draft;
-  const st=[
-   {k:'CAD',l:'CAD number',done:!!c.cad,d:c.cad?`#${c.cad}${cadLocked()?' · locked':''}`:'Enter from the MDT'},
-   {k:'C-04',l:'ECG',done:cap,d:cap?`ECG ${c.draft.n} captured${c.draft.imgs.length>1?` · ${c.draft.imgs.length} images`:''}`:'Not captured'},
-   {k:'C-03',l:'Minimum dataset',done:n===8,d:`${n} of 8 answered`},
-   {k:'C-05',l:'Send',done:false,d:!c.cad?'Enter the CAD number first':!cap?'Capture the ECG first':n<8?`${8-n} field${8-n>1?'s':''} still to answer`:'Ready to send'}];
-  return `<nav class="steps" aria-label="Case steps">${st.map((x,i)=>`<button class="step ${cur===x.k||(cur==='C-04'&&x.k==='C-04')?'cur':''} ${x.done?'done':''}" data-act="step" data-k="${x.k}" ${cur===x.k?'aria-current="step"':''}${x.k==='CAD'&&cadLocked()?' disabled':''}><span class="step-n">${x.done?G('done'):i+1}</span><span class="step-t"><b>${x.l}</b><small>${x.d}</small></span></button>`).join('')}</nav>`;
-}
-const ab=(l,m,r)=>`<div class="ab"><div class="ab-l">${l||''}</div><div class="ab-m">${m||''}</div><div class="ab-r">${r||''}</div></div>`;
-const savedLine=()=>`<span class="saved">${G('done')}Saved on this tablet <span class="mono">${hms(CASE.savedAt)}</span></span><span>${ME} · ${UNIT}, filled in automatically</span>`;
-const failBar=()=>{const f=CASE&&CASE.failure;if(!f||f.late)return '';return `<div class="fbar" role="alert">${G('fail')}<div class="fb-t"><b>ECG not delivered. Use the STEMI downtime route.</b><span class="mono" data-tick="attempt">Retrying automatically · attempt ${f.attempts} · last try ${hms(f.last)}</span></div><button class="btn btn-inv" data-act="show-fail">Show instructions</button></div>`};
-const banner=(k,t,b)=>`<div class="banner banner-${k}">${G(k)}<div><b class="bt">${t}</b>${b?`<span>${b}</span>`:''}</div></div>`;
-
-/* ---------- C-01 ---------- */
-function liveState(){
-  const c=CASE,e=lastEcg(),d=lastDec();
-  if(!e)return {k:'pend',t:'Draft, not sent',s:`${c.cad?'':'CAD number not entered · '}${answered()} of 8 answered · ECG ${c.draft?'captured':'not captured'}`};
-  if(c.failure&&!c.failure.late)return {k:'fail',t:'ECG not delivered. Use the STEMI downtime route.',s:`Retrying automatically · attempt <span data-tick="attempt-n">${c.failure.attempts}</span>`};
-  if(e.tx.stage==='check'||e.tx.stage==='up')return {k:'prog',t:`Uploading ECG ${e.n} · ${e.tx.pct||0}%`};
-  if(d)return {k:d.k==='confirm'?'fail':'ack',t:`Decision received: ${DECL[d.k]}`,s:`${d.by} · ${hms(d.at)}`};
-  if(c.opened)return {k:'ack',t:`${c.ack.who} is reviewing`,s:`Acknowledged ${hms(c.ack.at)} · opened the ECG ${hms(c.opened)}`};
-  if(c.ack)return {k:'ack',t:`${c.ack.who} acknowledged`,s:`At ${hms(c.ack.at)}`};
-  if(c.esc.length)return {k:'warn',t:c.esc[c.esc.length-1].t,s:`Waiting for cardiologist <span class="mono" data-tick="wait">${dur(now()-c.waitFrom)}</span>`};
-  if(c.failure&&c.failure.late)return {k:'warn',t:'Delivered late – downtime route already in use',s:`Waiting for cardiologist <span class="mono" data-tick="wait">${dur(now()-c.waitFrom)}</span>`};
-  if(c.waitFrom)return {k:'pend',t:`Waiting for cardiologist <span class="mono" data-tick="wait">${dur(now()-c.waitFrom)}</span>`,s:c.alert?`${c.alert.who} alerted at ${hms(c.alert.at)}`:''};
-  return {k:'pend',t:'Sending'};
-}
-let histReq=0;
-function vHome(){
-  const c=CASE,active=c&&!c.cancelled&&!(c.life&&c.life.closed);
-  if(HLIST===null&&!histReq){histReq=1;setTimeout(()=>{histReq=0;loadHist()},0)}
-  let card='';
-  if(active){
-    const st=liveState(),d=c.dest;
-    const dest=!d||d.st==='finding'?'Not recommended yet':`${d.st==='rec'?'Recommended':'Confirmed'}: ${HOSP[d.hosp].name}`;
-    card=`<article class="card ${st.k==='fail'?'fail':''}"><div class="card-l">
-      <div class="ch-l1"><span class="mono">${esc(idText())}</span><span class="cadsrc">${G('done')}${c.srv===false?'Draft on this tablet':'STEMI pathway open'}</span></div>
-      <div><b>${esc(ptSummary())}</b></div>
-      <div class="card-st k-${st.k}">${G(st.k)}<div><b>${st.t}</b>${st.s?`<small>${st.s}</small>`:''}</div></div>
-      <dl class="card-f"><div><dt>Destination</dt><dd>${dest}</dd></div><div><dt>Record</dt><dd>${completeness()}</dd></div></dl></div>
-      <button class="btn btn-p btn-xl" data-act="open-case">${c.ecgs.length?'Open case':'Continue case'}</button></article>
-      <div class="newcase"><button class="btn btn-s btn-xl" data-act="new-case">${IC.ecg}New STEMI case</button></div>`;
-  } else {
-    /* no CAD integration in this phase: the EMT enters the CAD number of the call after opening the pathway. No temporary ID */
-    card=`<article class="card inc"><div class="card-l">
-      <div class="ch-l1"><span class="mono">New STEMI case</span></div>
-      <div><b>You enter the CAD number of this call from the MDT / dispatch information.</b></div>
-      <dl class="card-f"><div><dt>Unit</dt><dd>${UNIT}</dd></div><div><dt>Crew</dt><dd>${ME}</dd></div></dl></div>
-      <button class="btn btn-p btn-xl" data-act="open-path">${IC.ecg}Open STEMI pathway</button></article>`;
+  /* ---------- this tablet's own copy: the unsent case and whatever waits for the connection ---------- */
+  let saveT = null, lastSaved = '';
+  function saveLocal(immediate) {
+    clearTimeout(saveT);
+    const go = () => {
+      try {
+        const s = JSON.stringify({ user: AU.id, epoch: S.epoch, draft: S.draft, out: S.out, ecgd: S.ecgd });
+        if (s !== lastSaved) { localStorage.setItem(LSK, s); lastSaved = s; }
+      } catch (_) { toast('This tablet\'s storage is full: send or discard the unsent case.', 'err'); }
+    };
+    if (immediate) go(); else saveT = setTimeout(go, 250);
   }
-  return `<div class="home"><div class="home-main">
-    <h1 class="h1">${active?'My active cases':'New case'}</h1>
-    ${!SC.online?banner('warn','No connection.','You can still open the STEMI pathway, capture the ECG and enter the minimum dataset. If sending fails you will be told at once.'):''}
-    ${card}
-    ${histHtml()}
-   </div>
-   <footer class="home-foot">${G('info')}<span>Platform unavailable? Use the STEMI downtime route: <span class="ph">approved downtime number (Q-21)</span></span></footer></div>`;
-}
-
-/* ---------- keypad (value drawers) ---------- */
-function keypad(extra){
-  const ks=['1','2','3','4','5','6','7','8','9',extra||'','0','del'];
-  return `<div class="kp">${ks.map(k=>k===''?'<span class="key blank"></span>':k==='del'?`<button class="key" data-key="del" aria-label="Delete">${IC.del}</button>`:`<button class="key ${k.length>1?'txt':''}" data-key="${k}">${k}</button>`).join('')}</div>`;
-}
-
-/* ---------- C-03 ---------- */
-function fmtVal(k,a){
-  if(k==='age')return `${a.est?'≈ ':''}${a.v} years${a.est?' <small>estimated</small>':''}`;
-  if(k==='complaint')return `<span>${esc(complaintShort(a))}</span>${a.det?`<small>${esc(a.det)}</small>`:''}`;
-  if(k==='onset')return `${hm(a.v)}${a.approx?' <small>approximate</small>':''} <small>${ago(a.v)}</small>`;
-  if(k==='bp')return `${a.sys}/${a.dia} <small>mmHg · ${hm(a.at)}</small>`;
-  if(k==='hr')return `${a.v} <small>bpm · ${hm(a.at)}</small>`;
-  if(k==='spo2')return `${a.v} <small>% · ${hm(a.at)}</small>`;
-  if(k==='gcs')return `${a.v}`;
-  if(k==='sex')return a.v;
-  return '';
-}
-function mdRow(f){
-  const a=CASE.md[f.k],st=!a?'pend':a.nv?'nv':'done';
-  let val;
-  if(f.kind==='sex')val=['Male','Female'].map(s=>`<button class="cbtn ${a&&a.v===s?'on':''}" data-act="set" data-k="sex" data-v="${s}" aria-pressed="${!!(a&&a.v===s)}">${a&&a.v===s?IC.check:''}${s}</button>`).join('');
-  else if(f.kind==='gcs'){const o=a&&a.v&&a.v!==15;
-    val=`<button class="cbtn ${a&&a.v===15?'on':''}" data-act="set" data-k="gcs" data-v="15" aria-pressed="${!!(a&&a.v===15)}">${a&&a.v===15?IC.check:''}15 — Alert and orientated</button><button class="cbtn ${o?'on':''}" data-act="open" data-k="gcs">${o?IC.check+'GCS '+a.v:'Other score'}</button>`;}
-  else if(a&&a.nv)val=`<button class="vbtn" data-act="open" data-k="${f.k}"><span class="inst">Enter a value instead</span></button>`;
-  else val=`<button class="vbtn ${a?'set':''}" data-act="open" data-k="${f.k}">${a?fmtVal(f.k,a):'<span class="tap">Tap to enter</span>'}</button>`;
-  const nvs=f.nv.map(n=>{const on=a&&a.nv===n;return `<button class="nvb ${on?'on':''}" data-act="nv" data-k="${f.k}" data-v="${n}" aria-pressed="${!!on}">${on?IC.slash:''}${n}</button>`}).join('');
-  return `<div class="mr ${st==='pend'?'st-pend':''}">${G(st)}<div class="lab">${f.label}${f.sub?`<small>${f.sub}</small>`:''}</div><div class="val choice2">${val}</div><div class="nvs">${nvs}</div></div>`;
-}
-/* ---------- the CAD number, entered manually by the EMT ---------- */
-function vCad(){
-  const c=CASE,L=c.cadEdit,lock=cadLocked();
-  return `<div class="vbody"><div class="cadv">
-    <label class="cadv-lab" for="cadin">CAD NUMBER</label>
-    <div class="cadv-row"><span class="cadv-pre mono" aria-hidden="true">CAD #</span><input class="tin cadv-in mono" id="cadin" value="${esc(L.val)}" ${lock?'disabled':''} autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false" enterkeyhint="go" placeholder="${CADN.EXAMPLE}" aria-describedby="caderr cadhint"${L.err?' aria-invalid="true"':''}></div>
-    <div id="caderr" role="alert">${L.err?`<p class="cadv-err">${G('fail')}<span><b>${esc(L.err)}</b>${L.detail?`<small>${esc(L.detail)}</small>`:''}</span></p>`:''}</div>
-    <p class="cadv-hint" id="cadhint">${lock?`Locked: the case has been sent under <b class="mono">CAD #${esc(c.cad)}</b>.`:`Enter the CAD number of this call from the MDT / dispatch information, for example <b class="mono">${CADN.EXAMPLE}</b>. “CAD#” and spaces are removed automatically.`}</p>
-    <p class="cadv-src">${G('info')}<span>Entered manually by the crew, not received from dispatch. The platform checks that no case already exists under this number. You can correct it until the case is sent; after Send it is locked.</span></p>
-  </div></div>`+
-    ab(`<button class="btn btn-q" data-act="home">${IC.back}My cases</button>`,savedLine(),`<button class="btn btn-p btn-xl" data-act="cad-ok" ${lock||L.busy?'disabled':''}>${L.busy?'Checking…':c.draft?'Continue: check and send':'Continue: capture ECG'}</button>`);
-}
-/* the number is valid and has no case on the platform (or cannot be checked now: then it is checked again at Send) */
-function cadAccept(c,v,unchecked){
-  const prev=c.cad;
-  if(v!==prev){c.cadHist.push({v,t:now()});ev(prev?`CAD number corrected before sending: CAD #${prev} → CAD #${v}`:`CAD number entered manually: CAD #${v}`,ME);c.cadAt=now()}
-  c.cad=v;CAD=v;c.cadDup=null;c.cadEdit={val:v,err:'',detail:'',busy:false};
-  if(!c.srv)OUTQ.forEach(o=>{o.cad=v});
-  touch();saveLocal();
-  if(unchecked)toast(`<b>CAD #${esc(v)} saved.</b> No connection: the platform checks it for an existing case when you send.`,true);
-  /* corrected after the platform refused a retried Send: try again */
-  if(c.ecgs.length&&c.srv===false){view='WS';render();if(c.failure&&!c.failure.late)late();return}
-  view=c.draft?'C-05':'C-04';render();
-}
-function vMd(){
-  const c=CASE;
-  return `<div class="vbody"><div class="mdl">
-    ${MD.map(mdRow).join('')}</div></div>`+
-    ab(`<button class="btn btn-q" data-act="step" data-k="C-04">${IC.back}${c.draft?'Back to the ECG':'Capture ECG'}</button>`,savedLine(),`<button class="btn btn-p btn-xl" data-act="step" data-k="C-05" ${c.draft?'':'disabled'}>${c.draft?'Next: check and send':'Capture the ECG to send'}</button>`);
-}
-
-/* ---------- C-04 ---------- */
-/* what the shutter will do: a new ECG, another image of the ECG being reviewed, or a recapture of one image */
-function camMode(){
-  const c=CASE,d=c.draft,r=c.recap;
-  if(c.addTo){const e=c.ecgs[c.addTo-1];return {k:'addsent',n:e.n,i:freeSlot(e),v:e.v,acq:e.acq}}
-  if(r)return {k:'recap',n:r.n,i:r.i,v:d?d.v:variantFor(r.n),acq:d?d.acq:null};
-  if(d&&d.imgs.length<MAXI)return {k:'add',n:d.n,i:freeSlot(d),v:d.v,acq:d.acq};
-  const n=c.nextN||c.ecgs.length+1;
-  return {k:'new',n,i:1,v:variantFor(n),acq:null};
-}
-const vfAcq=()=>Math.floor(now()/10000)*10000;
-function vCam(){
-  const m=camMode(),n=m.n;
-  return `<div class="cam ${SC.light?'lit':''}"><div class="vf">
-    <img class="vf-img" src="${shot(m.v,m.i,SC.quality,m.acq||vfAcq())}" alt="Camera view of the monitor's 12-lead printout">
-    ${guideSVG()}
-    <div class="vf-top"><span class="vf-id mono">${idText()} · ECG&nbsp;${n} · Image&nbsp;${m.i}</span><span class="vf-tip">Fit the whole ECG in the frame. Include the calibration pulse.</span></div>
-    <div class="vf-lock">${IC.lock}Stays in this case. Never saved to the photo gallery.</div>
-    <div class="flash" id="flash"></div></div>
-   ${m.k==='add'?`<p class="vf-add"><b>Adding an image to ECG ${n}.</b> A new recording from the monitor is a new ECG.</p>`:''}
-   ${m.k==='addsent'?`<p class="vf-add"><b>Adding an image to ECG ${n}, already sent.</b> It goes straight to the cardiologist as part of ECG ${n}. A new recording from the monitor is a new ECG.</p>`:''}
-   <div class="cam-ctl">
-    <button class="cam-b" data-act="light" aria-pressed="${!!SC.light}">${IC.light}<span>Light</span></button>
-    <button class="shutter" data-act="shoot" aria-label="Capture ECG ${n}, image ${m.i}"><span></span></button>
-    <button class="cam-b" data-act="upload">${IC.up}<span>Upload</span></button>
-    <button class="cam-b" data-act="cam-cancel">${IC.close}<span>Cancel</span></button></div></div>`;
-}
-
-/* ---------- C-05 ---------- */
-function sumRow(f){
-  const a=CASE.md[f.k];
-  let v;
-  if(!a)v='<span class="nye">Not yet entered</span>';
-  else if(a.nv)v=nvChip(a.nv);
-  else if(f.k==='gcs')v=String(a.v);
-  else v=fmtVal(f.k,a);
-  return `<dt>${f.label}</dt><dd>${v}</dd>`;
-}
-function stripHtml(e){
-  const s=selImg(e);
-  const th=e.imgs.map(x=>{const q=QUAL[x.q],on=x.i===s.i,pri=x.i===e.pri;
-    return `<button class="thumb ${on?'on':''}" data-act="sel-img" data-i="${x.i}" aria-pressed="${on}" aria-label="Image ${x.i}, captured ${hms(x.at)}, image check ${q.t}${pri?', primary':''}"><span class="th-img"><img src="${x.img}" alt="">${pri?'<span class="th-pri">Primary</span>':''}</span><span class="th-l"><b>Image ${x.i}</b><span class="mono">${hms(x.at)}</span></span><span class="th-q">${G(q.g)}${q.t}</span></button>`}).join('');
-  const add=e.imgs.length<MAXI?`<button class="thumb th-add" data-act="add-img">${IC.cam}<span>Add image to ECG&nbsp;${e.n}</span></button>`:'';
-  const acts=e.imgs.length>1?`<div class="th-acts">${s.i!==e.pri?'<button class="btn btn-s" data-act="make-pri">Make primary</button>':'<span></span>'}<button class="btn btn-q" data-act="rm-img">Remove image</button></div>`:'';
-  return `<div class="strip" role="group" aria-label="Images of ECG ${e.n}">${th}${add}</div>${acts}
-      <p class="strip-note">Several photos of the same printout belong to this ECG. A new recording from the monitor is a new ECG with its own time.</p>`;
-}
-function vReview(){
-  const c=CASE,e=c.draft,s=selImg(e),q=QUAL[priImg(e).q],miss=MD.filter(f=>!c.md[f.k]),can=!miss.length&&!!c.cad;
-  const first=e.n===1;
-  return `<div class="vbody" data-keep="rv"><div class="rv">
-    <div class="rv-img ${e.imgs.length>1?'multi':''}"><button class="imgbtn" data-act="zoom" aria-label="Zoom into ECG ${e.n}, image ${s.i}"><img src="${s.img}" alt="Captured ECG ${e.n}, image ${s.i}, as photographed"><span class="zoomhint">${IC.zoom}Zoom</span></button>
-      <div class="rv-cap"><b class="mono">ECG ${e.n} · Image ${s.i}</b> · captured <span class="mono">${hms(s.at)}</span> · <span class="mono">${idText()}</span></div>
-      <div class="rv-time">ECG time <b class="mono">${hm(e.time||ecgAt(e))}</b> ${e.timeWhy?`(changed: ${esc(e.timeWhy)})`:e.imgs.length>1?'(first photo taken)':'(photo taken)'} <button class="lnk" data-act="ecg-time">Change</button></div>
-      ${stripHtml(e)}</div>
-    <div class="rv-side">
-      ${!c.cad?`<section class="todo"><h2 class="h2">${G('warn')}Enter the CAD number to send</h2><button class="btn btn-s" data-act="cad-edit">Enter CAD number</button></section>`:''}
-      ${miss.length?`<section class="todo"><h2 class="h2">${G('warn')}Answer ${miss.length} more field${miss.length>1?'s':''} to send</h2>${miss.map(mdRow).join('')}</section>`:''}
-      <section class="qc qc-${q.k}"><div class="qc-h">${G(q.g)}<div><div class="qc-lab">IMAGE CHECK ON THIS TABLET · PRIMARY IMAGE</div><div class="qc-res">${q.t}</div></div></div>
-        ${q.body}<ul>${q.checks.map(([k,t])=>`<li>${G(k)}${t}</li>`).join('')}</ul>
-        <p class="qc-note">The final check runs on the server. This result never stops you sending.</p></section>
-      <section class="sum"><h2 class="h2">${first?'Minimum dataset':'Minimum dataset, sent with ECG 1'}</h2><dl>${MD.map(sumRow).join('')}</dl></section>
-    </div></div></div>`+
-    ab(`<button class="btn btn-s" data-act="recapture">${IC.cam}Recapture</button>`,savedLine(),
-      `<div class="sendwrap"><button class="btn btn-p btn-xl" data-act="send" ${can?'':'disabled'}>${IC.send}Send to cardiologist</button><small>${can?(first?'Alerts the on-duty cardiologist of the recommended PCI hospital.':`Goes to ${c.alert?c.alert.who:'the cardiologist'} on this case.`):!c.cad?'Enter the CAD number to send.':`Answer ${miss.length} more field${miss.length>1?'s':''} to send.`}</small></div>`);
-}
-
-/* ---------- C-07 rail: the case's live status progression, driven by the shared record ---------- */
-const DECL={confirm:'CONFIRMED STEMI',not:'NOT STEMI',repeat:'UNCLEAR · REPEAT ECG REQUESTED'};
-const lastDec=()=>CASE&&CASE.decs.length?CASE.decs[CASE.decs.length-1]:null;
-const inTransit=e=>e&&['check','up','wait','noconn','fail'].includes(e.tx.stage);
-function railHead(){
-  const c=CASE,e=lastEcg(),d=lastDec(),stale=SC.online?'':`<div class="rh-sub stale">${G('warn')}Connection lost: this status may not be current</div>`;
-  if(c.failure&&!c.failure.late)return `<div class="rh-big k-fail">${G('fail')}ECG not delivered</div><div class="rh-sub">Use the STEMI downtime route. Retrying automatically.</div>`;
-  if(e.tx.stage==='check')return `<div class="rh-big">${G('prog')}Checking connection</div>`;
-  if(e.tx.stage==='up')return `<div class="rh-big">${G('prog')}Uploading ECG ${e.n} · ${e.tx.pct}%</div><div class="bar"><i style="width:${e.tx.pct}%"></i></div>`;
-  if(e.tx.stage==='wait')return `<div class="rh-big">${G('prog')}Sent · waiting for the server</div>${stale}`;
-  if(d)return `<div class="rh-k">Decision received</div><div class="rh-big k-dec-${d.k}">${d.k==='confirm'?G('fail'):G('done')}${DECL[d.k]}</div><div class="rh-sub">${esc(d.by)} · ${hms(d.at)}${d.crewAck?' · acknowledged':''}</div>${stale}`;
-  if(c.opened)return `<div class="rh-big">${G('ack')}${c.ack.who} is reviewing</div><div class="rh-sub">Acknowledged ${hms(c.ack.at)}, after ${dur(c.ack.at-c.waitFrom)} · decision to follow</div>${stale}`;
-  if(c.ack)return `<div class="rh-big">${G('ack')}${c.ack.who} acknowledged</div><div class="rh-sub">At ${hms(c.ack.at)}, after ${dur(c.ack.at-c.waitFrom)}</div>${stale}`;
-  if(c.waitFrom)return `<div class="rh-k">Waiting for cardiologist</div><span class="rh-t" data-tick="wait">${dur(now()-c.waitFrom)}</span><div class="rh-sub">Server received ECG 1 at ${hms(c.ecgs[0].tx.rcvAt)}${c.failure&&c.failure.late?' (delivered late)':''}</div>${stale}`;
-  return `<div class="rh-big">${G('pend')}Sending</div>`;
-}
-function railRows(){
-  const c=CASE,e1=c.ecgs[0],L=lastEcg(),tx=(inTransit(L)?L:e1).tx,te=inTransit(L)?L:e1,rows=[],d=lastDec();
-  const R=(k,t,dsc,tm,cls)=>rows.push(`<li class="${cls||''}">${G(k)}<div><div class="t">${t}</div>${dsc?`<div class="d">${dsc}</div>`:''}${tm?`<div class="tm mono">${tm}</div>`:''}</div></li>`);
-  /* sending: shown for ECG 1, and again while a later ECG is on its way */
-  if(!e1.tx.rcvAt||inTransit(L)){
-    if(tx.stage==='noconn')R('fail','CONNECTED','No connection when you pressed Send','','kfail');
-    else if(tx.conAt)R('done','CONNECTED','Connection checked',hms(tx.conAt));
-    else R('prog','CONNECTED','Checking connection','','cur');
-    if(tx.stage==='up')R('prog','UPLOADING',`ECG ${te.n}${nImgs(te)}${te.n===1?' and case data':''} · ${tx.pct}%<div class="bar"><i style="width:${tx.pct}%"></i></div>`,'','cur');
-    else if(tx.upAt)R('done','UPLOADING',`ECG ${te.n}${nImgs(te)}${te.n===1?' and case data':''} · 100%`,hms(tx.upAt));
-    else if(tx.stage==='fail')R('fail','UPLOADING',`Stopped at ${tx.pct}%`,'','kfail');
-    else R('pend','UPLOADING','');
+  function restoreLocal() {
+    try {
+      const s = JSON.parse(localStorage.getItem(LSK) || 'null');
+      if (!s || s.user !== AU.id) return;
+      S.draft = s.draft || null; S.out = s.out || []; S.ecgd = s.ecgd || {}; S.epoch = s.epoch || null;
+      if (S.draft && S.draft.send && S.draft.send.stage !== 'queued') S.draft.send.stage = 'failed';
+    } catch (_) { /* unreadable: start clean */ }
   }
-  /* Hamad's progression: ECG RECEIVED → CARDIOLOGIST ALERTED → ACKNOWLEDGED → REVIEWING → DECISION RECEIVED */
-  if(e1.tx.late)R('warn','ECG RECEIVED','Delivered late – downtime route already in use',hms(e1.tx.rcvAt));
-  else if(e1.tx.rcvAt)R('done','ECG RECEIVED',`The platform has the case and ECG 1${nImgs(e1)} (images stored on the server)`,hms(e1.tx.rcvAt));
-  else if(e1.tx.stage==='fail'||e1.tx.stage==='noconn')R('fail','ECG RECEIVED','Not confirmed. Use the STEMI downtime route.','','kfail');
-  else R('pend','ECG RECEIVED','Waiting for the server to confirm','','cur');
-  const extra=c.rem.map(t=>`<div class="escl">${G('info')}<div>Reminder sent to ${c.alert.who} · <span class="mono">${hms(t)}</span></div></div>`).join('')+c.esc.map(x=>`<div class="escl">${G('warn')}<div><b>${x.t}</b><br>${x.who} · <span class="mono">${hms(x.at)}</span></div></div>`).join('');
-  if(c.alert)R('done','CARDIOLOGIST ALERTED',`${c.alert.who} · on duty, ${HOSP[c.alert.hosp].name}${extra}`,hms(c.alert.at));
-  else R('pend','CARDIOLOGIST ALERTED',e1.tx.rcvAt?'Alerting the on-duty cardiologist':'','',e1.tx.rcvAt?'cur':'');
-  if(c.ack)R('ack','CARDIOLOGIST ACKNOWLEDGED',`${c.ack.who} acknowledged and opened the case`,hms(c.ack.at));
-  else if(c.alert)R('pend','CARDIOLOGIST ACKNOWLEDGED',`Waiting for cardiologist <b class="mono" data-tick="wait">${dur(now()-c.waitFrom)}</b>`,'','cur');
-  else R('pend','CARDIOLOGIST ACKNOWLEDGED','');
-  if(c.opened)R(d?'done':'ack','CARDIOLOGIST REVIEWING',d?'Review complete':`${c.ack.who} is looking at the ECG and your entries. What you save now appears on that screen at once.`,hms(c.opened),d?'':'cur');
-  else R('pend','CARDIOLOGIST REVIEWING',c.ack?'Opening the ECG':'','',c.ack?'cur':'');
-  if(d)R(d.k==='confirm'?'fail':'done','DECISION RECEIVED',`<b>${DECL[d.k]}</b> · ${esc(d.by)}${d.crewAck?` · you acknowledged ${hms(d.crewAck)}`:' · <button class="lnk" data-act="show-dec">Show decision</button>'}`,hms(d.at),d.k==='confirm'?'kdec':'');
-  else R('pend','DECISION RECEIVED',c.opened?'It will appear full screen.':'');
-  /* then the STEMI pathway closes: automatically on NOT STEMI, or with COMPLETE STEMI PATHWAY (Hamad, 4 Oct 2026) */
-  if(e1.tx.rcvAt){const Z=c.life&&c.life.closed;
-    R(Z?'done':'pend','STEMI PATHWAY CLOSED',Z?`${Z.kind==='not-stemi'?'Automatically, after NOT STEMI':'Completed by the crew'} · read-only`:d&&d.k==='confirm'?'<button class="lnk" data-act="handover">Case summary · complete the STEMI pathway</button>':'',Z?hms(Z.at):'');}
-  return rows.join('');
-}
-/* the rail points to the AI ECG interpretation (C-07d); the interpretation itself is in the main column */
-const rcvd=()=>CASE.ecgs.filter(e=>e.tx.rcvAt);
-function aiMini(){
-  const g=rcvd(),e=g[g.length-1];if(!e)return '';
-  const a=e.aiR,t=!a?'AI analysis starting':a.st==='proc'?'AI analysis processing':AIST[a.st];
-  return `<div class="aimini"><span class="aitag">AI</span><span>ECG ${e.n} · ${t}${CASE.aiNew?' · <b>NEW ECG ANALYSIS</b>':''}</span><button class="lnk" data-act="to-ai">View</button></div>`;
-}
-function railHtml(){
-  const c=CASE;
-  const later=c.ecgs.slice(1).map(x=>`<li class="old">${G(x.tx.rcvAt?'done':inTransit(x)&&x.tx.stage!=='fail'&&x.tx.stage!=='noconn'?'prog':'fail')}<div>ECG ${x.n}${nImgs(x)} · ${x.tx.rcvAt?`received <span class="mono">${hms(x.tx.rcvAt)}</span> · on the cardiologist's screen`:inTransit(x)?'sending':'not delivered'}</div></li>`).join('');
-  const evs=c.events.slice().sort((a,b)=>b.t-a.t).map(x=>`<li><span class="tm mono">${hms(x.t)}</span><span>${esc(x.text)}<small>${esc(x.who)}</small></span></li>`).join('');
-  return `${idTag('C-07')}<div class="rail-h" aria-live="polite">${railHead()}</div><ol class="cl">${railRows()}${later}</ol>${aiMini()}<div class="tl"><h3>Case timeline</h3><ol>${evs}</ol></div>`;
-}
 
-/* ---------- C-07b ---------- */
-function destHtml(){
-  const c=CASE,d=c.dest,tag=idTag('C-07b');
-  if(!d)return `<section class="dest dest-wait" id="r-dest">${tag}${G('pend')}<div><h2 class="h2">Destination</h2><p>Recommended as soon as the server has the case.</p></div></section>`;
-  if(d.st==='finding')return `<section class="dest dest-wait" id="r-dest">${tag}${G('prog')}<div><h2 class="h2">Destination</h2><p>Finding the recommended PCI destination</p></div></section>`;
-  const h=hospInfo(d.hosp);
-  if(d.st==='rec')return `<section class="dest dest-rec" id="r-dest">${tag}
-    <div class="dest-lab">RECOMMENDED DESTINATION</div>
-    <div class="dest-main"><div class="dest-name">${IC.hosp}${h.name}</div><div class="dest-eta">ETA <b class="mono">${h.eta} min</b></div></div>
-    <dl class="dest-f"><div><dt>Cath lab</dt><dd class="${h.unk?'unk':''}">${h.lab}<small>${h.labSub}</small></dd></div><div><dt>Cardiologist</dt><dd>${h.cardio}<small>On duty: ${h.doc}</small></dd></div><div><dt>Pathway status</dt><dd>${h.path}</dd></div></dl>
-    <p class="dest-why"><b>Reason:</b> ${esc(d.reason)}</p>
-    <p class="dest-src">A recommendation, not a decision · destination engine · policy v0.1 (example) · ${hms(d.recAt)}</p>
-    <div class="dest-acts"><button class="btn btn-s" data-act="dest-change">Change destination</button><button class="btn btn-p btn-xl" data-act="dest-accept">Accept ${h.name}</button></div></section>`;
-  const et=c.eta,eta=et?`Departed <span class="mono">${hm(et.dep)}</span> · ETA <b class="mono">${et.min} min</b>${et.upd?` (updated ${hm(et.upd)})`:''}`:`ETA <b class="mono">${h.eta} min</b> once departed`;
-  return `<section class="dest dest-conf" id="r-dest">${tag}${G('ack')}<div class="dc-t"><b>Destination confirmed · ${h.name}</b>
-    <span>${eta} · ${d.by===ME?'confirmed by you':'by '+esc(d.by)} at <span class="mono">${hms(d.at)}</span>${d.from?` · changed from ${HOSP[d.from].name}, reason: ${esc(d.why)}`:''}</span>
-    <small>The cardiologist and ACC see this at once.</small></div><div class="dc-acts">${et?'<button class="btn btn-s" data-act="eta">Update ETA</button>':'<button class="btn btn-s" data-act="depart">Departed scene</button>'}<button class="btn btn-q" data-act="dest-change">Change</button></div></section>`;
-}
+  /* ---------- the minimum data: every item needs an answer; Unknown / Not obtained / Unable are answers ---------- */
+  const RANGE = { age: [0, 120], sys: [40, 300], dia: [20, 200], hr: [20, 300], spo2: [50, 100], gcs: [3, 15] };
+  const inRange = (v, [a, b]) => Number.isInteger(v) && v >= a && v <= b;
+  function mdErrors(md) {
+    const e = {}, a = md || {};
+    if (!a.age) e.age = 'Enter the age (or an estimate), or choose Unknown.';
+    else if (!a.age.nv && !inRange(a.age.v, RANGE.age)) e.age = 'Age: a whole number from 0 to 120 years.';
+    if (!a.sex) e.sex = 'Choose the sex, or Unknown.';
+    if (!a.complaint) e.complaint = 'Choose the presenting complaint (or the reason for the ECG).';
+    else if (a.complaint.k === 'oth' && !String(a.complaint.other || '').trim()) e.complaint = 'Describe the presenting complaint.';
+    if (!a.onset) e.onset = 'Enter the symptom onset time, or choose Unknown.';
+    else if (!a.onset.nv && !(a.onset.t <= now() + 5 * 60e3)) e.onset = 'The onset time cannot be in the future.';
+    if (!a.bp) e.bp = 'Enter the BP, or choose Not obtained / Unable to obtain.';
+    else if (!a.bp.nv) {
+      if (!inRange(a.bp.sys, RANGE.sys) || !inRange(a.bp.dia, RANGE.dia)) e.bp = 'BP: systolic 40–300 and diastolic 20–200 mmHg.';
+      else if (a.bp.sys <= a.bp.dia) e.bp = 'BP: the systolic value must be higher than the diastolic.';
+    }
+    if (!a.hr) e.hr = 'Enter the heart rate, or choose Not obtained / Unable to obtain.'; else if (!a.hr.nv && !inRange(a.hr.v, RANGE.hr)) e.hr = 'Heart rate: 20–300 bpm.';
+    if (!a.spo2) e.spo2 = 'Enter the SpO₂, or choose Not obtained / Unable to obtain.'; else if (!a.spo2.nv && !inRange(a.spo2.v, RANGE.spo2)) e.spo2 = 'SpO₂: 50–100 %.';
+    if (!a.gcs) e.gcs = 'Enter the GCS, or choose Not obtained / Unable to assess.'; else if (!a.gcs.nv && !inRange(a.gcs.v, RANGE.gcs)) e.gcs = 'GCS: 3 to 15.';
+    return e;
+  }
+  const answered = md => FIELDS.filter(f => md && md[f.k] && !mdErrors({ [f.k]: md[f.k] })[f.k]).length;
+  const onsetText = (t, approx) => `${new Date(now()).toDateString() === new Date(t).toDateString() ? '' : 'yesterday '}${hm(t)}${approx ? ' (approximate)' : ''}`;
+  function mdText(k, a) {
+    if (!a) return '';
+    if (a.nv) return a.nv;
+    switch (k) {
+      case 'age': return a.est ? `≈ ${a.v} y (estimated)` : `${a.v} y`;
+      case 'sex': return a.v;
+      case 'complaint': { const c = COMPLAINTS.find(x => x.k === a.k); return a.k === 'oth' ? `Other: ${String(a.other || '').trim()}` : c ? c.s : a.k; }
+      case 'onset': return onsetText(a.t, a.approx);
+      case 'bp': return `${a.sys}/${a.dia} mmHg`;
+      case 'hr': return `${a.v} bpm`;
+      case 'spo2': return `${a.v} %`;
+      case 'gcs': return String(a.v);
+    }
+    return '';
+  }
+  const mdPayload = md => Object.fromEntries(FIELDS.map(f => [f.k, { v: mdText(f.k, md[f.k]), raw: md[f.k], t: md[f.k].at || now() }]));
 
-/* ---------- C-07a: the live record. Every save goes to the cardiologist at once, silently, marked NEW there ---------- */
-const dlState=(id,queued)=>delivered(id)?`<span class="dl ok">On the cardiologist's screen <span class="mono">${hms(dlvAt(id))}</span></span>`:(queued||!SC.online)?`<span class="dl q">Saved on this tablet · will send when connected</span>`:`<span class="dl">Saved on this tablet · sending</span>`;
-const dlGlyph=id=>delivered(id)?'done':SC.online?'prog':'warn';
-function recRow(it){
-  const r=CASE.rec[it.id];let v,dl='',g='pend',btn='';
-  if(it.auto){const d=CASE.dest;
-    if(d&&d.st==='conf'){v=`<span class="v">${HOSP[d.hosp].name} · ${CASE.eta?`departed ${hm(CASE.eta.dep)} · ETA ${CASE.eta.min} min`:`ETA ${HOSP[d.hosp].eta} min once departed`}</span>`;g='done';dl=`<span class="dl ok">From the destination card, confirmed ${hms(d.at)}</span>`}
-    else v=`<span class="nye">Filled in when you confirm the destination</span>`;}
-  else if(it.later)v=`<span class="nye">${it.later}</span>`;
-  else if(r){
-    v=r.nv?nvChip(r.sum):`<span class="v">${esc(r.sum)}</span>`;
-    if(r.prev&&r.prev.length)v+=`<span class="hist">Earlier: ${r.prev.map(p=>`${esc(p.sum)} <span class="mono">(${hm(p.at)})</span>`).join(' · ')}</span>`;
-    if(it.multi&&r.count>1)v+=`<span class="nye">${r.count} entries sent; latest shown</span>`;
-    g=dlGlyph(r.opId);dl=dlState(r.opId);
-  } else v=`<span class="nye">Not yet entered</span>`;
-  if(!it.auto&&!it.later)btn=`<button class="btn btn-s" data-act="rec" data-id="${it.id}">${r?(it.multi?'Add':'Change'):'Enter'}</button>`;
-  else if(it.auto&&!(CASE.dest&&CASE.dest.st==='conf'))btn=`<button class="btn btn-q" data-act="to-dest">Go to destination</button>`;
-  return `<div class="rr">${G(g)}<div class="rr-l">${it.label}${it.q?`<span class="qref">${it.q}</span>`:''}</div><div class="rr-v">${v}${dl}</div>${btn||'<span></span>'}</div>`;
-}
-/* the minimum dataset after sending: values are never overwritten. A new reading or a correction is added,
-   and every earlier value stays visible with its time (Hamad, 3 Oct 2026, point 11) */
-const VIT=['bp','hr','spo2','gcs'];
-function mdText(k,a){
-  if(!a)return '';
-  if(a.nv)return a.nv;
-  if(k==='age')return `${a.est?'≈ ':''}${a.v} y${a.est?' (estimated)':''}`;
-  if(k==='sex')return a.v;
-  if(k==='complaint')return complaintShort(a)+(a.det?` · ${a.det}`:'');
-  if(k==='onset')return `${hm(a.v)}${a.approx?' (approximate)':''}`;
-  if(k==='bp')return `${a.sys}/${a.dia}`;
-  if(k==='hr')return `${a.v} bpm`;
-  if(k==='spo2')return `${a.v} %`;
-  if(k==='gcs')return String(a.v);
-  return '';
-}
-const KINDL={sent:'sent with ECG 1',update:'new reading',correct:'correction',clarify:'clarification'};
-function vitRow(f){
-  const h=CASE.mdh[f.k]||[],cur=h[h.length-1],a=cur?cur.a:CASE.md[f.k];
-  const val=a&&a.nv?nvChip(a.nv):`<span class="v">${esc(mdText(f.k,a))}${cur&&cur.t&&(VIT.includes(f.k)||cur.kind!=='sent')?` <small class="mono">${hm(cur.t)}</small>`:''}</span>`;
-  const kind=cur?`<span class="vk k-${cur.kind}">${KINDL[cur.kind]}${cur.kind==='correct'&&h.length>1?`: was ${esc(mdText(f.k,h[h.length-2].a))}`:''}</span>`:'';
-  const hist=h.length>1?`<span class="hist">Earlier: ${h.slice(0,-1).reverse().map(x=>`${esc(mdText(f.k,x.a))} <span class="mono">${hm(x.t)}</span> <span class="hk">${KINDL[x.kind]}</span>`).join(' · ')}</span>`:'';
-  const dl=cur&&cur.kind!=='sent'?dlState(cur.opId):'';
-  const g=cur&&cur.kind!=='sent'?dlGlyph(cur.opId):'done';
-  return `<div class="rr vr">${G(g)}<div class="rr-l">${f.label}</div><div class="rr-v">${val}${kind}${hist}${dl}</div><button class="btn btn-s" data-act="mdup" data-k="${f.k}">${VIT.includes(f.k)?'Update':'Correct or clarify'}</button></div>`;
-}
-function vitHtml(){
-  return `<section class="rec" id="r-vit">${idTag('C-07a')}<div class="rec-h"><h2 class="h2">Vital signs and minimum dataset</h2><span class="chip chip-i">Live to the cardiologist</span></div>
-   <p class="rec-sub">A new value never replaces the old one: both are kept with their times. Choose <b>New reading</b> when the patient changed, or <b>Correction</b> when the earlier entry was wrong.</p>
-   <div class="rg">${MD.filter(f=>VIT.includes(f.k)).map(vitRow).join('')}<div class="rr"><span></span><div class="rr-l"></div><div class="rr-v"></div><button class="btn btn-q" data-act="rec" data-id="obs">Add a full set</button></div></div>
-   <div class="rg"><h3>Sent with ECG 1</h3>${MD.filter(f=>!VIT.includes(f.k)).map(vitRow).join('')}</div></section>`;
-}
-function recHtml(){
-  const comp=completeness();
-  return `<section class="rec" id="r-rec">${idTag('C-07a')}<div class="rec-h"><h2 class="h2">Complete the record</h2><span class="chip ${comp==='Minimum dataset only'?'chip-n':'chip-i'}">${comp}</span></div>
-   <p class="rec-sub">Each item you save goes straight to the cardiologist's screen, marked New. No alarm sounds for it.</p>
-   ${REC.map(g=>{const its=g.items.filter(i=>!i.hide);return its.length?`<div class="rg"><h3>${g.g}</h3>${its.map(recRow).join('')}</div>`:''}).join('')}</section>`;
-}
-/* C-07c: ECGs already sent. Another photo of the same printout is an image of that ECG; a new recording is a new ECG */
-function ecgsHtml(){
-  const c=CASE;
-  const card=e=>{
-    const imgs=e.imgs.map(x=>`<figure class="eimg"><img src="${x.img}" alt="ECG ${e.n}, image ${x.i}"><figcaption><b>Image ${x.i}${x.i===e.pri?' · Primary':''}</b><span class="mono">${hms(x.at)}</span>${x.after?(delivered(x.opId)?`<span class="dl ok">Added after sending · delivered ${hms(dlvAt(x.opId))}</span>`:`<span class="dl ${SC.online?'':'q'}">Added after sending · ${SC.online?'sending':'will send when connected'}</span>`):''}</figcaption></figure>`).join('');
-    const can=e.tx.rcvAt&&e.imgs.length<MAXI;
-    return `<div class="ecard"><div class="ec-h"><b>ECG ${e.n}</b><span>acquired <span class="mono">${hms(e.acq)}</span></span><span>${e.tx.rcvAt?`received <span class="mono">${hms(e.tx.rcvAt)}</span>`:inTransit(e)?'sending':'not delivered'}</span>${can?`<button class="btn btn-s" data-act="add-sent" data-n="${e.n}">${IC.plus}Add ECG image</button>`:e.imgs.length>=MAXI?`<span class="muted">${MAXI} images, the prototype's maximum</span>`:''}</div><div class="eimgs">${imgs}</div></div>`;
-  };
-  return `<section class="rec" id="r-ecgs">${idTag('C-07c')}<div class="rec-h"><h2 class="h2">ECGs in this case</h2><button class="btn btn-s" data-act="add-ecg">${IC.ecg}Capture new ECG (ECG ${c.ecgs.length+1})</button></div>
-   <p class="rec-sub">Each ECG keeps its own acquisition time. Add an image when you photograph the same printout again; capture a new ECG for a new recording.</p>
-   ${c.ecgs.map(card).join('')}</section>`;
-}
-/* ---------- C-07d: the AI ECG interpretation. The platform's one analysis of each ECG, the same text the cardiologist
-   sees (Hamad, 3 Oct 2026, 12:07). Decision support only: the cardiologist makes the STEMI decision ---------- */
-function aiSecHtml(){
-  const c=CASE,got=rcvd();if(!got.length)return '';
-  const L=got[got.length-1],e=got.find(x=>x.n===c.aiSel)||L,a=e.aiR,d=lastDec(),x=priImg(e);
-  const tabs=got.length>1?`<div class="aitabs" role="group" aria-label="AI analysis of each ECG">${got.slice().reverse().map(g=>`<button class="aitab" data-act="ai-sel" data-n="${g.n}" aria-pressed="${g.n===e.n}">ECG ${g.n} · ${hm(g.acq)}${g.n===L.n?' <small>Latest</small>':''}${c.aiNew===g.n?' <span class="ainew">NEW ECG ANALYSIS</span>':''}</button>`).join('')}</div>`:'';
-  /* the cardiologist's decision sits above the AI, so the AI is never read as the decision */
-  const dec=d?`<b class="k-dec-${d.k}">${DECL[d.k]}</b><span>${esc(d.byT||d.by)} · <span class="mono">${hms(d.at)}</span></span>`:`<b>Awaited</b><span>${c.ack?`${esc(c.ack.who)} is reviewing`:c.alert?`${esc(c.alert.who)} alerted`:'Alerting the on-duty cardiologist'}</span>`;
-  const earlier=got.some(g=>g.n<e.n&&g.aiR&&g.aiR.st!=='proc');
-  let body;
-  if(!a||a.st==='proc')body=`<div class="aiwait"><span>${earlier?`Until it finishes, the analysis of ECG ${e.n-1} stays one tap away above.`:'Nothing waits for it: the cardiologist already has the ECG.'}</span></div>`;
-  else if(a.st==='down')body=`<div class="aidown">${G('nv')}<div><b>Continue clinical review using the original ECG and patient information.</b><span>The cardiologist has this ECG as normal.</span></div></div>`;
-  else if(a.st==='wh')body=`<div class="aiq">${G('warn')}<div><b>${esc(a.q)}</b><span>No interpretation is given for this ECG. It went to the cardiologist as normal.</span></div></div>`;
-  else body=(a.st==='lim'?`<div class="aiq">${G('warn')}<div><b>Glare over limb leads I, II and III</b><span>Only what could be assessed is reported.</span></div></div>`:'')+
-    `<div class="airows">${AIROWS.map(([k,l])=>`<div class="airow${a.lim&&a.lim[k]?' lim':''}${k==='imp'?' imp':''}"><span class="l">${l}</span><span class="v">${esc(aiVal(a,e.n,k))}</span></div>`).join('')}</div>`;
-  return `<section class="rec aisec" id="r-ai">${idTag('C-07d')}<div class="rec-h"><h2 class="h2"><span class="aitag">AI</span>AI ECG interpretation</h2></div>
-   <div class="aidec"><span class="aidec-l">Cardiologist decision</span>${dec}</div>
-   <p class="aids"><b>AI interpretation is decision support. The Cardiologist makes the final STEMI decision.</b> The AI never confirms a STEMI.</p>
-   ${tabs}<div class="aimeta"><img src="${x.img}" alt="ECG ${e.n}, the image the AI analysed"><div class="aimeta-t"><b class="mono">ECG ${e.n} — ${hm(e.acq)}</b>${e.n>1?`<span class="ainewan">New ECG analysis · the analysis of ECG ${e.n-1} is kept</span>`:''}<span class="aist">${G(!a||a.st==='proc'?'prog':a.st==='ok'?'done':a.st==='down'?'nv':'warn')}${aiStLine(a)}</span></div></div>
-   ${body}${a&&a.st!=='proc'?`<p class="aifoot">Shown the same on the cardiologist's screen${e.imgs.length>1?' · Primary image analysed':''} · ${esc(a.ver||'')}</p>`:''}</section>`;
-}
-function decBanner(){
-  const d=lastDec();if(!d)return '';
-  const body=d.k==='confirm'?`Continue to ${CASE.dest&&CASE.dest.hosp?HOSP[CASE.dest.hosp].name:'the receiving PCI hospital'}. The hospital and cath-lab steps are the next design phase.`:d.k==='not'?`${d.reason?'Reason: '+esc(d.reason)+'. ':''}${d.adv?'Advice: '+esc(d.adv)+'. ':''}Continue standard care. You can still send a new ECG.`:`${d.reasons.length?esc(d.reasons.join(', '))+'. ':''}${d.instr?esc(d.instr)+'. ':''}Capture and send a repeat ECG.`;
-  return `<div class="decb decb-${d.k}" role="status">${idTag('C-09')}<div class="decb-l">DECISION RECEIVED</div><div class="decb-t"><b>${DECL[d.k]}</b><span>${esc(d.byT||d.by)} · <span class="mono">${hms(d.at)}</span>${d.crewAck?` · acknowledged <span class="mono">${hms(d.crewAck)}</span>`:''}</span><small>${body}</small></div>${d.crewAck?'':'<button class="btn btn-inv" data-act="show-dec">Show</button>'}</div>`;
-}
-function vWs(){
-  const c=CASE;
-  const rd=lastDec();
-  const rep=c.repeatAsked&&!c.repeatSent?`<div class="rep">${G('warn')}<div class="rep-t"><b>${rd&&rd.k==='repeat'?`${esc(rd.by)} requests a repeat ECG.`:'Please obtain and submit a repeat ECG when possible.'}</b><span>${rd&&rd.k==='repeat'?(rd.reasons.length?esc(rd.reasons.join(', ')):'')+(rd.instr?' · '+esc(rd.instr):'')+(rd.within?` · within ${rd.within} min`:''):`The server check found ECG ${c.repeatFor}: ${QUAL[priImg(c.ecgs[c.repeatFor-1]).q].issue}. It went to the cardiologist as it is.`}</span></div><button class="btn btn-s" data-act="repeat">${IC.cam}Capture repeat ECG</button></div>`:'';
-  return `<div class="ws"><aside class="rail" data-keep="rail" aria-label="Case status">${railHtml()}</aside>
-    <div class="wmain" data-keep="wmain">${lostBanner()}${decBanner()}${rep}${destHtml()}${vitHtml()}${ecgsHtml()}${aiSecHtml()}${recHtml()}</div></div>`;
-}
+  /* ---------- ECG images: a photo from this tablet's camera, an image file, or a fictional test ECG ---------- */
+  const variantFor = n => (n === 1 ? (S.sim.find === 'clear' ? 'clear' : 'border') : S.sim.find === 'clear' ? 'clear2' : 'evolved');
+  const KINDS = ['full', 'chest', 'lower', 'full'];
+  function testImage(e, i) {
+    const kind = KINDS[(i - 1) % KINDS.length], q = kind === 'full' ? S.sim.q || 'good' : 'good';
+    return { i, at: now(), q, kind, src: 'gen', data: window.ECG.photo(e.variant, kind, q, e.acq).url };
+  }
+  function fileToJpeg(file) {
+    return new Promise((resolve, reject) => {
+      if (!/^image\//.test(file.type)) return reject(new Error('Choose a JPEG or PNG image.'));
+      const fr = new FileReader();
+      fr.onerror = () => reject(new Error('The image could not be read.'));
+      fr.onload = () => {
+        const im = new Image();
+        im.onerror = () => reject(new Error('The image could not be opened.'));
+        im.onload = () => {
+          const k = Math.min(1, 2000 / Math.max(im.naturalWidth, im.naturalHeight)), c = document.createElement('canvas');
+          c.width = Math.round(im.naturalWidth * k); c.height = Math.round(im.naturalHeight * k);
+          c.getContext('2d').drawImage(im, 0, 0, c.width, c.height);
+          resolve(c.toDataURL('image/jpeg', 0.86));
+        };
+        im.src = fr.result;
+      };
+      fr.readAsDataURL(file);
+    });
+  }
+  /* the ECG being built before it is sent: the draft's ECG 1, or a serial ECG of a sent case (keyed by its CAD number) */
+  const ecgOf = where => (where === 'draft' ? S.draft && S.draft.ecg : S.ecgd[where]);
+  function startEcg(e) { if (!e.imgs.length) { e.acq = now(); e.acqSet = false; e.acqWhy = ''; e.variant = e.variant || variantFor(e.n); } }
+  function addImage(where, how) {
+    const e = ecgOf(where); if (!e) return;
+    if (e.imgs.length >= MAXI) return toast(`At most ${MAXI} images per ECG in this build.`, 'err');
+    if (how === 'gen') { startEcg(e); e.imgs.push(testImage(e, e.imgs.length + 1)); return afterImage(where); }
+    pickFor = where;
+    const inp = $(how === 'camera' ? '#file-camera' : '#file-pick'); inp.value = ''; inp.click();
+  }
+  function afterImage(where) {
+    const e = ecgOf(where);
+    saveLocal(true);
+    toast(`Image ${e.imgs.length} added to ECG ${e.n}`);
+    if (where === 'draft') { modal.close(); rerender(); } else ecgPanel();
+  }
+  function addMenu(where) {
+    const e = ecgOf(where); if (!e) return;
+    modal.open(dlg(`Add an image to ECG ${e.n}`, `<p class="muted">Another photo of the same ECG printout (for example a closer view). It stays part of ECG ${e.n}; a new recording is a new ECG.</p>
+      <div class="addmenu"><button class="btn btn--primary btn--lg btn--block" data-act="img-camera" data-where="${esc(where)}">${icon('camera')}Take a photo</button>
+      <button class="btn btn--secondary btn--lg btn--block" data-act="img-file" data-where="${esc(where)}">${icon('upload')}Choose an image file</button>
+      <button class="btn btn--secondary btn--lg btn--block" data-act="img-gen" data-where="${esc(where)}">${icon('ecg')}Use a fictional test ECG image</button></div>
+      <p class="xs subtle">Test build: use fictional test images only, never a real patient's ECG.</p>`, '<button class="btn btn--secondary" data-act="modal-close">Cancel</button>', { over: 'ECG image' }));
+  }
+  function shotHtml(e, x, where, locked) {
+    const q = x.q === 'glare' ? 'Glare over leads I–III' : x.q === 'cut' ? 'Leads V4–V6 cut off' : x.q === 'file' ? 'Image file (not checked in this build)' : 'Fictional test image';
+    return `<div class="shot"><button class="shot__img" data-act="shot-view" data-where="${esc(where)}" data-i="${x.i}" aria-label="ECG ${e.n}, Image ${x.i}: view full screen"><img src="${esc(x.data || x.url)}" alt=""></button>
+      <div class="shot__t"><b>Image ${x.i}</b>${x.i === 1 ? '<span class="tag tag--primary">Primary</span>' : ''}<span class="muted">${hms(x.at)}</span></div>
+      <span class="quality muted">${q}</span>${locked ? '' : `<div class="shot__a"><button class="btn btn--sm btn--danger-quiet" data-act="img-remove" data-where="${esc(where)}" data-i="${x.i}">${icon('trash')}Remove</button></div>`}</div>`;
+  }
+  const shotsHtml = (e, where) => `<div class="shots">${e.imgs.map(x => shotHtml(e, x, where)).join('')}${e.imgs.length < MAXI ? `<div class="shot shot--add"><button class="btn btn--primary" data-act="img-add" data-where="${esc(where)}">${icon('plus')}ADD ECG IMAGE</button><span class="xs subtle" style="text-align:center">${e.imgs.length ? 'Another image of the same ECG' : 'Photo of the 12-lead ECG'}</span></div>` : ''}</div>`;
+  function viewLocal(e, i) {
+    const rec = { cad: S.draft && S.draft.cad || 'not sent', ecgs: [{ n: e.n, acq: e.acq, rcv: null, pri: 1, imgs: e.imgs.map(x => ({ i: x.i, at: x.at, url: x.data || x.url })) }] };
+    CLIN.showFull(rec, e.n, i);
+  }
+  function removeImage(where, i) {
+    const e = ecgOf(where); if (!e) return;
+    modal.open(dlg(`Remove Image ${i} from ECG ${e.n}?`, '<p>This image has not been sent. Removing it deletes it from this tablet.</p>',
+      `<button class="btn btn--secondary" data-act="${where === 'draft' ? 'modal-close' : 'ecg-panel'}">Keep it</button><button class="btn btn--critical" data-act="img-remove-go" data-where="${esc(where)}" data-i="${i}">Remove image</button>`, { over: 'Unsent image' }), { focus: '.modal__f .btn' });
+  }
+  function acqDialog(where) {
+    const e = ecgOf(where); if (!e || !e.imgs.length) return;
+    const d = new Date(e.acq);
+    modal.open(dlg(`ECG ${e.n} acquisition time`, `<p class="muted">The time the ECG was recorded. It defaults to the time of the first image.</p>
+      <div class="field"><label class="label" for="acq-t">ECG acquired at</label><input class="input input--time" id="acq-t" type="time" step="1" value="${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}" style="width:180px"></div>
+      <div class="field"><label class="label" for="acq-why">Why the time differs from the first image <span class="opt">(required when changed)</span></label><input class="input" id="acq-why" maxlength="200" value="${esc(e.acqWhy || '')}" placeholder="For example: photographed after the recording"><span class="field-error" id="acq-err" hidden></span></div>`,
+      `<button class="btn btn--secondary" data-act="${where === 'draft' ? 'modal-close' : 'ecg-panel'}">Cancel</button><button class="btn btn--primary" data-act="acq-save" data-where="${esc(where)}">Save time</button>`, { over: 'ECG' }), { focus: '#acq-t' });
+  }
+  function acqSave(where) {
+    const e = ecgOf(where), root = modal.el(), v = root.querySelector('#acq-t').value, why = root.querySelector('#acq-why').value.trim(), er = root.querySelector('#acq-err');
+    const fail = msg => { er.hidden = false; er.innerHTML = icon('alert') + `<span>${esc(msg)}</span>`; };
+    if (!v) return fail('Enter the time.');
+    const t = fromClock(v), first = e.imgs[0].at, changed = Math.abs(t - first) > 1000;
+    if (t > first + 1000) return fail('An ECG cannot be recorded after its first photo was taken.');
+    if (changed && !why) return fail('Say why the time differs from the first image.');
+    e.acq = changed ? t : first; e.acqSet = changed; e.acqWhy = changed ? why : '';
+    saveLocal(true);
+    if (where === 'draft') { modal.close(); rerender(); } else ecgPanel();
+  }
 
-/* ---------- CASE SUMMARY and COMPLETE STEMI PATHWAY (Hamad, 4 Oct 2026) ----------
-   The STEMI platform covers the STEMI pathway only: ICCC / ACC owns the operational incident and ePCR the patient care
-   record, so nothing here asks for handover documentation. The summary shows what the pathway already holds, read from
-   the shared case record. The pathway closes with COMPLETE STEMI PATHWAY, or automatically when the cardiologist decides
-   NOT STEMI. The CAD incident itself is never closed or cancelled here. */
-const sRaw=(S,k)=>{const x=lastOf(S.pt[k]);return x?x.raw:null};
-const closedLabel=Z=>Z.kind==='not-stemi'?'NOT STEMI — PATHWAY CLOSED':'STEMI PATHWAY COMPLETED';
-function lifeState(S){
-  const d=lastOf(S.dec);
-  return S.closed?closedLabel(S.closed):d?DECL[d.k]:S.opened?'CARDIOLOGIST REVIEWING':S.ack?'CARDIOLOGIST ACKNOWLEDGED':S.sub?'AWAITING CARDIOLOGIST':'ACTIVE';
-}
-/* the case summary: a summary of the STEMI pathway from the shared record. ro: a closed case, read-only */
-function hoPage(S,ro){
-  const d=lastOf(S.dec),E=S.ecgs,LE=lastOf(E),Z=S.closed;
-  const age=sRaw(S,'age'),sex=sRaw(S,'sex'),cp=sRaw(S,'complaint');
-  const pt=[age?(age.nv?'Age unknown':`${age.est?'≈ ':''}${age.v} y`):null,sex?(sex.nv?'Sex unknown':sex.v):null,cp?complaintShort(cp):null].filter(Boolean).join(' · ')||'Not recorded';
-  const state=lifeState(S);
-  const row=(g,l,v)=>`<div class="rr">${G(g)}<div class="rr-l">${l}</div><div class="rr-v">${v}</div><span></span></div>`;
-  const val=v=>v?`<span class="v">${v}</span>`:'<span class="nye">Not yet</span>';
-  const fact=(l,v)=>`<div><dt>${l}</dt><dd>${v}</dd></div>`;
-  const closed=Z?`<div class="decb ${Z.kind==='not-stemi'?'decb-not':'decb-not'}" role="status"><div class="decb-l">STEMI PATHWAY CLOSED</div><div class="decb-t"><b>${closedLabel(Z)}</b><span>${Z.kind==='not-stemi'?`Closed automatically after the cardiologist's NOT STEMI decision · ${esc(Z.by)}`:`Completed by ${esc(Z.by)}`} · <span class="mono">${hms(Z.at)}</span></span><small>Read-only. Only the STEMI pathway is closed: the CAD incident continues as normal in ICCC / ACC and ePCR.</small></div></div>`:'';
-  const top=`<section class="hotop"><dl class="card-f">${fact('CAD number',`<span class="mono">CAD #${esc(S.cad)}</span>`)}${fact('Patient',esc(pt))}${fact('Ambulance unit',esc(S.unit))}${fact('STEMI pathway status',`<span class="chip st-${STATECLS[state]||'review'}">${state}</span>`)}${fact('ECGs',String(E.length))}</dl></section>`;
-  const dec=d?`<div class="decb decb-${d.k}"><div class="decb-l">CARDIOLOGIST DECISION</div><div class="decb-t"><b>${DECL[d.k]}</b><span>${esc(d.byT||d.by)} · <span class="mono">${hms(d.at)}</span> · on ECG ${d.on}</span><small>Read-only: the cardiologist's decision cannot be changed here.</small></div></div>`
-    :`<div class="decb decb-not"><div class="decb-l">CARDIOLOGIST DECISION</div><div class="decb-t"><b>Awaited</b></div></div>`;
-  /* the STEMI pathway in brief */
-  const path=`<section class="rec" id="h-sum"><div class="rec-h"><h2 class="h2">STEMI pathway</h2></div><div class="rg">
-    ${row(S.sub?'done':'pend','Case sent',val(S.sub?`<span class="mono">${hms(S.sub.send)}</span> · received <span class="mono">${hms(S.sub.rcv)}</span>`:''))}
-    ${row(S.alert?'done':'pend','Cardiologist alerted',val(S.alert?`${esc(S.alert.who)} · <span class="mono">${hms(S.alert.at)}</span>`:''))}
-    ${row(S.ack?'ack':'pend','Cardiologist acknowledgement',val(S.ack?`${esc(S.alert?S.alert.who:'Cardiologist')} · <span class="mono">${hms(S.ack)}</span>`:''))}
-    ${row(d?'done':'pend','Cardiologist decision',val(d?`${DECL[d.k]} · ${esc(d.by)} · <span class="mono">${hms(d.at)}</span>`:''))}
-    ${row(LE&&LE.ai&&LE.ai.st!=='proc'?'done':'pend',`AI interpretation · ECG ${LE?LE.n:''}`,`<span class="v">${esc(LE&&LE.ai?(LE.ai.imp||aiStLine(LE.ai)):'Not available')}</span><span class="hist">AI interpretation is decision support. The Cardiologist makes the final STEMI decision.</span>`)}
-    ${row(Z?'done':'pend','STEMI pathway closed',val(Z?`${closedLabel(Z)} · <span class="mono">${hms(Z.at)}</span>`:''))}
-    </div></section>`;
-  /* ECGs and serial ECGs, each with its own AI interpretation */
-  const ecg=`<section class="rec" id="h-ecg"><div class="rec-h"><h2 class="h2">ECGs${E.length>1?' · serial':''}</h2></div>
-    <p class="aids"><b>AI interpretation is decision support. The Cardiologist makes the final STEMI decision.</b></p>
-    <div class="hoecgs">${E.map(e=>{const x=e.imgs.find(i=>i.i===e.pri)||e.imgs[0],a=e.ai,ds=S.dec.filter(z=>z.on===e.n);
-      return `<div class="ecard hoecg"><button class="imgbtn" data-act="ho-img" data-n="${e.n}" aria-label="Open ECG ${e.n}"><img src="${x.url}" alt="ECG ${e.n}, primary image"></button><div class="hoecg-t"><b class="mono">ECG ${e.n} — ${hm(e.acq)}</b><span>${e.imgs.length} image${e.imgs.length>1?'s':''} · received <span class="mono">${hm(e.rcv)}</span></span><span>AI: ${esc(aiStLine(a))}${a&&a.imp?` · ${esc(a.imp)}`:''}</span>${a&&a.ser?`<span>Compared with ECG ${a.ser.vs}: ${esc(a.ser.h)}</span>`:''}${ds.map(z=>`<span class="k-dec-${z.k}"><b>${DECL[z.k]}</b> · ${esc(z.by)} · <span class="mono">${hm(z.at)}</span></span>`).join('')}<button class="btn btn-q" data-act="ho-img" data-n="${e.n}">Open ECG</button></div></div>`}).join('')}</div></section>`;
-  /* the STEMI-specific timeline, from the audit trail */
-  const MAJ=/STEMI case opened|ECG \d+ acquired|Case submitted|Cardiologist alerted|Cardiologist acknowledged|STEMI confirmed|Cardiologist decision: NOT STEMI|repeat ECG requested|ECG \d+ received by the server|AI analysis completed|STEMI pathway (completed|automatically closed)/;
-  const tl=`<section class="rec" id="h-tl"><div class="rec-h"><h2 class="h2">STEMI timeline</h2></div>
-    <ol class="hotl">${S.audit.filter(a=>a.kind==='key'&&MAJ.test(a.text)).map(a=>`<li><span class="tm mono">${hms(a.t)}</span><span>${esc(a.text.split(' · ')[0])}</span></li>`).join('')}</ol></section>`;
-  return closed+top+dec+path+ecg+tl;
-}
-function vHo(){
-  const S=SRV,c=CASE;
-  if(!S||!S.sub)return `<div class="vbody"><div class="cadv"><p class="cadv-hint">The case summary is available once the case has been sent.</p></div></div>`+ab(`<button class="btn btn-q" data-act="ho-back">${IC.back}Back to the case</button>`,'','');
-  if(S.closed)return `<div class="vbody ho" data-keep="ho">${hoPage(S,true)}</div>`+ab(`<button class="btn btn-q" data-act="home">${IC.back}My cases</button>`,'<span>STEMI pathway closed · read-only</span>','');
-  if(!S.hopen&&!c.hopenSent){c.hopenSent=1;setT(0,()=>op('hopen'))}
-  /* COMPLETE STEMI PATHWAY only while the cardiologist's current decision is CONFIRMED STEMI (NOT STEMI closes the
-     pathway by itself; a repeat ECG request or no decision keeps it under review) */
-  const d=lastOf(S.dec),conf=!!d&&d.k==='confirm',can=conf&&SC.online&&!OUTQ.length;
-  const note=!conf?(d&&d.k==='repeat'?'Repeat ECG requested: the cardiologist is still reviewing':'Awaiting the cardiologist\'s decision'):!SC.online?'No connection: completing needs the platform':OUTQ.length?'Sending your latest entries…':'No further documentation is needed here';
-  return `<div class="vbody ho" data-keep="ho">${hoPage(S,false)}</div>`+
-    ab(`<button class="btn btn-q" data-act="ho-back">${IC.back}Back to the case</button>`,`<span>${note}</span>`,
-      conf?`<button class="btn btn-p btn-xl" data-act="ho-complete" ${can?'':'disabled'}>COMPLETE STEMI PATHWAY</button>`:`<span class="muted">COMPLETE STEMI PATHWAY becomes available after CONFIRMED STEMI</span>`);
-}
-/* a completed case from the history list: the same summary, read-only */
-let HREC=null,HLIST=null,HQ='',histT=null;
-function vHist(){
-  return `<div class="vbody ho" data-keep="hist">${HREC?hoPage(HREC,true):'<p class="rec-sub">Loading…</p>'}</div>`+ab(`<button class="btn btn-q" data-act="hist-back">${IC.back}Back to my cases</button>`,`<span>STEMI pathway closed · read-only</span>`,'');
-}
-function histRows(){
-  if(HLIST===null)return '<li class="nye">Loading…</li>';
-  if(!HLIST.length)return `<li class="nye">${HQ?'No completed case matches this CAD number.':'No completed cases yet.'}</li>`;
-  return HLIST.map(x=>`<li><span class="mono"><b>CAD #${esc(x.cad)}</b></span><span>${esc(x.unit||'')}${x.dec?' · '+DECL[x.dec]:''} · ${x.kind==='not-stemi'?'Pathway closed (NOT STEMI)':'Pathway completed'}</span><span class="mono">Closed ${hm(x.closedAt)}</span><button class="btn btn-s" data-act="hist-open" data-cad="${esc(x.cad)}">View</button></li>`).join('');
-}
-function histHtml(){
-  return `<section class="hist"><h2 class="h2">Completed cases</h2><input class="tin" id="histq" value="${esc(HQ)}" placeholder="Find by CAD number" autocomplete="off" spellcheck="false" aria-label="Find a completed case by CAD number"><ul class="hist-l">${histRows()}</ul></section>`;
-}
-function loadHist(){
-  if(!LIVE)return;
-  LIVE.request('GET','/api/cases?q='+encodeURIComponent(HQ)).then(x=>{HLIST=(x.body&&x.body.cases)||[];const l=$('.hist-l');if(l)l.innerHTML=histRows()},()=>{});
-}
+  /* ---------- sending: actions and images wait here, in order, until the platform has them ---------- */
+  const op = (cad, k, data, t) => ({ id: `cr-${rid()}-${++seq}`, cad, k, t: t == null ? now() : t, data: data || {} });
+  function queue(item) { S.out.push(item); saveLocal(true); pump(); render(); }
+  let pumping = false;
+  async function pump() {
+    if (pumping || !S.up) return;
+    pumping = true;
+    try {
+      while (S.out.length && S.up) {
+        const it = S.out[0];
+        if (it.kind === 'ecg' || it.kind === 'img') {
+          for (const x of it.imgs) {
+            if (x.imageId) continue;
+            const r = await LIVE.upload(dataUrlToBlob(x.data), { cad: it.cad, src: x.src === 'file' ? 'file' : 'gen' }, null).catch(e => ({ err: e }));
+            if (r.err) { if (r.err.status && r.err.status < 500) { drop(it, r.err.message); break; } return; }
+            x.imageId = r.id; x.url = r.url; saveLocal(true);
+          }
+          if (S.out[0] !== it) continue;
+        }
+        let o = it.op;
+        if (it.kind === 'ecg') o = { ...op(it.cad, 'ecg', { sendAt: it.sendAt, ecg: { n: it.n, acq: it.acq, variant: it.variant, pri: 1, same: it.n > 2, timeWhy: it.acqWhy || null, imgs: it.imgs.map(x => ({ i: x.i, kind: x.kind, q: x.q, at: x.at, imageId: x.imageId })) } }, it.sendAt), id: it.id };
+        if (it.kind === 'img') { const x = it.imgs[0]; o = { ...op(it.cad, 'img', { n: it.n, img: { i: x.i, kind: x.kind, q: x.q, at: x.at, imageId: x.imageId } }, it.at), id: it.id }; }
+        let res;
+        try { res = await LIVE.send([o]); } catch (_) { return; }
+        const x = (res.results || [])[0] || {};
+        if (!x.ok) drop(it, x.error); else { S.out.shift(); saveLocal(true); }
+      }
+    } finally { pumping = false; render(); }
+  }
+  function drop(it, why) {
+    const i = S.out.indexOf(it); if (i >= 0) S.out.splice(i, 1);
+    saveLocal(true);
+    toast(`${it.kind === 'ecg' ? `ECG ${it.n}` : it.kind === 'img' ? `Image ${it.imgs[0].i} of ECG ${it.n}` : 'An entry'} was NOT accepted: ${why || 'refused by the platform'}`, 'err');
+  }
+  const pendingFor = cad => S.out.filter(x => x.cad === cad);
+  function send(k, data) { const r = cur(); if (r) queue({ kind: 'op', cad: r.cad, op: op(r.cad, k, data) }); }
 
-/* ---------- layers ---------- */
-function drawer(title,body,foot,wide){
-  return `<div class="scrim" data-act="close"></div><div class="drawer ${wide?'wide':''}" role="dialog" aria-modal="true" aria-label="${esc(title)}">
-   <div class="dr-h"><h2>${title}</h2><button class="icon-btn" data-act="close" aria-label="Close">${IC.close}</button></div>
-   <div class="dr-b">${body}</div><div class="dr-f">${foot}</div></div>`;
-}
-function dispParts(L){
-  return `<div class="disp">${L.parts.map((p,i)=>`${i&&L.slash?'<span class="slash">/</span>':''}<button class="part ${i===L.pi?'act':''}" data-act="part" data-i="${i}">${p.lab?`<small>${p.lab}</small>`:''}<span>${p.v||'–'}</span></button>`).join('')}<span class="unit">${L.unit||''}</span></div>`;
-}
-function timeAdj(L,lab){return `<div class="tadj"><span>${lab||'Time'} <b class="mono">${hm(L.at)}</b></span><button class="btn btn-q" data-act="at" data-d="-5">−5 min</button><button class="btn btn-q" data-act="at" data-d="0">Now</button></div>`}
-function tpanel(L,quick){
-  const m=Math.round((now()-L.tm)/MIN);
-  return `<div class="tbig"><b>${hm(L.tm)}</b><span>${m<=0?'now':ago(L.tm)}</span></div>
-   <div class="qgrid">${quick.map(([l,mn])=>`<button class="cbtn" data-act="tq" data-m="${mn}">${l}</button>`).join('')}</div>
-   <div class="stepbtns"><button class="btn btn-q" data-act="tstep" data-m="-60">−1 h</button><button class="btn btn-q" data-act="tstep" data-m="-5">−5 min</button><button class="btn btn-q" data-act="tstep" data-m="5">+5 min</button><button class="btn btn-q" data-act="tstep" data-m="60">+1 h</button></div>`;
-}
-const tog=(on,act,label)=>`<button class="tog ${on?'on':''}" data-act="${act}" aria-pressed="${!!on}"><span class="box">${on?IC.check:''}</span>${label}</button>`;
-/* plausibility checks: a value is checked once it is complete or left, and everything is checked on save */
-const RULE={age:[0,120,'age'],hr:[1,300,'heart rate'],spo2:[1,100,'SpO₂'],sys:[40,300,'systolic pressure'],dia:[10,200,'diastolic pressure'],rr:[1,80,'respiratory rate'],tmp:[25,45,'temperature']};
-function partsErr(L,all){
-  const P=L.parts||[];
-  for(let i=0;i<P.length;i++){const p=P[i];if(!p.rule||p.v==='')continue;
-    if(!(all||i!==L.pi||p.v.replace('.','').length>=p.max))continue;
-    const v=Number(p.v),[lo,hi,lab]=p.rule;if(!(v>=lo&&v<=hi))return `Check the ${lab}: it should be ${lo} to ${hi}.`;}
-  if(L.bp!=null){const s=P[L.bp],d=P[L.bp+1];if(s.v&&d.v&&(all||L.pi!==L.bp+1||d.v.length>=d.max)&&Number(d.v)>=Number(s.v))return 'Check the blood pressure: diastolic should be below systolic.';}
-  return '';
-}
-const filled=L=>L.parts.every(p=>p.v!=='');
-const errLine=L=>{const e=partsErr(L,!!L.tried);return e?`<p class="err" role="alert">${G('warn')}${e}</p>`:''};
-function layerHtml(){
-  const L=layer;if(!L)return '';
-  if(L.t==='md'){
-    const f=MDK[L.k],pt=postTog(L),dn=L.post?'Save and send':'Done';
-    if(f.kind==='sex'){
-      const b=pt+`<div class="olist">${['Male','Female'].map(s=>`<button class="cbtn ${L.sel===s?'on':''}" data-act="sexpick" data-v="${s}">${L.sel===s?IC.check:''}${s}</button>`).join('')}</div>`;
-      return drawer('Sex',b,f.nv.map(n=>`<button class="nvb" data-act="nvclose" data-k="sex" data-v="${n}">${n}</button>`).join('')+`<span class="sp"></span><button class="btn btn-p btn-xl" data-act="sex-done" ${L.sel?'':'disabled'}>${dn}</button>`);
+  /* ---------- the unsent case (the draft) ---------- */
+  const newDraft = () => ({ cid: 't' + rid() + rid(), openedAt: now(), step: 'cad', cad: '', cadIn: '', cadOk: false, cadChecked: false, cadHist: [],
+    ecg: { n: 1, imgs: [], acq: null, acqSet: false, acqWhy: '', variant: null }, md: {}, send: null });
+  const dReady = d => ({ cad: d.cadOk, ecg: d.ecg.imgs.length > 0, md: !Object.keys(mdErrors(d.md)).length });
+  function goStep(k) {
+    const d = S.draft; if (!d) return;
+    if (k !== 'cad' && !d.cadOk) { toast('Enter the CAD number first.', 'err'); k = 'cad'; }
+    d.step = k; S.mdTried = false; saveLocal(); S.view = 'draft'; render(); scrollTo(0, 0);
+    const f = $(k === 'cad' ? '#cadin' : '.draft__body h2'); if (f) { if (k !== 'cad') f.setAttribute('tabindex', '-1'); f.focus({ preventScroll: true }); }
+  }
+  function cadContinue() {
+    const d = S.draft, inp = $('#cadin'), err = $('#cad-err');
+    if (!d || !inp || inp.disabled) return d && goStep('ecg');
+    const raw = inp.value, c = CADN.check(raw);
+    d.cadIn = raw;
+    const fail = (msg, detail) => { err.hidden = false; err.innerHTML = icon('alert') + `<span>${esc(msg)}${detail ? ' ' + esc(detail) : ''}</span>`; inp.setAttribute('aria-invalid', 'true'); inp.focus(); };
+    if (!c.ok) return fail(c.error, c.detail);
+    const accept = checked => {
+      if (!d.cadHist.length || d.cadHist[d.cadHist.length - 1].v !== c.cad) d.cadHist.push({ v: c.cad, t: now() });
+      d.cad = c.cad; d.cadIn = c.cad; d.cadOk = true; d.cadChecked = checked;
+      if (!checked) toast('No connection: the CAD number is checked for an existing case when you send.');
+      goStep(d.ecg.imgs.length ? (dReady(d).md ? 'review' : 'md') : 'ecg');
+    };
+    if (!S.up) return accept(false);
+    const btn = $('[data-act="cad-ok"]'); if (btn) btn.disabled = true;
+    LIVE.request('GET', '/api/cases/check?cad=' + encodeURIComponent(c.cad)).then(x => {
+      if (btn) btn.disabled = false;
+      if (x.status !== 200) return accept(false);
+      if (!x.body.ok) return fail(x.body.error, x.body.detail);
+      if (x.body.exists) return dupDialog(c.cad, x.body.existing);
+      accept(true);
+    }, () => { if (btn) btn.disabled = false; accept(false); });
+  }
+  function dupDialog(cad, ex) {
+    modal.open(dlg('CASE ALREADY EXISTS', `<div class="confirm-box"><span class="cad">CAD #${esc(cad)}</span><span class="muted">A STEMI case already exists under this CAD number${ex && ex.unit ? ` (${esc(ex.unit)}, opened ${when(ex.openedAt)})` : ''}${ex && ex.closedAt ? ' · its STEMI pathway is closed' : ''}.</span></div>
+      <p>No second case is created and the existing case is not changed. Open the existing case, or correct the CAD number. What you entered here stays as your unsent case.</p>`,
+      `<button class="btn btn--secondary" data-act="dup-fix">Correct the CAD number</button><button class="btn btn--primary" data-act="dup-open" data-cad="${esc(cad)}">OPEN EXISTING CASE</button>`, { over: 'CAD number', noClose: true }), { cls: 'dup', locked: true, focus: '[data-act="dup-fix"]' });
+  }
+  function openExisting(cad) {
+    LIVE.request('POST', '/api/cases/open', { cad }).then(x => {
+      modal.close();
+      if (x.status !== 200) return toast(x.body.error || 'The existing case could not be opened.', 'err');
+      if (S.draft) { S.draft.cadOk = false; S.draft.step = 'cad'; saveLocal(true); }
+      const rec = x.body.rec, closed = rec && RULES.isClosed(rec.state);
+      if (rec && !closed) S.cases.set(cad, rec);
+      openCase(cad, closed ? rec : null);
+      toast(`Existing case CAD #${cad} opened. Your unsent case is kept on the home screen.`);
+    }, () => toast('No connection: the existing case could not be opened.', 'err'));
+  }
+  /* SEND: create the case under the CAD number, upload ECG 1, then send it with the minimum data */
+  async function sendDraft() {
+    const d = S.draft; if (!d) return;
+    const r = dReady(d);
+    if (!r.cad || !r.ecg || !r.md) return toast('The case is not complete: see the steps still marked as missing.', 'err');
+    if (d.send && ['create', 'upload', 'submit'].includes(d.send.stage)) return;
+    d.send = { stage: 'create', pct: 0, at: d.send && d.send.at || now(), tries: (d.send && d.send.tries || 0) + 1, created: !!(d.send && d.send.created) };
+    saveLocal(true); render();
+    if (!S.up) return sendWait('No connection');
+    try {
+      if (!d.send.created) {
+        const x = await LIVE.request('POST', '/api/cases', { cad: d.cad, cid: d.cid, openedAt: d.openedAt, hist: d.cadHist });
+        if (x.status === 409 && x.body.code === 'exists') { d.send = null; d.cadOk = false; d.step = 'cad'; saveLocal(true); render(); return dupDialog(d.cad, x.body.existing); }
+        if (x.status === 400) { d.send = null; d.cadOk = false; d.step = 'cad'; saveLocal(true); render(); return toast(`${x.body.error} ${x.body.detail || ''}`, 'err'); }
+        if (x.status !== 200 && x.status !== 201) throw new Error('HTTP ' + x.status);
+        d.send.created = true; saveLocal(true);
+        if (x.body.rec) S.cases.set(d.cad, x.body.rec);
+      }
+      d.send.stage = 'upload'; render();
+      const L = d.ecg.imgs;
+      for (let k = 0; k < L.length; k++) {
+        if (L[k].imageId) continue;
+        const up = await LIVE.upload(dataUrlToBlob(L[k].data), { cad: d.cad, src: L[k].src === 'file' ? 'file' : 'gen' }, f => { d.send.pct = Math.round((k + f) / L.length * 100); patch('send-pct', sendPct()); });
+        L[k].imageId = up.id; L[k].url = up.url; saveLocal(true);
+      }
+      d.send.stage = 'submit'; d.send.pct = 100; render();
+      const sendAt = d.send.at;
+      const o = op(d.cad, 'submit', { sendAt, late: d.send.tries > 1, md: mdPayload(d.md), ecg: { n: 1, acq: d.ecg.acq, variant: d.ecg.variant, pri: 1, same: false, timeWhy: d.ecg.acqSet ? d.ecg.acqWhy : null, imgs: L.map(x => ({ i: x.i, kind: x.kind, q: x.q, at: x.at, imageId: x.imageId })) } }, sendAt);
+      o.id = 'submit-' + d.cid;
+      const res = await LIVE.send([o]);
+      const x = (res.results || [])[0] || {};
+      if (!x.ok) { d.send = { ...d.send, stage: 'failed', err: x.error }; saveLocal(true); render(); return toast(`NOT SENT: ${x.error}`, 'err'); }
+      const cad = d.cad;
+      S.draft = null; saveLocal(true);
+      openCase(cad);
+      toast(`CAD #${cad} SENT TO ER`);
+    } catch (e) { sendWait(e.message); }
+  }
+  function sendWait(why) {
+    const d = S.draft; if (!d || !d.send) return;
+    d.send.stage = 'queued'; d.send.err = why; saveLocal(true); render();
+  }
+  const sendPct = () => { const d = S.draft; return d && d.send ? `<div class="bar" aria-hidden="true"><span style="width:${d.send.pct || 0}%"></span></div>` : ''; };
+  function discardDraft() {
+    const d = S.draft; if (!d) return;
+    modal.open(dlg('Discard the unsent case?', `<p>${d.cad ? `<span class="cad">CAD #${esc(d.cad)}</span>: ` : ''}${d.ecg.imgs.length} ECG image${d.ecg.imgs.length === 1 ? '' : 's'} and the minimum data entered on this tablet are deleted. Nothing was sent${d.send && d.send.created ? ' (the case number was registered on the platform, but no ECG or data reached the ER)' : ''}.</p>`,
+      `<button class="btn btn--secondary" data-act="modal-close">Keep it</button><button class="btn btn--critical" data-act="draft-discard-go">Discard</button>`, { over: 'Unsent case' }), { focus: '[data-act="modal-close"]' });
+  }
+
+  /* ---------- the case on screen ---------- */
+  const cur = () => (S.cad && (S.cases.get(S.cad) || (S.stat && S.stat.cad === S.cad ? S.stat : null))) || null;
+  const openCases = () => [...S.cases.values()].filter(r => !RULES.isClosed(r.state) && r.state !== 'draft').sort((a, b) => (b.sub ? b.sub.send : b.created) - (a.sub ? a.sub.send : a.created));
+  const val = (r, k) => { const x = CLIN.cur(r, k); return x ? (CLIN.isNv(x) && (k === 'age' || k === 'sex') ? `${k === 'age' ? 'Age' : 'Sex'} ${x.v.toLowerCase()}` : x.v) : null; };
+  const ptLine = r => [val(r, 'age'), val(r, 'sex'), val(r, 'complaint')].filter(Boolean).map(esc).join(' · ') || 'Patient details not entered';
+
+  /* ---------- top bar and connection: OFFLINE — CHANGES SAVED LOCALLY only when something is saved here ---------- */
+  const netState = () => (!S.started ? 'wait' : S.up ? 'up' : S.out.length || S.draft ? 'offline' : 'down');
+  function top() {
+    const right = `<span class="tb-text only-wide"><b>${esc(AU.unit || '')}</b> · ${esc(AU.name || '')}</span><button class="tb-btn" data-act="logout">${icon('logout', 'ico-sm')}Log out</button>`;
+    return topbar({ role: `Crew · ${AU.unit || ''}`, conn: conn(netState()), right, homeAct: 'home' });
+  }
+  function banner() {
+    const st = netState();
+    if (st === 'offline') return `<div class="banner banner--offline" role="status">${icon('wifi-off')}<span>Offline — changes saved locally on this tablet${S.out.length ? ` (${S.out.length} waiting to send)` : ''}. They are sent automatically when the connection returns.</span></div>`;
+    if (st === 'down') return `<div class="banner banner--down" role="status">${icon('wifi-off')}<span>Connection lost — reconnecting. Case updates cannot arrive until the connection returns.</span></div>`;
+    return '';
+  }
+
+  /* ---------- home ---------- */
+  function vHome() {
+    return `<div class="home-h"><div><h1>STEMI cases</h1><p>${esc(AU.unit || '')} · ${esc(AU.emirate || '')} · ${esc(ME)}</p></div>
+        <button class="btn btn--primary btn--xl" data-act="new-case">${icon('plus')}NEW STEMI CASE</button></div>
+      <div id="h-draft"></div>
+      <div class="stack" style="gap:28px">
+        <section class="section" aria-labelledby="h-act"><div class="section__h"><h2 id="h-act">Active cases</h2><span id="n-act"></span></div><div id="q-act"></div></section>
+        <section class="section" aria-labelledby="h-done"><div class="section__h"><h2 id="h-done">Completed cases</h2><span class="sp"></span>
+          <div class="search">${icon('search')}<label class="sr-only" for="hq">Search completed cases by CAD number</label><input class="input" id="hq" type="search" placeholder="Search by CAD number" autocomplete="off" spellcheck="false" value="${esc(S.histQ)}"></div></div><div id="q-done"></div></section>
+      </div>
+      <p class="footnote"><span>STEMI Coordination Platform · v${esc(UI.APP.version)} · test build</span><span>Fictional test data only — never real patient information</span><span>Not an ePCR: document in the ePCR as usual</span></p>`;
+  }
+  function draftCard() {
+    const d = S.draft;
+    if (!d) return '';
+    const st = d.send && d.send.stage === 'queued' ? 'NOT SENT — waiting for the connection' : d.send && d.send.stage === 'failed' ? 'NOT SENT — send again' : 'Not sent';
+    return `<div class="draftcard" role="region" aria-label="Unsent case"><div class="draftcard__t"><b>Unsent case · ${d.cad ? `<span class="cad">CAD #${esc(d.cad)}</span>` : 'CAD number not entered'}</b>
+      <span class="small muted">${st} · ${d.ecg.imgs.length} ECG image${d.ecg.imgs.length === 1 ? '' : 's'} · minimum data ${answered(d.md)} of 8 · saved on this tablet</span></div>
+      <button class="btn btn--danger-quiet" data-act="draft-discard">${icon('trash')}Discard</button><button class="btn btn--primary btn--lg" data-act="draft-open">Continue the unsent case</button></div>`;
+  }
+  function homeRow(r) {
+    const e = r.ecgs[0], d = r.dec[r.dec.length - 1], pend = pendingFor(r.cad).length;
+    const metaR = r.state === 'er_reviewing' ? `ER: ${esc(r.er.name)}` : r.cardio.ack ? `Cardiologist: ${esc(r.cardio.name || '')}` : r.cardio.activated ? `Cardiology activated ${hm(r.cardio.activated)}` : `Sent ${hm(r.sub && r.sub.send)}`;
+    return `<button class="qrow${r.state === 'confirmed' ? ' qrow--crit' : r.state === 'repeat_requested' ? ' qrow--warn' : ''}" data-act="open" data-cad="${esc(r.cad)}">
+      <span class="qrow__cad"><span class="cad">CAD #${esc(r.cad)}</span>${badge(r.state, ROLE)}</span>
+      <span class="qrow__pt"><b>${ptLine(r)}</b><span>ECG ${e ? `acquired ${hm(e.acq)}` : '–'}${r.ecgs.length > 1 ? ` · ${r.ecgs.length} ECGs` : ''}</span></span>
+      <span class="qrow__meta"><span>${metaR}</span><span>${d ? `${esc(RULES.DECISIONS[d.k])} · ${hm(d.at)}` : ''}${pend ? `<span class="pendnote">${icon('upload')}${pend} waiting to send</span>` : ''}</span></span>
+      <span class="qrow__act">${icon('chev-right')}</span></button>`;
+  }
+  function doneRow(x) {
+    return `<button class="qrow" data-act="open-done" data-cad="${esc(x.cad)}"><span class="qrow__cad"><span class="cad">CAD #${esc(x.cad)}</span>${badge(x.state, ROLE)}</span>
+      <span class="qrow__pt"><b>${[x.pt.age, x.pt.sex, x.pt.complaint].filter(Boolean).map(esc).join(' · ') || '–'}</b><span>ECG ${x.ecgAt ? `acquired ${hm(x.ecgAt)}` : '–'}</span></span>
+      <span class="qrow__meta"><span>Closed ${when(x.closedAt)}</span><span>${x.state === 'er_closed' ? 'Cardiology not activated' : x.cardio.name ? esc(x.cardio.name) : ''}</span></span>
+      <span class="qrow__act">${icon('chev-right')}</span></button>`;
+  }
+  function patchHome() {
+    if (S.hist === null && !S.histAsked) { S.histAsked = true; setTimeout(loadHist, 0); }
+    const A = openCases();
+    patch('h-draft', draftCard());
+    patch('n-act', A.length ? `<span class="count">${A.length}</span>` : '');
+    patch('q-act', `<div class="qlist">${A.length ? A.map(homeRow).join('') : empty('ambulance', 'No active STEMI cases', 'Start one with NEW STEMI CASE.')}</div>`);
+    patch('q-done', S.hist === null ? '<div class="qlist"><div class="loading"><span class="spinner"></span>Loading completed cases…</div></div>'
+      : `<div class="qlist">${S.hist.length ? S.hist.map(doneRow).join('') : empty('lock', S.histQ ? 'No completed case with this CAD number' : 'No completed cases yet', S.histErr ? 'The list could not be loaded: no connection.' : '')}</div>`);
+  }
+  let hT = null, hSeq = 0;
+  function loadHist() {
+    if (!LIVE) { S.histAsked = false; return; }
+    const my = ++hSeq;
+    LIVE.request('GET', '/api/cases?q=' + encodeURIComponent(S.histQ.trim())).then(x => {
+      if (my !== hSeq) return;
+      S.hist = x.status === 200 ? x.body.cases : []; S.histErr = x.status !== 200;
+      if (S.view === 'home') patchHome();
+    }, () => { if (my !== hSeq) return; S.hist = S.hist || []; S.histErr = true; if (S.view === 'home') patchHome(); });
+  }
+
+  /* ---------- the new case: one pathway in four steps ---------- */
+  function vDraft() {
+    const d = S.draft, r = dReady(d), n = answered(d.md);
+    const step = (k, i, title, sub, ok, disabled) => `<li><button class="step${ok ? ' is-done' : ''}" data-act="step" data-k="${k}"${d.step === k ? ' aria-current="step"' : ''}${disabled ? ' disabled' : ''}><span class="step__n">${ok ? icon('check') : i}</span><span class="step__t"><b>${title}</b><span>${sub}</span></span></button></li>`;
+    const steps = `<ol class="steps" aria-label="New STEMI case steps">${step('cad', 1, 'CAD number', d.cadOk ? `CAD #${esc(d.cad)}` : 'Not entered', d.cadOk)}
+      ${step('ecg', 2, 'ECG', d.ecg.imgs.length ? `ECG 1 · ${d.ecg.imgs.length} image${d.ecg.imgs.length > 1 ? 's' : ''}` : 'Not captured', r.ecg, !d.cadOk)}
+      ${step('md', 3, 'Minimum data', `${n} of 8`, r.md, !d.cadOk)}
+      ${step('review', 4, 'Review and send', d.send && d.send.stage === 'queued' ? 'Waiting for connection' : 'SEND TO ER', false, !d.cadOk)}</ol>`;
+    const body = { cad: vCad, ecg: vEcgStep, md: vMd, review: vReview }[d.step]();
+    return `<div class="draft-h"><button class="btn btn--quiet" data-act="home" style="margin-left:-8px">${icon('chev-left')}Cases</button><h1>New STEMI case</h1>${d.cadOk ? `<span class="cad">CAD #${esc(d.cad)}</span>` : ''}${badge('draft', ROLE)}<span class="sp"></span><button class="btn btn--danger-quiet" data-act="draft-discard">${icon('trash')}Discard</button></div>
+      <div class="draft">${steps}<div class="draft__body" id="d-body">${body}</div></div>`;
+  }
+  const foot = (back, next) => `<div class="draft__foot">${back ? `<button class="btn btn--secondary btn--lg" data-act="step" data-k="${back}">${icon('chev-left')}Back</button>` : '<span></span>'}<span class="small muted">${icon('check', 'ico-sm')} Saved on this tablet</span><div class="btn-row">${next}</div></div>`;
+  function vCad() {
+    const d = S.draft, locked = !!(d.send && d.send.created);
+    return `<section class="card"><div class="card__h"><h2>1 · CAD number</h2></div><div class="card__b"><div class="cadbox">
+      <div class="field"><label class="label" for="cadin">CAD number</label>
+        <input class="input input--lg" id="cadin" inputmode="numeric" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="${CADN.EXAMPLE}" value="${esc(d.cadIn || d.cad)}" aria-describedby="cad-hint cad-err"${locked ? ' disabled' : ''}>
+        <span class="hint" id="cad-hint">Enter the CAD number from the dispatch / MDT information. Accepted: CAD#${CADN.EXAMPLE}, ${CADN.EXAMPLE} or ${CADN.EXAMPLE.replace(/-/g, '')}. It is checked for an existing case, and locked once the case is sent.</span>
+        <span class="field-error" id="cad-err" hidden></span></div>
+      ${locked ? `<p class="lockline">${icon('lock')}The case was already created under this number: it cannot be changed.</p>` : ''}</div></div></section>
+      ${foot(null, `<button class="btn btn--primary btn--lg" data-act="cad-ok">Continue${icon('arrow-right')}</button>`)}`;
+  }
+  function vEcgStep() {
+    const e = S.draft.ecg;
+    return `<section class="card"><div class="card__h"><h2>2 · ECG 1</h2><span class="sp"></span>${e.imgs.length ? `<span class="small muted">acquired <span class="mono">${hms(e.acq)}</span>${e.acqSet ? ' (set by the crew)' : ' (first image)'}</span><button class="btn btn--sm btn--quiet" data-act="acq" data-where="draft">${icon('clock', 'ico-sm')}Change time</button>` : ''}</div>
+      <div class="card__b stack"><p class="muted">Photograph the whole 12-lead ECG printout. Add more images of the same ECG if useful (for example a closer view of the chest leads). Nothing is replaced or deleted after SEND.</p>${shotsHtml(e, 'draft')}</div></section>
+      ${foot('cad', `<button class="btn btn--primary btn--lg" data-act="step" data-k="md"${e.imgs.length ? '' : ' disabled'}>Continue${icon('arrow-right')}</button>`)}`;
+  }
+  const nvBtns = (k, c) => (NV[k] || []).map(v => `<button type="button" class="choice choice--quiet" data-act="md-nv" data-k="${k}" data-v="${esc(v)}" aria-pressed="${!!(c && c.nv === v)}">${esc(v)}</button>`).join('');
+  const mdRow = (k, label, control, hint) => `<div class="mdrow" id="f-${k}"><div class="mdrow__l"><span class="label" id="l-${k}">${label}</span>${hint ? `<span class="hint">${hint}</span>` : ''}</div><div class="mdrow__c" role="group" aria-labelledby="l-${k}" aria-describedby="e-${k}">${control}<span class="field-error" id="e-${k}" hidden></span></div></div>`;
+  function vMd() {
+    const d = S.draft, m = d.md, num = (k, v, w) => `<input class="input input--num" id="md-${k}" data-md="${k}" inputmode="numeric" maxlength="3" autocomplete="off" value="${v == null ? '' : v}" aria-label="${w}" style="width:96px">`;
+    const age = m.age || {}, bp = m.bp || {}, on = m.onset || {}, cp = m.complaint || {};
+    const e1 = d.ecg.imgs.length ? `ECG 1 acquired <b class="mono">${hms(d.ecg.acq)}</b> · <button type="button" class="link-btn" data-act="acq" data-where="draft">change</button>` : '<span class="nv">No ECG yet</span>';
+    return `<div class="stack" id="mdform">
+      <section class="mdsec"><div class="mdsec__h"><h2>3 · Minimum data — patient</h2><span>Every item needs an answer; Unknown is an answer.</span></div>
+        ${mdRow('age', 'Age', `${num('age', age.nv ? '' : age.v, 'Age in years')}<span class="unit">years</span><button type="button" class="choice" data-act="md-est" aria-pressed="${!!age.est}">Estimated</button><span class="vline"></span>${nvBtns('age', m.age)}`)}
+        ${mdRow('sex', 'Sex', ['Male', 'Female'].map(v => `<button type="button" class="choice" data-act="md-set" data-k="sex" data-v="${v}" aria-pressed="${!!(m.sex && m.sex.v === v)}">${v}</button>`).join('') + '<span class="vline"></span>' + nvBtns('sex', m.sex))}
+        ${mdRow('complaint', 'Presenting complaint', COMPLAINTS.map(c => `<button type="button" class="choice" data-act="md-set" data-k="complaint" data-v="${c.k}" aria-pressed="${cp.k === c.k}">${esc(c.l)}</button>`).join('') + `<input class="input input--other" id="md-other" data-md="other" maxlength="120" placeholder="Describe the complaint" value="${esc(cp.other || '')}" aria-label="Other presenting complaint"${cp.k === 'oth' ? '' : ' hidden'}>`, 'or the reason for the ECG')}
+        ${mdRow('onset', 'Symptom onset', `<input class="input input--time" id="md-onset" data-md="onset" type="time" value="${on.t ? hhmm(on.t) : ''}" aria-label="Symptom onset time">${[15, 30, 60, 120].map(n => `<button type="button" class="choice choice--quiet" data-act="md-ago" data-m="${n}">${n < 60 ? n + ' min' : n / 60 + ' h'} ago</button>`).join('')}<button type="button" class="choice" data-act="md-approx" aria-pressed="${!!on.approx}">Approximate</button><span class="vline"></span>${nvBtns('onset', m.onset)}`)}
+      </section>
+      <section class="mdsec"><div class="mdsec__h"><h2>Vital signs</h2><span>If obtainable — otherwise choose Not obtained or Unable.</span></div>
+        ${mdRow('bp', 'Blood pressure', `${num('sys', bp.nv ? '' : bp.sys, 'Systolic blood pressure')}<span class="sep">/</span>${num('dia', bp.nv ? '' : bp.dia, 'Diastolic blood pressure')}<span class="unit">mmHg</span><span class="vline"></span>${nvBtns('bp', m.bp)}`)}
+        ${mdRow('hr', 'Heart rate', `${num('hr', m.hr && !m.hr.nv ? m.hr.v : '', 'Heart rate')}<span class="unit">bpm</span><span class="vline"></span>${nvBtns('hr', m.hr)}`)}
+        ${mdRow('spo2', 'SpO₂', `${num('spo2', m.spo2 && !m.spo2.nv ? m.spo2.v : '', 'Oxygen saturation')}<span class="unit">%</span><span class="vline"></span>${nvBtns('spo2', m.spo2)}`)}
+        ${mdRow('gcs', 'GCS', `${num('gcs', m.gcs && !m.gcs.nv ? m.gcs.v : '', 'Glasgow Coma Scale')}<span class="unit">3–15</span><span class="vline"></span>${nvBtns('gcs', m.gcs)}`)}
+      </section>
+      <section class="mdsec"><div class="mdsec__h"><h2>Crew and ECG</h2></div>
+        <div class="mdrow"><div class="mdrow__l"><span class="label">Crew / unit</span></div><div class="ro">${esc(AU.unit || '')} · ${esc(ME)} <span class="small muted">(MDT login)</span></div></div>
+        <div class="mdrow"><div class="mdrow__l"><span class="label">ECG acquisition</span></div><div class="ro">${e1}</div></div>
+      </section></div>
+      ${foot('ecg', `<button class="btn btn--primary btn--lg" data-act="md-done">Review${icon('arrow-right')}</button>`)}`;
+  }
+  /* the errors show once the crew pressed Review, and stay current as fields are fixed */
+  function mdSync() {
+    const d = S.draft; if (!d || d.step !== 'md') return;
+    const E = mdErrors(d.md);
+    FIELDS.forEach(f => {
+      const el = $('#e-' + f.k), row = $('#f-' + f.k); if (!el) return;
+      const show = S.mdTried && E[f.k];
+      el.hidden = !show; el.innerHTML = show ? icon('alert') + `<span>${esc(E[f.k])}</span>` : '';
+      row.classList.toggle('is-err', !!show);
+      row.querySelectorAll('input').forEach(i => { if (show) i.setAttribute('aria-invalid', 'true'); else i.removeAttribute('aria-invalid'); });
+    });
+    const st = $$('.step')[2];
+    if (st) { const b = st.querySelector('.step__t span'); if (b) b.textContent = `${answered(d.md)} of 8`; st.classList.toggle('is-done', !Object.keys(E).length); }
+  }
+  function mdInput(t) {
+    const m = S.draft.md, k = t.dataset.md, v = t.value.trim(), at = now();
+    const int = x => (x === '' || x == null || !Number.isFinite(Number(x)) ? null : Math.round(Number(x)));
+    if (k === 'age') m.age = v === '' ? (m.age && m.age.est ? { v: null, est: true, at } : null) : { v: int(v), est: !!(m.age && m.age.est), at };
+    else if (k === 'sys' || k === 'dia') {
+      const s = int($('#md-sys').value.trim()), dd = int($('#md-dia').value.trim());
+      m.bp = s == null && dd == null ? null : { sys: s, dia: dd, at };
+    } else if (k === 'hr' || k === 'spo2' || k === 'gcs') m[k] = v === '' ? null : { v: int(v), at };
+    else if (k === 'other') m.complaint = { k: 'oth', other: t.value, at };
+    else if (k === 'onset') m.onset = v ? { t: fromClock(v, 5 * 60e3), approx: !!(m.onset && m.onset.approx), at } : null;
+    const nvK = k === 'sys' || k === 'dia' ? 'bp' : k;
+    if (NV[nvK]) $$(`[data-act="md-nv"][data-k="${nvK}"]`).forEach(b => b.setAttribute('aria-pressed', 'false'));
+    saveLocal(); mdSync();
+  }
+  function mdClick(a, t) {
+    const m = S.draft.md, k = t.dataset.k, v = t.dataset.v, at = now();
+    if (a === 'md-nv') {
+      const on = !(m[k] && m[k].nv === v);
+      m[k] = on ? { nv: v, at } : null;
+      $$(`[data-act="md-nv"][data-k="${k}"]`).forEach(b => b.setAttribute('aria-pressed', String(on && b.dataset.v === v)));
+      if (on) {
+        ({ age: ['md-age'], bp: ['md-sys', 'md-dia'], onset: ['md-onset'] }[k] || ['md-' + k]).forEach(id => { const i = document.getElementById(id); if (i) i.value = ''; });
+        if (k === 'sex') $$('[data-act="md-set"][data-k="sex"]').forEach(b => b.setAttribute('aria-pressed', 'false'));
+        if (k === 'age') $('[data-act="md-est"]').setAttribute('aria-pressed', 'false');
+        if (k === 'onset') $('[data-act="md-approx"]').setAttribute('aria-pressed', 'false');
+      }
+    } else if (a === 'md-set') {
+      if (k === 'sex') { m.sex = { v, at }; $$('[data-act="md-nv"][data-k="sex"]').forEach(b => b.setAttribute('aria-pressed', 'false')); }
+      if (k === 'complaint') { m.complaint = { k: v, other: v === 'oth' ? (m.complaint && m.complaint.other) || '' : '', at }; const o = $('#md-other'); o.hidden = v !== 'oth'; if (v === 'oth') o.focus(); }
+      $$(`[data-act="md-set"][data-k="${k}"]`).forEach(b => b.setAttribute('aria-pressed', String(b.dataset.v === v)));
+    } else if (a === 'md-est') {
+      const est = !(m.age && m.age.est);
+      m.age = m.age && !m.age.nv ? { ...m.age, est, at } : { v: null, est, at };
+      t.setAttribute('aria-pressed', String(est));
+      $$('[data-act="md-nv"][data-k="age"]').forEach(b => b.setAttribute('aria-pressed', 'false'));
+    } else if (a === 'md-approx') {
+      if (!m.onset || m.onset.nv) { t.setAttribute('aria-pressed', 'false'); toast('Enter the onset time first.'); return; }
+      m.onset = { ...m.onset, approx: !m.onset.approx, at };
+      t.setAttribute('aria-pressed', String(m.onset.approx));
+    } else if (a === 'md-ago') {
+      const tt = now() - Number(t.dataset.m) * 60e3;
+      m.onset = { t: tt, approx: true, at };
+      $('#md-onset').value = hhmm(tt);
+      $('[data-act="md-approx"]').setAttribute('aria-pressed', 'true');
+      $$('[data-act="md-nv"][data-k="onset"]').forEach(b => b.setAttribute('aria-pressed', 'false'));
     }
-    if(f.kind==='num'||f.kind==='bp'){
-      let b=pt+dispParts(L)+errLine(L);
-      if(L.k==='age')b+=tog(L.est,'est','Estimated age');
-      if(['bp','hr','spo2'].includes(L.k))b+=timeAdj(L,'Taken at');
-      b+=keypad(L.k==='bp'?'/':'');
-      return drawer(f.label,b,f.nv.map(n=>`<button class="nvb" data-act="nvclose" data-k="${f.k}" data-v="${n}">${n}</button>`).join('')+`<span class="sp"></span><button class="btn btn-p btn-xl" data-act="md-done" ${filled(L)?'':'disabled'}>${dn}</button>`);
+    saveLocal(); mdSync();
+  }
+  function vReview() {
+    const d = S.draft, e = d.ecg, E = mdErrors(d.md), ok = d.cadOk && e.imgs.length && !Object.keys(E).length, s = d.send;
+    const rows = FIELDS.map(f => `<dt>${f.l}</dt><dd>${d.md[f.k] && !E[f.k] ? (d.md[f.k].nv ? `<span class="nv">${esc(d.md[f.k].nv)}</span>` : `<span class="${['age', 'bp', 'hr', 'spo2', 'gcs'].includes(f.k) ? 'val' : ''}">${esc(mdText(f.k, d.md[f.k]))}</span>`) : `<span class="field-error">${icon('alert')}Missing</span>`}</dd>`).join('');
+    let box;
+    if (s && ['create', 'upload', 'submit'].includes(s.stage)) box = `<div class="sending" role="status" aria-live="polite"><div class="row"><span class="spinner"></span><b>${{ create: 'Creating the case under the CAD number…', upload: 'Uploading the ECG images…', submit: 'Sending to the ER…' }[s.stage]}</b></div><div id="send-pct">${sendPct()}</div></div>`;
+    else if (s && (s.stage === 'queued' || s.stage === 'failed')) box = `<div class="sendbar" style="border-color:var(--warn-line);background:var(--warn-soft)" role="alert"><div class="sendbar__t"><b>${icon('wifi-off', 'ico-sm')} NOT SENT${s.stage === 'queued' ? ' — NO CONNECTION' : ''}</b><span class="small">${s.stage === 'queued' ? 'Saved on this tablet. It is sent automatically when the connection returns.' : esc(s.err || 'The case was not sent.')} If it cannot wait, use your STEMI downtime procedure (phone).</span></div><button class="btn btn--primary btn--xl" data-act="send"${S.up ? '' : ' disabled'}>${icon('send')}SEND AGAIN</button></div>`;
+    else box = `<div class="sendbar"><div class="sendbar__t"><b>Send to the ER</b><span class="small muted">The ER is alerted at once. The Cardiologist is alerted only if an ER Doctor activates cardiology. After SEND the CAD number and the sent data are locked.</span></div><button class="btn btn--primary btn--xl" data-act="send"${ok ? '' : ' disabled'}>${icon('send')}SEND TO ER</button></div>`;
+    return `<section class="card"><div class="card__h"><h2>4 · Review and send</h2></div><div class="card__b"><div class="review-list">
+        <div class="stack-sm"><div class="overline">Case</div><dl class="kv"><dt>CAD</dt><dd>${d.cadOk ? `<span class="cad">CAD #${esc(d.cad)}</span>${d.cadChecked ? '' : '<span class="earlier">Checked for an existing case when you send</span>'}` : `<span class="field-error">${icon('alert')}Missing</span>`}</dd><dt>Crew / unit</dt><dd>${esc(AU.unit || '')} · ${esc(ME)}</dd><dt>ECG 1</dt><dd>acquired <span class="val">${e.imgs.length ? hms(e.acq) : '–'}</span> · ${e.imgs.length} image${e.imgs.length === 1 ? '' : 's'}</dd></dl>
+          <div class="shots shots--sm">${e.imgs.map(x => shotHtml(e, x, 'draft', true)).join('')}</div></div>
+        <div class="stack-sm"><div class="overline">Minimum data</div><dl class="kv">${rows}</dl></div></div></div></section>
+      ${box}${foot('md', '')}`;
+  }
+
+  /* ---------- the live case ---------- */
+  function vCase() {
+    return `<div id="c-head"></div><div id="c-prog"></div><div class="ws"><div class="ws__main"><div id="c-status"></div><section class="card"><div class="card__h"><h2>ECGs</h2><span class="sp"></span><span id="c-ecgact"></span></div><div id="c-ecgs"></div></section>
+      <section class="card"><div class="card__h"><h2>Timeline</h2></div><div class="card__b" id="c-tl"></div></section></div>
+      <div class="ws__side"><section class="card"><div class="card__h"><h2>Patient and vital signs</h2><span class="sp"></span><span id="c-vitact"></span></div><div class="card__b" id="c-pt"></div></section>
+      <div id="c-ai"></div></div></div>`;
+  }
+  function caseHead(r) {
+    const closed = RULES.isClosed(r.state);
+    return `<div class="case-h"><button class="btn btn--quiet case-h__back" data-act="home" aria-label="Back to cases">${icon('chev-left')}<span class="lbl">Cases</span></button>
+      <span class="case-h__cad">CAD #${esc(r.cad)}</span>${badge(r.state, ROLE, true)}<span class="sp"></span>
+      ${closed ? `<span class="lockline">${icon('lock')}Read-only</span>` : ''}
+      <button class="btn btn--secondary btn-sum" data-act="summary" aria-label="Case Summary">${icon('file')}<span class="lbl">Case Summary</span></button></div>`;
+  }
+  /* what is happening now, in plain words, and what the crew can do */
+  function statusPanel(r) {
+    const er = r.er, cd = r.cardio, d = r.dec[r.dec.length - 1], L = CLIN.latest(r);
+    const P = (tone, ic, label, sub, extra) => `<section class="status-panel ${tone}" aria-live="polite"><div class="status-panel__label">${icon(ic)}<span>${label}</span></div>${sub ? `<div class="status-panel__sub">${sub}</div>` : ''}${extra || ''}</section>`;
+    switch (r.state) {
+      case 'draft': return P('', 'upload', 'SENDING…', 'The case is being sent.');
+      case 'sent_to_er': return P('tone-info', 'send', 'SENT TO ER', `Received by the platform at ${hm(r.sub.rcv)}. Waiting for an ER Doctor to accept the case.`);
+      case 'er_reviewing': return P('tone-info', 'eye', 'ER DOCTOR REVIEWING', `<b>${esc(er.name)}</b> (ER Doctor) accepted the case at ${hm(er.accepted)} and is reviewing the ECG.`);
+      case 'er_closed': return P('', 'lock', 'ER REVIEW COMPLETED / CARDIOLOGY NOT ACTIVATED', `ER Doctor assessment by ${esc(er.by || er.name)} at ${hm(er.at)}.`,
+        `<dl class="kv" style="margin-top:6px"><dt>Reason</dt><dd>${esc(er.reason)}</dd>${er.comment ? `<dt>Comment</dt><dd>${esc(er.comment)}</dd>` : ''}</dl><p class="small muted">The STEMI screening pathway is closed and read-only. Continue standard care. The CAD incident itself is not changed.</p>`);
+      case 'cardiology_activated': return P('tone-warn', 'bell', 'CARDIOLOGY ACTIVATED', `${er.assessment === 'uncertain' ? 'ER assessment: UNCERTAIN. ' : ''}${esc(er.by || er.name || 'The ER')} activated cardiology at ${hm(cd.activated)}. Waiting for the Cardiologist to acknowledge.`);
+      case 'cardiologist_reviewing': return P('tone-info', 'eye', 'CARDIOLOGIST REVIEWING', `<b>${esc(cd.name || 'The Cardiologist')}</b> acknowledged the case at ${hm(cd.ack)}.`);
+      case 'repeat_requested': return P('tone-warn', 'repeat', 'REPEAT ECG REQUESTED', `${esc(d.by)} (Cardiologist) at ${hm(d.at)} · on ECG ${d.on}.`,
+        `${d.reasons.length || d.instr || d.within ? `<dl class="kv" style="margin-top:6px">${d.reasons.length ? `<dt>Reason</dt><dd>${esc(d.reasons.join(', '))}</dd>` : ''}${d.instr ? `<dt>Instruction</dt><dd>${esc(d.instr)}</dd>` : ''}${d.within ? `<dt>Within</dt><dd>${d.within} min</dd>` : ''}</dl>` : ''}
+         <div class="btn-row"><button class="btn btn--primary btn--lg" data-act="ecg-new">${icon('ecg')}TAKE REPEAT ECG (ECG ${L.n + 1})</button></div><p class="small muted">COMPLETE STEMI PATHWAY becomes available only after CONFIRMED STEMI.</p>`);
+      case 'repeat_received': return P('tone-info', 'eye', 'REPEAT ECG SENT — CARDIOLOGIST REVIEWING', `ECG ${L.n} received at ${hm(L.rcv)}. The Cardiologist reviews it and decides.`);
+      case 'confirmed': return P('tone-crit-solid', 'alert', 'CONFIRMED STEMI', `Decision by ${esc(d.by)} (Cardiologist) at ${hm(d.at)} · on ECG ${d.on}.`,
+        `${d.note ? `<p><b>Note:</b> ${esc(d.note)}</p>` : ''}<p class="small muted">When the STEMI pathway is finished for this case, press COMPLETE STEMI PATHWAY. Nothing more is documented here.</p><div class="btn-row"><button class="btn btn--secondary btn--lg" data-act="complete">${icon('check-circle')}COMPLETE STEMI PATHWAY</button></div>`);
+      case 'not_stemi_closed': return P('', 'lock', 'NOT STEMI / PATHWAY CLOSED', d ? `Decision by ${esc(d.by)} (Cardiologist) at ${hm(d.at)}.` : '',
+        `<dl class="kv" style="margin-top:6px">${d && d.reason ? `<dt>Reason</dt><dd>${esc(d.reason)}</dd>` : ''}${d && d.adv ? `<dt>Advice</dt><dd>${esc(d.adv)}</dd>` : ''}</dl><p class="small muted">The STEMI pathway closed automatically and is read-only. No cath-lab activation. Continue standard care. The CAD incident itself is not changed.</p>`);
+      case 'completed': return P('tone-ok', 'check-circle', 'STEMI PATHWAY COMPLETED', `Completed by ${esc(r.closed.by)} at ${hm(r.closed.at)}. The case is read-only.`);
     }
-    if(f.kind==='time'){
-      const b=pt+tpanel(L,[['Now',0],['15 min ago',15],['30 min ago',30],['45 min ago',45],['1 h ago',60],['2 h ago',120]])+tog(L.approx,'approx','Approximate');
-      return drawer('Symptom onset',b,`<button class="nvb" data-act="nvclose" data-k="onset" data-v="Unknown">Unknown</button><span class="sp"></span><button class="btn btn-p btn-xl" data-act="md-done">${dn}</button>`);
-    }
-    if(f.kind==='complaint'){
-      const b=pt+`<div class="olist">${COMPLAINTS.map(o=>`<button class="cbtn ${L.sel===o.id?'on':''}" data-act="cpick" data-v="${o.id}">${L.sel===o.id?IC.check:''}${o.l}</button>`).join('')}</div>
-        <div><label class="flab" for="cdet">Details${L.sel==='oth'?' (needed for Other)':' (optional)'}</label><input class="tin" id="cdet" value="${esc(L.det)}" autocomplete="off" placeholder="For example: central, crushing, with sweating"></div>
-        <p class="muted" style="margin:0;font-size:15px">Pick list is illustrative (Q-56).</p>`;
-      return drawer('Presenting complaint',b,`<span class="sp"></span><button class="btn btn-p btn-xl" data-act="c-done" ${L.sel&&(L.sel!=='oth'||L.det.trim())?'':'disabled'}>${dn}</button>`);
-    }
-    if(f.kind==='gcs'){
-      const b=pt+`<div class="gcsg">${[15,14,13,12,11,10,9,8,7,6,5,4,3].map(n=>`<button class="key" data-act="gcs" data-v="${n}">${n}</button>`).join('')}</div>`;
-      return drawer('GCS',b,f.nv.map(n=>`<button class="nvb" data-act="nvclose" data-k="gcs" data-v="${n}">${n}</button>`).join(''));
+    return '';
+  }
+  function ecgsHtml(r) {
+    const closed = RULES.isClosed(r.state), pend = pendingFor(r.cad);
+    const items = r.ecgs.map(e => {
+      const pImgs = pend.filter(x => x.kind === 'img' && x.n === e.n), L = CLIN.latest(r);
+      return `<div class="ecgitem"><div class="ecgitem__h"><b>ECG ${e.n}</b><span>acquired ${hms(e.acq)} · received ${hm(e.rcv)}${e.n === L.n && r.ecgs.length > 1 ? ' · latest' : ''}</span><span>${e.ai ? esc(CLIN.AIST[e.ai.st]) : 'AI analysis starting'}</span></div>
+        <div class="shots">${e.imgs.map(x => `<div class="shot"><button class="shot__img" data-act="ecg-view" data-n="${e.n}" data-i="${x.i}" aria-label="ECG ${e.n}, Image ${x.i}: view full screen"><img src="${esc(x.url)}" alt="" loading="lazy"></button><div class="shot__t"><b>Image ${x.i}</b>${x.i === e.pri ? '<span class="tag tag--primary">Primary</span>' : ''}${x.after ? '<span class="tag">Added later</span>' : ''}<span class="muted">${hms(x.at)}</span></div></div>`).join('')}
+          ${pImgs.map(x => `<div class="shot"><span class="shot__img"><img src="${esc(x.imgs[0].data)}" alt=""></span><div class="shot__t"><b>Image ${x.imgs[0].i}</b></div><span class="pendnote">${icon('upload')}${S.up ? 'Sending…' : 'Waiting to send'}</span></div>`).join('')}
+          ${!closed && e.imgs.length + pImgs.length < MAXI ? `<div class="shot shot--add" style="min-height:150px"><button class="btn btn--secondary" data-act="img-add-sent" data-n="${e.n}">${icon('plus')}ADD ECG IMAGE</button><span class="xs subtle" style="text-align:center">Same ECG, another image</span></div>` : ''}</div></div>`;
+    });
+    pend.filter(x => x.kind === 'ecg').forEach(x => items.push(`<div class="ecgitem"><div class="ecgitem__h"><b>ECG ${x.n}</b><span>acquired ${hms(x.acq)}</span><span class="pendnote">${icon('upload')}${S.up ? 'Sending…' : 'Saved on this tablet — waiting to send'}</span></div><div class="shots">${x.imgs.map(y => `<div class="shot"><span class="shot__img"><img src="${esc(y.data)}" alt=""></span><div class="shot__t"><b>Image ${y.i}</b></div></div>`).join('')}</div></div>`));
+    return items.join('') || `<div class="card__b">${empty('ecg', 'No ECG')}</div>`;
+  }
+  function vitHtml(r) {
+    const pend = pendingFor(r.cad).filter(x => x.kind === 'op' && (x.op.k === 'md' || x.op.k === 'rec'));
+    return `${CLIN.ptDetails(r)}${pend.length ? `<p class="pendnote" style="margin-top:12px">${icon('upload')}${pend.length} update${pend.length > 1 ? 's' : ''} saved on this tablet — ${S.up ? 'sending…' : 'waiting to send'}</p>` : ''}`;
+  }
+  function patchCase() {
+    const r = cur();
+    if (!r || S.view !== 'case') return;
+    const closed = RULES.isClosed(r.state), L = CLIN.latest(r), pendE = pendingFor(r.cad).some(x => x.kind === 'ecg');
+    patch('c-head', caseHead(r));
+    patch('c-prog', CLIN.progress(r));
+    patch('c-status', statusPanel(r));
+    patch('c-ecgact', closed || pendE || r.state === 'draft' || r.state === 'repeat_requested' ? '' : `<button class="btn btn--sm btn--primary" data-act="ecg-new">${icon('plus')}NEW ECG (ECG ${L ? L.n + 1 : 1})</button>`);
+    patch('c-ecgs', ecgsHtml(r));
+    patch('c-vitact', closed || r.state === 'draft' ? '' : `<div class="btn-row" style="gap:6px"><button class="btn btn--sm btn--secondary" data-act="vitals">${icon('plus')}Vital signs</button><button class="btn btn--sm btn--secondary" data-act="treat">${icon('plus')}Treatment</button></div>`);
+    patch('c-pt', vitHtml(r));
+    patch('c-ai', L ? CLIN.aiPanel(L) : '');
+    patch('c-tl', CLIN.timelineHtml(r));
+    CLIN.updateFull(r);
+  }
+  const vSummary = r => `<div class="case-h"><button class="btn btn--quiet case-h__back" data-act="sum-back" aria-label="Back to the case">${icon('chev-left')}<span class="lbl">Back to the case</span></button><h1 style="font-size:24px">Case Summary · <span class="cad">CAD #${esc(r.cad)}</span></h1><span class="sp"></span><span class="lockline">${icon('lock')}Nothing to fill in</span></div>${CLIN.summary(r, ROLE)}`;
+
+  /* ---------- decisions and outcomes reach the crew at once (no sound); the crew acknowledges them ---------- */
+  function outcomes() {
+    if (modal.isOpen() || (S.draft && S.draft.send && ['create', 'upload', 'submit'].includes(S.draft.send.stage))) return;
+    for (const r of S.cases.values()) {
+      const d = r.dec[r.dec.length - 1];
+      if (d && !d.crewAck && !S.shownDec.has(d.id)) {
+        S.shownDec.add(d.id);
+        if (!d.dlv) queue({ kind: 'op', cad: r.cad, op: op(r.cad, 'decrcv', { id: d.id }) });
+        return decisionModal(r, d);
+      }
+      if (r.state === 'er_closed' && !r.er.crewAck && !S.shownDec.has('er-' + r.cad)) { S.shownDec.add('er-' + r.cad); return erModal(r); }
     }
   }
-  if(L.t==='rec'){
-    const it=RECK[L.id],o=it.opts[L.opt];
-    let b=`<div class="opts">${it.opts.map((x,i)=>`<button class="${x.nv?'nvb':'cbtn'} ${L.opt===i?'on':''}" data-act="ropt" data-i="${i}" aria-pressed="${L.opt===i}">${L.opt===i?(x.nv?IC.slash:IC.check):''}${x.l}</button>`).join('')}</div>`;
-    if(o){
-      if(o.dose!==undefined)b+=`<div><label class="flab" for="rdose">Dose</label><input class="tin" id="rdose" value="${esc(L.dose)}" autocomplete="off"></div>`;
-      if(o.chips)b+=`<div class="chips">${o.chips.map(ch=>`<button class="cbtn ${L.chips.has(ch)?'on':''}" data-act="rchip" data-v="${ch}">${L.chips.has(ch)?IC.check:''}${ch}</button>`).join('')}</div>`;
-      if(o.score)b+=`<div class="score">${[0,1,2,3,4,5,6,7,8,9,10].map(n=>`<button class="key ${L.score===n?'on':''}" data-act="rscore" data-v="${n}">${n}</button>`).join('')}</div>`;
-      if(o.text)b+=`<div><label class="flab" for="rtext">${o.text}</label>${o.long?`<textarea class="tin" id="rtext" rows="4">${esc(L.text)}</textarea>`:`<input class="tin" id="rtext" value="${esc(L.text)}" autocomplete="off">`}</div>`;
-      if(o.num||o.vitals)b+=dispParts(L)+errLine(L)+keypad(o.dec?'.':o.vitals?'Next':'');
-      if(o.time)b+=timeAdj(L);
-      if(o.tpick)b+=tpanel(L,[['Now',0],['5 min ago',5],['10 min ago',10],['15 min ago',15],['30 min ago',30],['1 h ago',60]]);
+  function decisionModal(r, d) {
+    const [title, cls] = { confirm: ['CONFIRMED STEMI', 'modal--crit'], not: ['NOT STEMI / PATHWAY CLOSED', ''], repeat: ['REPEAT ECG REQUESTED', ''] }[d.k];
+    const body = `<div class="confirm-box"><span class="cad">CAD #${esc(r.cad)}</span><span class="muted">Decision by ${esc(d.by)} (Cardiologist) at ${hm(d.at)} · on ECG ${d.on}</span></div>
+      ${d.k === 'not' ? `${d.reason ? `<p><b>Reason:</b> ${esc(d.reason)}</p>` : ''}${d.adv ? `<p><b>Advice:</b> ${esc(d.adv)}</p>` : ''}<p class="muted">The STEMI pathway closed automatically and is read-only. No cath-lab activation. Continue standard care. The CAD incident itself is not changed.</p>` : ''}
+      ${d.k === 'repeat' ? `${d.reasons.length ? `<p><b>Reason:</b> ${esc(d.reasons.join(', '))}</p>` : ''}${d.instr ? `<p><b>Instruction:</b> ${esc(d.instr)}</p>` : ''}${d.within ? `<p><b>Within:</b> ${d.within} min</p>` : ''}<p class="muted">Take ECG ${CLIN.latest(r).n + 1} and send it: it reaches the Cardiologist silently.</p>` : ''}
+      ${d.k === 'confirm' ? `${d.note ? `<p><b>Note:</b> ${esc(d.note)}</p>` : ''}<p class="muted">COMPLETE STEMI PATHWAY is now available on the case.</p>` : ''}`;
+    modal.open(dlg(title, body, `<button class="btn ${d.k === 'confirm' ? 'btn--critical' : 'btn--primary'} btn--lg" data-act="dec-ack" data-cad="${esc(r.cad)}" data-id="${esc(d.id)}">${icon('check')}ACKNOWLEDGE</button>`, { over: 'Cardiologist decision', noClose: true }), { cls, locked: true, alert: true, focus: '[data-act="dec-ack"]' });
+  }
+  function erModal(r) {
+    modal.open(dlg('ER REVIEW COMPLETED / CARDIOLOGY NOT ACTIVATED', `<div class="confirm-box"><span class="cad">CAD #${esc(r.cad)}</span><span class="muted">ER Doctor assessment by ${esc(r.er.by || r.er.name)} at ${hm(r.er.at)}</span></div>
+      <dl class="kv"><dt>Reason</dt><dd>${esc(r.er.reason)}</dd>${r.er.comment ? `<dt>Comment</dt><dd>${esc(r.er.comment)}</dd>` : ''}</dl>
+      <p class="muted">The STEMI screening pathway is closed and read-only. Continue standard care. The CAD incident itself is not changed.</p>`,
+      `<button class="btn btn--primary btn--lg" data-act="er-ack" data-cad="${esc(r.cad)}">${icon('check')}ACKNOWLEDGE</button>`, { over: 'ER review', noClose: true }), { locked: true, alert: true, focus: '[data-act="er-ack"]' });
+  }
+
+  /* ---------- after SEND: vital signs, treatments, serial ECGs, completing ---------- */
+  function vitalsDialog() {
+    const r = cur(); if (!r) return;
+    const row = (k, label, inner) => `<div class="mdrow" id="v-f-${k}"><div class="mdrow__l"><span class="label" id="v-l-${k}">${label}</span></div><div class="mdrow__c" role="group" aria-labelledby="v-l-${k}">${inner}<span class="field-error" id="v-e-${k}" hidden></span></div></div>`;
+    const n = (id, label) => `<input class="input input--num" id="${id}" inputmode="numeric" maxlength="3" autocomplete="off" aria-label="${label}" style="width:90px">`;
+    modal.open(dlg('Update vital signs', `<p class="muted">New readings are added with the time now; earlier readings are kept. Fill in only what was measured.</p>
+      <div class="mdsec">${row('bp', 'Blood pressure', `${n('v-sys', 'Systolic')}<span class="sep">/</span>${n('v-dia', 'Diastolic')}<span class="unit">mmHg</span>`)}${row('hr', 'Heart rate', `${n('v-hr', 'Heart rate')}<span class="unit">bpm</span>`)}${row('spo2', 'SpO₂', `${n('v-spo2', 'SpO2')}<span class="unit">%</span>`)}${row('gcs', 'GCS', `${n('v-gcs', 'GCS')}<span class="unit">3–15</span>`)}</div>
+      <span class="field-error" id="v-err" hidden></span>`, `<button class="btn btn--secondary" data-act="modal-close">Cancel</button><button class="btn btn--primary btn--lg" data-act="vitals-save">Add readings</button>`, { over: `CAD #${r.cad}` }), { cls: 'modal--wide', focus: '#v-sys' });
+  }
+  function vitalsSave() {
+    const r = cur(), root = modal.el(), g = id => { const v = root.querySelector('#' + id).value.trim(); return v === '' ? null : Math.round(Number(v)); }, at = now();
+    const vals = { sys: g('v-sys'), dia: g('v-dia'), hr: g('v-hr'), spo2: g('v-spo2'), gcs: g('v-gcs') }, md = {}, errs = {};
+    if (vals.sys != null || vals.dia != null) md.bp = { sys: vals.sys, dia: vals.dia, at };
+    ['hr', 'spo2', 'gcs'].forEach(k => { if (vals[k] != null) md[k] = { v: vals[k], at }; });
+    const E = mdErrors(md);
+    Object.keys(md).forEach(k => { if (E[k]) errs[k] = E[k]; });
+    ['bp', 'hr', 'spo2', 'gcs'].forEach(k => { const el = root.querySelector('#v-e-' + k); el.hidden = !errs[k]; el.innerHTML = errs[k] ? icon('alert') + `<span>${esc(errs[k])}</span>` : ''; });
+    const ve = root.querySelector('#v-err');
+    ve.hidden = !!Object.keys(md).length; ve.innerHTML = Object.keys(md).length ? '' : icon('alert') + '<span>Enter at least one reading.</span>';
+    if (!Object.keys(md).length || Object.keys(errs).length) return;
+    Object.entries(md).forEach(([k, a]) => queue({ kind: 'op', cad: r.cad, op: op(r.cad, 'md', { k, v: mdText(k, a), raw: a, at, kind: 'update' }) }));
+    modal.close();
+    toast(S.up ? 'Vital signs sent: the ER and the Cardiologist see them silently' : 'Vital signs saved on this tablet: sent when the connection returns');
+  }
+  function treatDialog() {
+    const r = cur(); if (!r) return;
+    TD = { k: null, opt: null };
+    modal.open(dlg('Treatment update', `<p class="muted">Shown silently to the ER and the Cardiologist; earlier entries are kept. Not the ePCR: document fully in the ePCR as usual.</p>
+      <div class="field"><span class="label" id="t-k">Treatment</span><div class="choices" role="group" aria-labelledby="t-k">${TREAT.map(x => `<button type="button" class="choice" data-act="t-k" data-v="${x.k}" aria-pressed="false">${esc(x.l)}</button>`).join('')}</div></div>
+      <div id="t-more"></div><span class="field-error" id="t-err" hidden></span>`, `<button class="btn btn--secondary" data-act="modal-close">Cancel</button><button class="btn btn--primary btn--lg" data-act="treat-save">Add treatment update</button>`, { over: `CAD #${r.cad}` }), { cls: 'modal--wide' });
+  }
+  function treatSync() {
+    const root = modal.el(); if (!root || !TD) return;
+    root.querySelectorAll('[data-act="t-k"]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.v === TD.k)));
+    const T = TREAT.find(x => x.k === TD.k);
+    if (!T) return UI.modal.patch('#t-more', '');
+    const doseNow = root.querySelector('#t-dose') ? root.querySelector('#t-dose').value : '';
+    UI.modal.patch('#t-more', `<div class="field"><span class="label" id="t-o">${esc(T.l)}</span><div class="choices" role="group" aria-labelledby="t-o">${T.opts.map(o => `<button type="button" class="choice" data-act="t-o" data-v="${esc(o)}" aria-pressed="${TD.opt === o}">${esc(o)}</button>`).join('')}</div></div>
+      ${TD.opt === 'Given' ? `<div class="field"><label class="label" for="t-dose">${T.k === 'otx' ? 'What was given' : 'Dose and route'} <span class="opt">(${T.k === 'otx' ? 'required' : 'optional'})</span></label><input class="input" id="t-dose" maxlength="120" value="${esc(doseNow)}"></div>
+      <div class="field"><label class="label" for="t-time">Time given</label><input class="input input--time" id="t-time" type="time" value="${hhmm(now())}" style="width:150px"></div>` : ''}`);
+  }
+  function treatSave() {
+    const r = cur(), root = modal.el(), er = root.querySelector('#t-err'), T = TREAT.find(x => x.k === (TD && TD.k));
+    const fail = m => { er.hidden = false; er.innerHTML = icon('alert') + `<span>${esc(m)}</span>`; };
+    if (!T) return fail('Choose the treatment.');
+    if (!TD.opt) return fail('Choose what was done.');
+    let at = now(), v = TD.opt;
+    if (TD.opt === 'Given') {
+      const dose = root.querySelector('#t-dose').value.trim(), tm = root.querySelector('#t-time').value;
+      if (T.k === 'otx' && !dose) return fail('Say what was given.');
+      if (tm) at = fromClock(tm);
+      v = `Given${dose ? ' · ' + dose : ''}`;
     }
-    return drawer(it.label,b,`<span class="sp"></span><button class="btn btn-p btn-xl" data-act="rsave" ${recOk(L)?'':'disabled'}>Save and send</button>`,true);
+    queue({ kind: 'op', cad: r.cad, op: op(r.cad, 'rec', { k: T.k, label: T.l, v, at }) });
+    modal.close(); TD = null;
+    toast(S.up ? 'Treatment update sent' : 'Treatment update saved on this tablet: sent when the connection returns');
   }
-  if(L.t==='dest'){
-    const cur=CASE.dest.hosp;
-    const nxt=['A','B','C'].find(k=>k!==cur&&!hospInfo(k).unk);
-    const cards=['A','B','C'].map(k=>{const h=hospInfo(k),tags=[];
-      if(k===cur)tags.push('<span class="tagx">Current</span>');
-      if(k===nxt)tags.push('<span class="tagx next">Engine: next recommended</span>');
-      if(h.unk)tags.push('<span class="tagx warn">Not treated as available: status unknown</span>');
-      return `<button class="hcard ${L.pick===k?'on':''}" data-act="dpick" data-v="${k}" ${k===cur?'disabled':''}><span class="hn">${h.name}</span><span class="he">ETA ${h.eta} min</span><span class="hs">Cath lab: ${h.lab} (${h.labSub}) · Cardiologist: ${h.cardio} · Pathway: ${h.path}</span>${tags.length?`<span class="ht">${tags.join('')}</span>`:''}</button>`}).join('');
-    const why=['Patient condition','Hospital status or capacity','ACC instruction','Crew clinical judgement','Other'];
-    let conseq='';
-    if(L.pick){const n=HOSP[L.pick].name;conseq=`The change appears on ${CASE.alert?CASE.alert.who+'’s':'the cardiologist’s'} screen at once, with no alarm, and the earlier destination stays in the record. `+(CASE.ack?`${CASE.ack.who} has opened the case and will finish the review.`:`Whether an unopened alert moves to ${n}'s on-duty cardiologist is open; this prototype keeps ${CASE.alert?CASE.alert.who:'the alert'} on the case.`)+' <span class="muted">(Q-52, open)</span>';}
-    const b=`<div class="hl">${cards}</div>${conseq?`<div class="conseq">${conseq}</div>`:''}
-      <div><span class="flab">Reason (required)</span><div class="chips">${why.map(w=>`<button class="cbtn ${L.why===w?'on':''}" data-act="dwhy" data-v="${w}">${L.why===w?IC.check:''}${w}</button>`).join('')}</div><p class="muted" style="margin:6px 0 0;font-size:14.5px">Reasons are examples of a configured list (Q-57).</p></div>
-      <div><label class="flab" for="dtext">Details${L.why==='Other'?' (needed for Other)':' (optional)'}</label><input class="tin" id="dtext" value="${esc(L.text)}" autocomplete="off"></div>`;
-    return drawer('Change destination',b,`<span class="sp"></span><button class="btn btn-p btn-xl" data-act="dconfirm" ${destOk(L)?'':'disabled'}>${L.pick?'Confirm change to '+HOSP[L.pick].name:'Choose a hospital'}</button>`,true);
+  /* a serial ECG (ECG 2, 3 …), for example the repeat ECG the Cardiologist asked for */
+  function ecgNew() {
+    const r = cur(); if (!r) return;
+    const n = CLIN.latest(r).n + 1;
+    if (!S.ecgd[r.cad] || S.ecgd[r.cad].n !== n) S.ecgd[r.cad] = { n, imgs: [], acq: null, acqSet: false, acqWhy: '', variant: null };
+    saveLocal(true); ecgPanel();
   }
-  if(L.t==='etime'){
-    const b=`<div class="tbig"><b>${hm(L.tm)}</b><span>ECG time</span></div>
-      <div class="stepbtns"><button class="btn btn-q" data-act="tstep" data-m="-5">−5 min</button><button class="btn btn-q" data-act="tstep" data-m="-1">−1 min</button><button class="btn btn-q" data-act="tstep" data-m="1">+1 min</button><button class="btn btn-q" data-act="tstep" data-m="5">+5 min</button></div>
-      <div><span class="flab">Reason (required)</span><div class="chips">${['Printout shows an earlier acquisition time','Other'].map(w=>`<button class="cbtn ${L.why===w?'on':''}" data-act="ewhy" data-v="${w}">${L.why===w?IC.check:''}${w}</button>`).join('')}</div></div>
-      <div><label class="flab" for="etext">Details${L.why==='Other'?' (needed for Other)':' (optional)'}</label><input class="tin" id="etext" value="${esc(L.text)}" autocomplete="off"></div>`;
-    return drawer('Change ECG time',b,`<span class="sp"></span><button class="btn btn-p btn-xl" data-act="esave" ${L.why&&(L.why!=='Other'||L.text.trim())?'':'disabled'}>Save time</button>`);
+  function ecgPanel() {
+    const r = cur(), e = r && S.ecgd[r.cad]; if (!e) return modal.close();
+    const rep = r.state === 'repeat_requested';
+    modal.open(dlg(`${rep ? 'Repeat ECG' : 'New ECG'} · ECG ${e.n}`, `<p class="muted">A new recording of the 12-lead ECG, added to the case as ECG ${e.n}. ECG ${e.n - 1} and earlier stay unchanged.${rep ? ' The Cardiologist asked for it.' : ''}</p>
+      ${e.imgs.length ? `<p class="small">Acquired <b class="mono">${hms(e.acq)}</b>${e.acqSet ? ' (set by the crew)' : ' (first image)'} · <button type="button" class="link-btn" data-act="acq" data-where="${esc(r.cad)}">change</button></p>` : ''}
+      <div id="ecgd-shots">${shotsHtml(e, r.cad)}</div>`,
+      `<button class="btn btn--secondary" data-act="modal-close">Close (kept on this tablet)</button><button class="btn btn--primary btn--lg" data-act="ecg-send"${e.imgs.length ? '' : ' disabled'}>${icon('send')}SEND ECG ${e.n}</button>`, { over: `CAD #${r.cad}` }), { cls: 'modal--wide' });
   }
-  if(L.t==='hoconfirm')return `<div class="scrim" data-act="close"></div><div class="dlg" role="alertdialog" aria-modal="true" aria-labelledby="hcq"><h2 class="h2" id="hcq">COMPLETE STEMI PATHWAY?</h2>
-    <p>This will close the STEMI pathway for:</p><p class="mono dup-cad">${esc(idText())}</p>
-    <p>The STEMI case will remain available as read-only. The CAD incident itself is not changed.</p>
-    ${L.err?`<p class="err" role="alert">${G('warn')}${esc(L.err)}</p>`:''}
-    <div class="row"><button class="btn btn-q" data-act="close">CANCEL</button><button class="btn btn-p btn-xl" data-act="ho-close" ${L.busy?'disabled':''}>${L.busy?'Completing…':'COMPLETE'}</button></div></div>`;
-  if(L.t==='hoimg')return `<div class="zoom" role="dialog" aria-modal="true" aria-label="ECG"><div class="zoom-h"><b>${esc(L.label)}</b><button class="icon-btn" data-act="close" aria-label="Close">${IC.close}</button></div><div class="zoom-b"><img src="${L.url}" alt="${esc(L.label)}"></div></div>`;
-  if(L.t==='dup'){
-    const x=L.ex||{},c=CASE,hasDraft=!!(c&&c.srv===false&&(c.draft||answered()||c.ecgs.length));
-    return `<div class="scrim"></div><div class="dlg dup" role="alertdialog" aria-modal="true" aria-labelledby="dupq" aria-describedby="dupd"><h2 class="h2" id="dupq">${G('warn')}CASE ALREADY EXISTS</h2><p class="mono dup-cad">CAD #${esc(L.cad)}</p>
-    <p id="dupd">A case with this CAD number is already on the platform${x.unit?` (${esc(x.unit)}`:''}${x.submittedAt?`, sent ${hms(x.submittedAt)}`:x.unit?', not sent':''}${x.unit?')':''}${x.active===false?' · closed':''}. A second case is not created and the existing case is not changed.</p>
-    ${hasDraft?'<p>Opening the existing case replaces the unsent draft on this tablet. To keep the draft, correct the CAD number instead.</p>':''}
-    <div class="row"><button class="btn btn-q" data-act="dup-fix">Correct the CAD number</button><button class="btn btn-p btn-xl" data-act="dup-open">OPEN EXISTING CASE</button></div></div>`;
+  function ecgSend() {
+    const r = cur(), e = r && S.ecgd[r.cad]; if (!e || !e.imgs.length) return;
+    const n = CLIN.latest(r).n + 1;
+    if (e.n !== n) e.n = n;
+    queue({ kind: 'ecg', id: `ecg-${r.cad}-${e.n}-${rid()}`, cad: r.cad, n: e.n, acq: e.acq, acqWhy: e.acqSet ? e.acqWhy : '', variant: e.variant || variantFor(e.n), sendAt: now(), imgs: e.imgs.map(x => ({ ...x })) });
+    delete S.ecgd[r.cad]; saveLocal(true); modal.close();
+    toast(S.up ? `ECG ${e.n} sending: the ER and the Cardiologist get it silently` : `ECG ${e.n} saved on this tablet: sent when the connection returns`);
   }
-  if(L.t==='newcase'){
-    const c=CASE,pend=OUTQ.length+PENDIMG.length,draft=!!(c&&c.srv===false&&(c.draft||answered()||c.cad));
-    return `<div class="scrim" data-act="close"></div><div class="dlg" role="dialog" aria-modal="true" aria-labelledby="nq"><h2 class="h2" id="nq">Open a new STEMI case?</h2>
-    ${pend?`<p><b>${pend} entr${pend>1?'ies':'y'} of ${esc(idText())} still waiting to be sent.</b> Wait for the connection to return before opening a new case.</p>`:c&&c.srv!==false?`<p>The current case <b class="mono">${esc(idText())}</b> stays on the platform as it is.</p>`:draft?`<p>The unsent draft on this tablet${c.cad?` (<b class="mono">${esc(idText())}</b>)`:''} is discarded. Nothing of it has been sent.</p>`:''}
-    <p>You will enter the CAD number of the new call from the MDT.</p>
-    <div class="row"><button class="btn btn-q" data-act="close">Cancel</button><button class="btn btn-p btn-xl" data-act="newcase-go" ${pend?'disabled':''}>Open new STEMI case</button></div></div>`;
+  /* an image added to an ECG already sent: uploaded, then linked to that ECG as its next image (nothing is replaced) */
+  function addImageSent(n) {
+    const r = cur(), e = r && r.ecgs.find(x => x.n === n); if (!e) return;
+    const where = 'sent:' + n;
+    S.ecgd[where] = { n, imgs: [], acq: e.acq, variant: e.variant || variantFor(n), sent: true, base: e.imgs.length + pendingFor(r.cad).filter(x => x.kind === 'img' && x.n === n).length };
+    addMenu(where);
   }
-  if(L.t==='same')return `<div class="scrim" data-act="close"></div><div class="dlg" role="dialog" aria-modal="true" aria-labelledby="dq"><h2 class="h2" id="dq">Is this a new patient?</h2><p>You already have an active case: <b class="mono">${idText()}</b> · ${esc(ptSummary())}.</p>
-    <div class="col"><button class="btn btn-s btn-xl" data-act="same-ecg">Same patient: add an ECG to the open case</button><button class="btn btn-s btn-xl" data-act="same-new">New patient: open a new case</button></div><div class="row"><button class="btn btn-q" data-act="close">Cancel</button></div></div>`;
-  if(L.t==='cancel')return `<div class="scrim" data-act="close"></div><div class="dlg" role="dialog" aria-modal="true" aria-labelledby="cq"><h2 class="h2" id="cq">Cancel this case?</h2><p>The case is kept as CANCELLED with your reason. Nothing is deleted.</p>
-    <div class="chips">${['Opened in error','Patient refused','Other'].map(w=>`<button class="cbtn ${L.why===w?'on':''}" data-act="cwhy" data-v="${w}">${L.why===w?IC.check:''}${w}</button>`).join('')}</div>
-    <div class="row"><button class="btn btn-q" data-act="close">Keep the case</button><button class="btn btn-s" data-act="cancel-do" ${L.why?'':'disabled'}>Cancel case</button></div></div>`;
-  if(L.t==='eta'){
-    const b=`<div class="tbig"><b>${L.min} min</b><span>arrival about ${hm(now()+L.min*MIN)}</span></div>
-      <div class="stepbtns"><button class="btn btn-q" data-act="eta-step" data-m="-5">−5 min</button><button class="btn btn-q" data-act="eta-step" data-m="-1">−1 min</button><button class="btn btn-q" data-act="eta-step" data-m="1">+1 min</button><button class="btn btn-q" data-act="eta-step" data-m="5">+5 min</button></div>`;
-    return drawer('Update ETA',b,`<span class="sp"></span><button class="btn btn-p btn-xl" data-act="eta-save">Save and send</button>`);
+  function sentImage(where, how) {
+    const e = S.ecgd[where], r = cur(); if (!e || !r) return;
+    const finish = x => {
+      x.i = e.base + 1;
+      queue({ kind: 'img', id: `img-${r.cad}-${e.n}-${x.i}-${rid()}`, cad: r.cad, n: e.n, at: now(), imgs: [x] });
+      delete S.ecgd[where]; saveLocal(true); modal.close();
+      toast(S.up ? `Image ${x.i} added to ECG ${e.n}: the ER and the Cardiologist get it silently` : `Image ${x.i} saved on this tablet: sent when the connection returns`);
+    };
+    if (how === 'gen') { const kind = KINDS[e.base % KINDS.length]; return finish({ at: now(), q: 'good', kind, src: 'gen', data: window.ECG.photo(e.variant, kind, 'good', e.acq).url }); }
+    sentPick = f => fileToJpeg(f).then(data => finish({ at: now(), q: 'file', kind: 'full', src: 'file', data }), x => toast(x.message, 'err'));
+    pickFor = where;
+    const inp = $(how === 'camera' ? '#file-camera' : '#file-pick'); inp.value = ''; inp.click();
   }
-  if(L.t==='dec')return decLayer(L);
-  if(L.t==='zoom'){const e=CASE.draft,s=selImg(e);
-    return `<div class="zoom" role="dialog" aria-modal="true" aria-label="ECG zoom"><div class="zoom-h"><b>ECG ${e.n} · Image ${s.i} · as photographed · drag or scroll to move</b><button class="icon-btn" data-act="close" aria-label="Close">${IC.close}</button></div><div class="zoom-b"><img src="${s.img}" alt="ECG ${e.n}, image ${s.i}, at full size"></div></div>`;}
-  if(L.t==='fail'){const f=CASE.failure;
-    return `<div class="fail" role="alertdialog" aria-modal="true" aria-labelledby="ft">${idTag('C-08')}<div class="fail-in">
-      <div class="fail-id mono">${idText()} · ECG ${f.n}</div><div class="fail-ic">${IC.bang}</div>
-      <h2 id="ft">ECG not delivered.<br>Use the STEMI downtime route now.</h2>
-      <div class="fail-call"><span>Call:</span><span class="ph">approved downtime number (Q-21)</span></div>
-      <p class="fail-p">Your case is saved on this tablet and will keep retrying. Do not wait for it.</p>
-      <p class="fail-r mono" data-tick="attempt">Retrying automatically · attempt ${f.attempts} · last try ${hms(f.last)}</p>
-      <button class="btn btn-inv btn-xl" data-act="fail-ack">Downtime route in use</button></div></div>`;}
-  return '';
-}
-/* after sending, a change to the minimum dataset says what it is: a new reading, a clarification or a correction */
-function postTog(L){
-  if(!L.post)return '';
-  const vit=VIT.includes(L.k),opts=vit?[['update','New reading'],['correct','Correction of an earlier entry']]:[['clarify','Clarification'],['correct','Correction of an earlier entry']];
-  const h=CASE.mdh[L.k]||[],cur=h[h.length-1];
-  return `<div class="ptog"><span class="flab">This is</span><div class="chips">${opts.map(([k,l])=>`<button class="cbtn ${L.post===k?'on':''}" data-act="post-kind" data-v="${k}" aria-pressed="${L.post===k}">${L.post===k?IC.check:''}${l}</button>`).join('')}</div>${cur?`<p class="muted" style="margin:6px 0 0;font-size:15px">Current: <b>${esc(mdText(L.k,cur.a))}</b> · ${KINDL[cur.kind]} <span class="mono">${hm(cur.t)}</span>. It stays in the record.</p>`:''}</div>`;
-}
-/* C-09 minimal: the cardiologist's decision arrives full screen on the tablet (the full crew decision screens are a later round) */
-function decLayer(L){
-  const d=CASE.decs.find(x=>x.id===L.id);if(!d)return '';
-  const h=CASE.dest&&CASE.dest.hosp?HOSP[CASE.dest.hosp].name:'the receiving PCI hospital';
-  let body='';
-  if(d.k==='confirm')body=`<p class="decv-p">Continue to <b>${h}</b>${CASE.dest&&CASE.dest.st==='conf'?' (destination confirmed)':' (recommended destination)'}.</p>${d.note?`<p class="decv-p">Note from ${esc(d.by)}: ${esc(d.note)}</p>`:''}<p class="decv-s">Hospital and cath-lab steps are the next design phase and are not shown here.</p>`;
-  if(d.k==='not')body=`<p class="decv-p"><b>PATHWAY CLOSED</b></p>${d.reason?`<p class="decv-p">Reason: ${esc(d.reason)}</p>`:''}${d.adv?`<p class="decv-p">Advice: ${esc(d.adv)}</p>`:''}<p class="decv-s">The STEMI pathway closed automatically and is now read-only, under Completed cases. No cath-lab activation. The CAD incident itself is not changed: continue standard care.</p>`;
-  if(d.k==='repeat')body=`${d.reasons.length?`<p class="decv-p">${esc(d.reasons.join(', '))}</p>`:''}${d.instr?`<p class="decv-p">Instruction: ${esc(d.instr)}</p>`:''}${d.within?`<p class="decv-p">Within ${d.within} min</p>`:''}<p class="decv-s">Capture a new recording from the monitor. It is sent as ECG ${CASE.ecgs.length+1}.</p>`;
-  return `<div class="decv decv-${d.k}" role="alertdialog" aria-modal="true" aria-labelledby="dvt">${idTag('C-09')}<div class="decv-in">
-    <div class="decv-id mono">${idText()} · decision on ECG ${d.on}</div>
-    <div class="decv-lab">DECISION RECEIVED</div>
-    <h2 id="dvt">${DECL[d.k]}</h2>
-    <p class="decv-by">${esc(d.byT||d.by)} · <span class="mono">${hms(d.at)}</span></p>${body}
-    <div class="decv-acts">${d.k==='repeat'?'<button class="btn btn-inv btn-xl" data-act="dec-ack-rep">Acknowledge and capture repeat ECG</button><button class="btn btn-q btn-xl" data-act="dec-ack">Acknowledge</button>':'<button class="btn btn-inv btn-xl" data-act="dec-ack">Acknowledge</button>'}</div></div></div>`;
-}
-function recOk(L){
-  if(L.opt==null)return false;const o=RECK[L.id].opts[L.opt];
-  if(o.need==='text')return !!L.text.trim();
-  if(o.need==='chips')return L.chips.size>0;
-  if(o.need==='score')return L.score!=null;
-  if(o.need==='num'||o.need==='vitals')return filled(L);
-  return true;
-}
-const destOk=L=>!!L.pick&&!!L.why&&(L.why!=='Other'||!!L.text.trim());
+  function fileChosen(ev) {
+    const f = ev.target.files && ev.target.files[0], where = pickFor;
+    pickFor = null;
+    if (!f || !where) return;
+    if (S.ecgd[where] && S.ecgd[where].sent) { if (sentPick) sentPick(f); sentPick = null; return; }
+    fileToJpeg(f).then(data => {
+      const e = ecgOf(where); if (!e || e.imgs.length >= MAXI) return;
+      startEcg(e);
+      e.imgs.push({ i: e.imgs.length + 1, at: now(), q: 'file', kind: 'full', src: 'file', data });
+      afterImage(where);
+    }, x => toast(x.message, 'err'));
+  }
+  function complete() {
+    const r = cur(); if (!r || r.state !== 'confirmed') return;
+    modal.open(dlg('COMPLETE STEMI PATHWAY?', `<p>This will close the STEMI pathway for:</p><div class="confirm-box"><span class="cad">CAD #${esc(r.cad)}</span></div><p>The STEMI case will remain available as read-only.</p>${S.up ? '' : `<div class="alert tone-crit">${icon('wifi-off')}<div class="alert__body">No connection: the pathway cannot be completed until the connection returns.</div></div>`}<span class="field-error" id="dlg-err" hidden></span>`,
+      `<button class="btn btn--secondary btn--lg" data-act="modal-close">CANCEL</button><button class="btn btn--primary btn--lg" data-act="complete-go"${S.up ? '' : ' disabled'}>COMPLETE</button>`, { over: 'STEMI pathway' }), { focus: '[data-act="modal-close"]' });
+  }
+  function completeGo(btn) {
+    const r = cur(); if (!r) return;
+    btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>Completing…';
+    LIVE.request('POST', '/api/cases/complete', { cad: r.cad }).then(x => {
+      if (x.status === 200) { modal.close(); toast(`STEMI PATHWAY COMPLETED · CAD #${r.cad}`); return; }
+      btn.disabled = false; btn.textContent = 'COMPLETE';
+      const el = modal.el().querySelector('#dlg-err'); el.hidden = false; el.innerHTML = icon('alert') + `<span>${esc(x.body.error || 'Not completed.')}</span>`;
+    }, () => { btn.disabled = false; btn.textContent = 'COMPLETE'; toast('No connection: the pathway was not completed.', 'err'); });
+  }
 
-/* ---------- render ---------- */
-const VIEWS={'CAD':vCad,'C-03':vMd,'C-04':vCam,'C-05':vReview,'WS':vWs,'HO':vHo};
-function render(){
-  if(CASE&&CASE.recap&&view!=='C-04')endRecap();
-  const scr=$('#view'),keep={},same=lastView===view&&lastCase===CASE;lastView=view;lastCase=CASE;
-  const typing=document.activeElement&&document.activeElement.id==='cadin';
-  if(same)$$('[data-keep]',scr).forEach(el=>keep[el.dataset.keep]=el.scrollTop);
-  let h=topbar();
-  if(view==='HIST')h+=`<main class="view">${vHist()}</main>`;
-  else if(view==='C-01'||!CASE)h+=`<main class="view">${idTag('C-01')}${vHome()}</main>`;
-  else{
-    h+=caseHeader(view==='WS')+failBar();
-    if(['CAD','C-03','C-05'].includes(view))h+=stepper(view);
-    h+=`<main class="view">${view==='WS'||view==='CAD'||view==='HO'?'':idTag(view)}${VIEWS[view]()}</main>`;
+  /* ---------- rendering ---------- */
+  function setMain(key, html) { const m = $('#main'); if (S.main !== key) { m.innerHTML = html; m._h = null; S.main = key; return true; } return false; }
+  function render() {
+    patch('top', top());
+    patch('banner', banner());
+    if ((S.view === 'case' || S.view === 'summary') && !cur()) S.view = 'home';
+    if (S.view === 'draft' && !S.draft) S.view = 'home';
+    if (S.view === 'home') { setMain('home', vHome()); patchHome(); }
+    else if (S.view === 'draft') {
+      const d = S.draft, key = 'draft:' + d.step;
+      /* the minimum data form is drawn once per visit, so typing is never interrupted */
+      if (d.step === 'md') { if (setMain(key, vDraft())) mdSync(); }
+      else { setMain(key, ''); if (!(document.activeElement && document.activeElement.id === 'cadin')) patch('main', vDraft()); }
+    } else if (S.view === 'case') { setMain('case:' + S.cad, vCase()); patchCase(); }
+    else if (S.view === 'summary') { setMain('sum:' + S.cad, ''); patch('main', vSummary(cur())); }
+    outcomes();
   }
-  scr.innerHTML=h;
-  if(typing&&view==='CAD')focusCad();
-  $$('[data-keep]',scr).forEach(el=>{if(keep[el.dataset.keep])el.scrollTop=keep[el.dataset.keep]});
-  syncNote();
-}
-function renderTop(){const t=$('#view .tb');if(t)t.outerHTML=topbar()}
-function renderRail(){
-  if(view!=='WS'){if(view==='C-01')render();else renderTop();return}
-  const r=$('.rail');if(!r){render();return}
-  const st=r.scrollTop;r.innerHTML=railHtml();r.scrollTop=st;
-  const chip=$('.ch .chip');if(chip)chip.outerHTML=stateChip();
-  renderTop();
-}
-function renderMain(){
-  if(view==='C-01'){render();return}if(view!=='WS')return;const m=$('.wmain');if(!m){render();return}
-  const st=m.scrollTop;const tmp=document.createElement('div');tmp.innerHTML=vWs();
-  m.innerHTML=tmp.querySelector('.wmain').innerHTML;m.scrollTop=st;
-}
-function renderLayer(){
-  const el=$('#layer');el.innerHTML=layerHtml();
-  syncNote();
-  const f=el.querySelector('.decv button,.drawer .dr-b button,.dlg button,.fail button,.zoom button');if(f&&!el.contains(document.activeElement))f.focus({preventScroll:true});
-}
-let toastT=null;
-function toast(msg,rev){const t=$('#toast');t.className='toast'+(rev?' rev':'');t.innerHTML=msg;t.hidden=false;clearTimeout(toastT);toastT=setTimeout(()=>{t.hidden=true},rev?4200:2800)}
+  /* after an image was added or removed, redraw the step (not the minimum data form, which keeps what is typed) */
+  function rerender() { if (S.view === 'draft' && S.draft && S.draft.step !== 'md') S.main = ''; render(); }
+  function go(view) { S.view = view; UI.hideToast(); render(); scrollTo(0, 0); }
+  function openCase(cad, stat) {
+    S.cad = cad; S.stat = stat || null; go('case');
+    const h = $('.case-h__cad'); if (h) { h.setAttribute('tabindex', '-1'); h.focus({ preventScroll: true }); }
+  }
+  function openDone(cad) {
+    LIVE.request('GET', '/api/cases/view?cad=' + encodeURIComponent(cad)).then(x => {
+      if (x.status !== 200) return toast('This case could not be opened.', 'err');
+      openCase(cad, x.body.rec);
+    }, () => toast('No connection: the case could not be opened.', 'err'));
+  }
 
-/* ---------- the page shows the spec for the screen in view ---------- */
-const cur=()=>layer&&layer.t==='fail'?'C-08':layer&&layer.t==='dec'?'C-09':view==='WS'?focus:view;
-let lastScr='';
-function syncNote(){
-  const id=cur(),loc={cap:CASE&&(CASE.draft||CASE.ecgs.length)?Math.min(...(CASE.draft||CASE.ecgs[0]).imgs.map(x=>x.at)):null,md:CASE&&CASE.mdDone?CASE.mdAt:null};
-  const sig=id+'|'+loc.cap+'|'+loc.md;if(sig===lastScr)return;lastScr=sig;post({t:'screen',id,local:loc});
-}
-
-/* ---------- capture ---------- */
-function fillMd(t){
-  const at=t||now();
-  Object.assign(CASE.md,{age:{v:54,est:false},sex:{v:'Male'},complaint:{v:'cp',det:'Central, crushing, with sweating and nausea'},onset:{v:rmin(at-36*MIN),approx:true},bp:{sys:118,dia:74,at},hr:{v:84,at},spo2:{v:96,at},gcs:{v:15}});
-  touch();
-}
-/* Upload: a real image file from this computer, made into a JPEG of at most 2000 px before it is stored */
-function pickFile(){
-  /* kept in the page while the file dialog is open: some Safari versions ignore a file input that is not */
-  document.querySelectorAll('input.pick-file').forEach(x=>x.remove());
-  const inp=document.createElement('input');inp.type='file';inp.accept='image/jpeg,image/png,image/*';inp.className='pick-file';inp.style.display='none';
-  document.body.appendChild(inp);
-  inp.onchange=()=>{const f=inp.files&&inp.files[0];inp.remove();if(!f||!CASE)return;
-    fileToJpeg(f).then(img=>{const c=CASE;if(!c)return;if(c.addTo){captureSent('upload',img);return}
-      capture(null,img);ev(`ECG ${c.draft.n} image uploaded from a file (${f.name})`,ME);touch();view='C-05';render()},
-      ()=>toast('That file could not be read as an image. Use a JPEG or PNG.',true))};
-  inp.click();
-}
-function fileToJpeg(f){
-  return new Promise((res,rej)=>{const u=URL.createObjectURL(f),im=new Image();
-    im.onload=()=>{const s=Math.min(1,2000/Math.max(im.naturalWidth,im.naturalHeight)),cv=document.createElement('canvas');
-      cv.width=Math.round(im.naturalWidth*s);cv.height=Math.round(im.naturalHeight*s);cv.getContext('2d').drawImage(im,0,0,cv.width,cv.height);
-      URL.revokeObjectURL(u);res(cv.toDataURL('image/jpeg',.88))};
-    im.onerror=()=>{URL.revokeObjectURL(u);rej()};im.src=u});
-}
-function capture(t,file){
-  const c=CASE,m=camMode(),r=c.recap,at=t||now(),q=file?'file':SC.quality;c.recap=null;c.nextN=null;
-  let d=c.draft;
-  if(m.k==='new'||!d)d=c.draft={n:m.n,imgs:[],pri:m.i,sel:m.i,v:m.v,acq:Math.floor(at/1000)*1000};
-  d.imgs.push({i:m.i,at,q,kind:file?'full':KIND[(m.i-1)%3],img:file||shot(d.v,m.i,q,d.acq),src:file?'file':'gen'});d.imgs.sort((a,b)=>a.i-b.i);d.sel=m.i;
-  if(r&&r.pri)d.pri=m.i;
-  ev(m.k==='new'?`ECG ${d.n} acquired`:m.k==='add'?`ECG ${d.n} image ${m.i} added`:`ECG ${d.n} image ${m.i} recaptured`,ME,at);
-  ev(`ECG ${d.n} image ${m.i} check on tablet: ${QUAL[q].t}`,'Tablet',at+800);
-}
-/* another photo of an ECG already sent: an image of that ECG, never a new ECG (Hamad, 3 Oct 2026, point 13) */
-function captureSent(how,file){
-  const c=CASE,e=c.ecgs[c.addTo-1],i=freeSlot(e),at=now(),q=file?'file':SC.quality;c.addTo=null;
-  const x={i,at,q,kind:file?'full':KIND[(i-1)%3],img:file||shot(e.v,i,q,e.acq),src:file?'file':'gen',after:true};
-  e.imgs.push(x);e.imgs.sort((a,b)=>a.i-b.i);
-  PENDIMG.push({n:e.n,i});saveLocal();pumpImgs();
-  ev(`Image ${i} ${how==='upload'?'uploaded':'captured'} and added to ECG ${e.n} after sending`,ME,at);
-  view='WS';focus='C-07c';render();scrollToRegion('C-07c');
-  toast(`Image ${i} added to ECG ${e.n}${SC.online?' and sent':'. It sends when the connection returns'}. It is not a new ECG.`);
-}
-/* leaving the camera without a new photo after Recapture: the discarded image stays discarded */
-function endRecap(){
-  const c=CASE,d=c.draft;c.recap=null;if(!d)return;
-  if(!d.imgs.some(x=>x.i===d.pri)){d.pri=d.imgs[0].i;ev(`ECG ${d.n} image ${d.pri} is now primary`,'Tablet')}
-  if(!d.imgs.some(x=>x.i===d.sel))d.sel=d.pri;
-}
-function removeImg(){
-  const d=CASE.draft,s=selImg(d);if(d.imgs.length<2)return;
-  ev(`ECG ${d.n} image ${s.i} discarded before sending`,ME);d.imgs=d.imgs.filter(x=>x!==s);
-  if(s.i===d.pri){d.pri=d.imgs[0].i;ev(`ECG ${d.n} image ${d.pri} is now primary`,'Tablet')}
-  d.sel=d.pri;
-}
-const focusSel=()=>{const b=$('.thumb.on');if(b)b.focus({preventScroll:true})};
-function scrollToRegion(id){const el=$(id==='C-07b'?'#r-dest':id==='C-07a'?'#r-vit':id==='C-07c'?'#r-ecgs':id==='C-07d'?'#r-ai':'.rail');if(el&&view==='WS'){const m=$('.wmain');if(m&&id!=='C-07'&&SC.orient!=='port'&&$('#device').classList.contains('land'))m.scrollTop=el.offsetTop-12;else el.scrollIntoView({block:'start',behavior:'smooth'})}}
-
-/* ---------- transmission: the tablet uploads, the platform confirms receipt in the shared record ---------- */
-function send(opts){
-  opts=opts||{};const c=CASE,e=c.draft;c.draft=null;c.ecgs.push(e);
-  e.tx={stage:'check',pct:0,subAt:now()};e.aiR=null;
-  ev(`ECG ${e.n} sent${nImgs(e)}`,ME);
-  if(e.n===1)c.state='TRANSMITTING';
-  if(c.repeatAsked&&e.n>c.repeatFor)c.repeatSent=true;
-  view='WS';focus='C-07';layer=null;$('#layer').innerHTML='';render();
-  setT(450,()=>{
-    if(!SC.online){e.tx.stage='noconn';fail(e);return}
-    e.tx.conAt=now();e.tx.stage='up';renderRail();
-    /* the platform creates the case under the CAD number first (refused if a case already exists under it); then the
-       images are uploaded and stored on the server; the progress is the real upload */
-    ensureCase().then(ok=>{
-      if(!ok){unsend(e);return}
-      return uploadEcg(e).then(()=>{if(e.tx.stage!=='up')return;e.tx.upAt=now();e.tx.pct=100;renderRail();setT(250,()=>deliverEcg(e))});
-    }).catch(()=>{if(e.tx.stage==='up'){e.tx.stage='fail';fail(e)}});
+  /* ---------- actions ---------- */
+  function act(a, t) {
+    const d = t.dataset;
+    if (a.startsWith('md-') && a !== 'md-done') return S.draft && mdClick(a, t);
+    switch (a) {
+      case 'home': return go('home');
+      case 'logout': return window.logout();
+      case 'new-case':
+        if (S.draft) return modal.open(dlg('An unsent case is open', `<p>${S.draft.cad ? `<span class="cad">CAD #${esc(S.draft.cad)}</span> was` : 'A case was'} started on this tablet and not sent. Continue it, or discard it and start a new case.</p>`, '<button class="btn btn--danger-quiet" data-act="draft-discard">Discard it</button><button class="btn btn--primary" data-act="draft-open">Continue the unsent case</button>', { over: 'NEW STEMI CASE' }));
+        S.draft = newDraft(); saveLocal(true); go('draft'); setTimeout(() => { const i = $('#cadin'); if (i) i.focus(); }, 30); return;
+      case 'draft-open': modal.close(); return go('draft');
+      case 'draft-discard': return discardDraft();
+      case 'draft-discard-go': S.draft = null; saveLocal(true); modal.close(); go('home'); return toast('Unsent case discarded');
+      case 'step': return goStep(d.k);
+      case 'cad-ok': return cadContinue();
+      case 'dup-fix': modal.close(); if (S.draft) { S.draft.cadOk = false; S.draft.step = 'cad'; saveLocal(true); } go('draft'); setTimeout(() => { const i = $('#cadin'); if (i) { i.focus(); i.select(); } }, 30); return;
+      case 'dup-open': return openExisting(d.cad);
+      case 'md-done': {
+        S.mdTried = true; mdSync();
+        const E = mdErrors(S.draft.md), k = Object.keys(E)[0];
+        if (k) { const f = $(`#f-${k} input:not([hidden]), #f-${k} button`); if (f) f.focus(); return toast(`${Object.keys(E).length} item${Object.keys(E).length > 1 ? 's' : ''} still need an answer.`, 'err'); }
+        return goStep('review');
+      }
+      case 'img-add': return addMenu(d.where);
+      case 'img-gen': case 'img-camera': case 'img-file': {
+        const e = ecgOf(d.where); if (!e) return;
+        const how = a === 'img-gen' ? 'gen' : a === 'img-camera' ? 'camera' : 'file';
+        return e.sent ? sentImage(d.where, how) : addImage(d.where, how);
+      }
+      case 'img-remove': return removeImage(d.where, +d.i);
+      case 'img-remove-go': {
+        const e = ecgOf(d.where); if (!e) return;
+        e.imgs = e.imgs.filter(x => x.i !== +d.i).map((x, k) => ({ ...x, i: k + 1 }));
+        if (!e.imgs.length) { e.acq = null; e.acqSet = false; e.acqWhy = ''; }
+        saveLocal(true);
+        if (d.where === 'draft') { modal.close(); return rerender(); }
+        return ecgPanel();
+      }
+      case 'ecg-panel': return ecgPanel();
+      case 'shot-view': { const e = ecgOf(d.where); if (e) viewLocal(e, +d.i); return; }
+      case 'acq': return acqDialog(d.where);
+      case 'acq-save': return acqSave(d.where);
+      case 'send': return sendDraft();
+      case 'open': return openCase(d.cad);
+      case 'open-done': return openDone(d.cad);
+      case 'summary': { const r = cur(); if (r && !r.hopen && !RULES.isClosed(r.state)) send('hopen'); return go('summary'); }
+      case 'sum-back': return go('case');
+      case 'sum-img': case 'ecg-view': { const r = cur(); if (r) CLIN.showFull(r, +d.n, +d.i); return; }
+      case 'vitals': return vitalsDialog();
+      case 'vitals-save': return vitalsSave();
+      case 'treat': return treatDialog();
+      case 't-k': if (TD) { TD.k = d.v; TD.opt = null; treatSync(); } return;
+      case 't-o': if (TD) { TD.opt = d.v; treatSync(); } return;
+      case 'treat-save': return treatSave();
+      case 'ecg-new': return ecgNew();
+      case 'ecg-send': return ecgSend();
+      case 'img-add-sent': return addImageSent(+d.n);
+      case 'complete': return complete();
+      case 'complete-go': return completeGo(t);
+      case 'dec-ack': { const r = S.cases.get(d.cad); modal.close(); if (r) queue({ kind: 'op', cad: r.cad, op: op(r.cad, 'decack', { id: d.id }) }); setTimeout(outcomes, 50); return; }
+      case 'er-ack': { const r = S.cases.get(d.cad); modal.close(); if (r) queue({ kind: 'op', cad: r.cad, op: op(r.cad, 'erack') }); setTimeout(outcomes, 50); return; }
+    }
+  }
+  document.addEventListener('click', e => {
+    const t = e.target.closest('[data-act]');
+    if (!t || t.disabled || t.getAttribute('aria-disabled') === 'true') return;
+    if (t.tagName === 'A') e.preventDefault();
+    act(t.dataset.act, t);
   });
-}
-/* create the case on the platform under the CAD number the EMT entered. Resolves true when it exists (created now, or by an
-   earlier attempt of this tablet), false when the number must be corrected or the existing case opened; rejects without a
-   connection (the normal failure route then applies) */
-let creating=null;
-function ensureCase(){
-  const c=CASE;
-  if(!c||c.srv!==false)return Promise.resolve(true);
-  if(creating)return creating;
-  creating=LIVE.request('POST','/api/cases',{cad:c.cad,cid:c.cid,openedAt:c.openedAt,hist:c.cadHist}).then(x=>{
-    const b=x.body||{};
-    if(x.status===200||x.status===201){
-      c.srv=true;c.cadDup=null;c.cad=b.cad;CAD=b.cad;OUTQ.forEach(o=>{o.cad=b.cad});
-      if(CASE===c&&b.rec&&b.rec.cad===CAD)SRV=b.rec;
-      ev(`Case created on the platform under CAD #${b.cad} · no existing case with this number`,'Platform');
-      saveLocal();setT(0,()=>{pumpImgs();flush()});return true;
+  document.addEventListener('input', e => {
+    const t = e.target;
+    if (t.id === 'hq') { S.histQ = t.value; clearTimeout(hT); hT = setTimeout(loadHist, 250); return; }
+    if (t.dataset && t.dataset.md && S.draft) return mdInput(t);
+    if (t.id === 'cadin' && S.draft) {
+      S.draft.cadIn = t.value; S.draft.cadOk = false;
+      const er = $('#cad-err'); if (er && !er.hidden) { er.hidden = true; t.removeAttribute('aria-invalid'); }
+      saveLocal();
     }
-    if(x.status===409&&b.code==='exists'){c.cadDup=true;layer={t:'dup',cad:b.cad,ex:b.existing};return false}
-    if(x.status===400){c.cadDup=true;c.cadEdit={val:c.cad,err:b.error||CADN.MSG,detail:b.detail||'',busy:false};layer=null;return false}
-    throw new Error('HTTP '+x.status);
-  }).finally(()=>{creating=null});
-  return creating;
-}
-/* the platform did not take the case under this CAD number: the ECG goes back to the tablet as the unsent draft, nothing lost */
-function unsend(e){
-  const c=CASE;if(!c)return;
-  const i=c.ecgs.indexOf(e);if(i>=0)c.ecgs.splice(i,1);
-  delete e.tx;delete e.aiR;c.draft=e;c.failure=null;
-  const dup=layer&&layer.t==='dup';
-  ev(`ECG ${e.n} not sent: ${dup?`CASE ALREADY EXISTS under CAD #${c.cad}`:'the CAD number needs correcting'}`,'Platform');
-  deriveState();saveLocal();
-  if(dup){view='C-05';render();renderLayer()}else{view='CAD';render();focusCad()}
-}
-function uploadImg(x,onP){
-  if(x.imageId)return Promise.resolve();
-  return LIVE.upload(dataUrlToBlob(x.img),{cad:CAD,src:x.src==='file'?'file':'gen'},onP).then(r=>{x.imageId=r.id;x.url=r.url;x.img=r.url;saveLocal()});
-}
-async function uploadEcg(e){
-  const L=e.imgs;
-  for(let k=0;k<L.length;k++){await uploadImg(L[k],f=>{e.tx.pct=Math.round((k+f)/L.length*100);renderRail()});e.tx.pct=Math.round((k+1)/L.length*100);renderRail()}
-}
-/* an image added after sending is uploaded, then its action is sent; without a connection both wait and go in order on reconnection */
-let PENDIMG=[],pumping=false;
-async function pumpImgs(){
-  if(pumping||!SC.online||!CASE||localOnly())return;pumping=true;
-  try{
-    while(PENDIMG.length&&SC.online){
-      const p=PENDIMG[0],e=CASE.ecgs[p.n-1],x=e&&e.imgs.find(y=>y.i===p.i);
-      if(!x){PENDIMG.shift();continue}
-      await uploadImg(x);
-      x.opId=op('img',{n:e.n,img:{i:x.i,kind:x.kind,q:x.q,at:x.at,imageId:x.imageId}}).id;PENDIMG.shift();saveLocal();renderMain();
+  });
+  document.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.id === 'cadin') { e.preventDefault(); cadContinue(); } });
+  $('#file-camera').addEventListener('change', fileChosen);
+  $('#file-pick').addEventListener('change', fileChosen);
+
+  /* ---------- the link to the platform ---------- */
+  function onMsg(m) {
+    switch (m.t) {
+      case 'init':
+        UI.setClock(m.now); S.started = true;
+        /* the test data was reset: anything waiting for a case that no longer exists is dropped; the unsent case stays */
+        if (S.epoch && S.epoch !== m.epoch) { S.out = []; S.ecgd = {}; S.cases.clear(); S.hist = null; S.histAsked = false; if (S.draft) S.draft.send = null; if (S.view !== 'draft') S.view = 'home'; }
+        S.epoch = m.epoch; saveLocal(); return;
+      case 'cfg': S.sim = m.sim || S.sim; return;
+      case 'cases': S.cases = new Map(m.list.map(r => [r.cad, r])); m.list.forEach(r => { S.prevState[r.cad] = r.state; }); break;
+      case 'case': {
+        const was = S.prevState[m.cad];
+        if (m.rec) {
+          S.cases.set(m.cad, m.rec); S.prevState[m.cad] = m.rec.state;
+          if (was && was !== 'draft' && was !== m.rec.state && !(S.view === 'case' && S.cad === m.cad)) toast(`CAD #${m.cad}: ${RULES.label(m.rec.state, ROLE)[0]}`);
+          if (RULES.isClosed(m.rec.state) && !RULES.isClosed(was || 'draft')) { S.hist = null; S.histAsked = false; loadHist(); }
+        } else { S.cases.delete(m.cad); if (S.cad === m.cad && !S.stat) toast(`CAD #${m.cad} is no longer on this tablet (taken off by the test console).`); }
+        break;
+      }
+      case 'net':
+        S.up = m.up;
+        if (S.up) { pump(); if (S.draft && S.draft.send && S.draft.send.stage === 'queued') setTimeout(sendDraft, 300); }
+        break;
+      case 'hb': UI.setClock(m.at); if (S.out.length) pump(); return;
+      default: return;
     }
-  }catch(_){}finally{pumping=false}
-}
-const ecgPayload=e=>({n:e.n,acq:e.acq,variant:e.v,pri:e.pri,same:e.n>2,timeWhy:e.timeWhy||null,imgs:e.imgs.map(x=>({i:x.i,kind:x.kind,q:x.q,at:x.at,imageId:x.imageId}))});
-function mdPayload(){const o={};MD.forEach(f=>{const a=CASE.md[f.k];o[f.k]={v:mdText(f.k,a),raw:a,t:a&&a.at||CASE.mdAt||now()}});return o}
-function deliverEcg(e,late){
-  if(!SC.online){e.tx.stage='fail';fail(e);return}
-  const first=e.n===1;
-  e.tx.stage='wait';
-  e.tx.opId=op(first?'submit':'ecg',{sendAt:e.tx.subAt,ecg:ecgPayload(e),md:first?mdPayload():undefined,late:!!late,ev:first?[{t:CASE.mdAt||now(),text:'Minimum dataset entered'}]:undefined}).id;
-  if(first)MD.forEach(f=>{CASE.mdh[f.k]=[{a:CASE.md[f.k],t:CASE.md[f.k]&&CASE.md[f.k].at||CASE.mdAt||now(),kind:'sent'}]});
-  renderRail();
-}
-function received(e,rcv){
-  const c=CASE;e.tx.stage='rcv';e.tx.rcvAt=rcv;
-  ev(e.tx.late?`Delivered late – downtime route already in use · ECG ${e.n}`:`Platform received ECG ${e.n}${nImgs(e)}${e.n===1?' and the case':''}`,'Platform',rcv);
-  if(e.n===1){c.waitFrom=rcv;if(!c.dest)c.dest={st:'finding'}}
-  else if(c.alert)ev(`${c.alert.who}'s screen updated: ECG ${e.n} added to the case (no alarm)`,'Platform',rcv);
-}
-function fail(e){
-  const c=CASE;c.failure={n:e.n,at:now(),attempts:1,last:now(),ackAt:null,late:null};
-  ev(`Transmission failed · ECG ${e.n} · downtime instruction shown`,'Tablet');
-  layer={t:'fail'};deriveState();render();renderLayer();
-}
-/* the automatic retry after a failed Send: upload what is missing, then deliver. The case is marked delivered late,
-   because the crew was already told to use the downtime route */
-let retrying=false;
-function late(){
-  const c=CASE;if(!c||!c.failure||c.failure.late||retrying)return;
-  const e=c.ecgs[c.failure.n-1];retrying=true;
-  ensureCase().then(ok=>ok?uploadEcg(e).then(()=>true):false).then(ok=>{retrying=false;if(CASE!==c)return;
-    if(!ok){if(layer&&layer.t==='fail')layer=null;unsend(e);return}
-    if(c.failure.late)return;c.failure.late=now();
-    e.tx.conAt=e.tx.conAt||now();e.tx.upAt=e.tx.upAt||now();e.tx.pct=100;e.tx.late=true;
-    if(layer&&layer.t==='fail'){layer=null;renderLayer()}
-    view='WS';render();deliverEcg(e,true)},()=>{retrying=false});
-}
-
-/* ---------- reading the shared record: what the platform and the cardiologist did reaches the crew here ---------- */
-function deriveState(){
-  const c=CASE;if(!c)return;const d=lastDec(),e1=c.ecgs[0],L=c.life||{};
-  /* the STEMI pathway closes on NOT STEMI (automatically) or with COMPLETE STEMI PATHWAY (internal status: closed) */
-  if(c.cancelled)c.state='CANCELLED';
-  else if(L.closed)c.state=L.closed.kind==='not-stemi'?'NOT STEMI — PATHWAY CLOSED':'STEMI PATHWAY COMPLETED';
-  else if(c.failure&&!c.failure.late)c.state='TRANSMISSION FAILED';
-  else if(d)c.state=d.k==='confirm'?'CONFIRMED STEMI':d.k==='not'?'NOT STEMI':(c.ecgs.some(x=>x.tx.rcvAt>d.at)?'UNDER REVIEW':'REPEAT ECG REQUESTED');
-  else if(c.ack)c.state='UNDER REVIEW';
-  else if(e1&&e1.tx.rcvAt)c.state=e1.tx.late?'DOWNTIME CASE':'AWAITING CARDIOLOGIST';
-  else if(e1)c.state='TRANSMITTING';
-  else c.state='DRAFT';
-}
-const lastOf=a=>a&&a.length?a[a.length-1]:null;
-const lifeOf=S=>({hopen:S.hopen||null,closed:S.closed||null});
-function applySnap(){
-  const c=CASE,S=SRV;if(c&&S){const was=c.life&&c.life.closed;c.life=lifeOf(S);
-    /* closed (handover completed): the case is read-only and leaves the active list */
-    if(c.life.closed&&!was&&view!=='C-01'&&view!=='HIST'){view='C-01';layer=null;$('#layer').innerHTML='';HLIST=null}}
-  if(!c||!S||!S.sub){if(c)deriveState();refreshAll();return}
-  c.ecgs.forEach(e=>{
-    const s=S.ecgs[e.n-1];if(!s)return;
-    if(s.rcv&&!e.tx.rcvAt){received(e,s.rcv);c.aiSel=null}
-    /* the platform's analysis of this ECG, exactly as the cardiologist receives it. A later ECG's analysis is a new
-       analysis: it is marked NEW and the earlier one stays, one tap away and in the case timeline */
-    if(s.ai){const st=s.ai.st,was=e.aiR&&e.aiR.st;e.aiR=s.ai;
-      if(st!==was&&st!=='proc'){
-        const k=e.n>1?`New ECG analysis · ECG ${e.n}`:`AI ECG interpretation · ECG ${e.n}`;
-        ev(st==='down'?`AI interpretation unavailable · ECG ${e.n}`:st==='wh'?`AI interpretation limited — ECG quality insufficient · ECG ${e.n} · no interpretation`:`${k}${st==='lim'?' · limited by ECG quality':''}: ${s.ai.imp}${e.n>1?` The analysis of ECG ${e.n-1} is kept.`:''}`,'AI service (decision support)',s.ai.done);
-        c.aiSel=null;if(e.n>1)c.aiNew=e.n;}
-      if((st==='lim'||st==='wh')&&!e.repFlag){e.repFlag=1;c.repeatAsked=true;c.repeatFor=e.n;c.repeatSent=false}}
-  });
-  const d0=S.dest[0];
-  if(d0&&(!c.dest||c.dest.st==='finding')){c.dest={st:'rec',hosp:d0.hosp,reason:d0.reason,recAt:d0.t};ev(`Provisional destination recommended: ${HOSP[d0.hosp].name}`,'Destination engine',d0.t)}
-  if(S.alert){
-    if(!c.alert){c.alert={at:S.alert.at,who:S.alert.who,hosp:S.alert.hosp};ev(`Cardiologist alerted: ${S.alert.who}, on duty, ${HOSP[S.alert.hosp].name}`,'Platform',S.alert.at)}
-    S.alert.rem.forEach(t=>{if(!c.rem.includes(t)){c.rem.push(t);ev(`Reminder sent to ${S.alert.who}: case not yet acknowledged`,'Platform',t)}});
-    S.alert.esc.forEach(x=>{if(!c.esc.some(y=>y.at===x.t)){const t=x.lv===1?'Backup cardiologist alerted':'ACC duty officer alerted';c.esc.push({t,who:x.to,at:x.t});ev(`Escalation level ${x.lv}: ${t}`,'Platform',x.t)}});
+    render();
   }
-  if(S.ack&&!c.ack){c.ack={at:S.ack,who:S.alert.who};ev(`${S.alert.who} acknowledged the case`,S.alert.who,S.ack)}
-  if(S.opened&&!c.opened){c.opened=S.opened;ev(`${S.alert.who} opened the ECG · reviewing`,S.alert.who,S.opened)}
-  S.dec.forEach(x=>{
-    const y=c.decs.find(z=>z.id===x.id);
-    if(y){y.crewAck=x.crewAck||y.crewAck;y.dlv=x.dlv;return}
-    const nd={...x};c.decs.push(nd);
-    ev(`Decision received: ${DECL[x.k]} · ${x.by}`,x.byT||x.by,x.at);
-    if(x.k==='repeat'){c.repeatAsked=true;c.repeatFor=c.ecgs.length;c.repeatSent=false}
-    op('decrcv',{id:x.id});
-    /* an entry the crew is typing is kept and comes back after the decision is acknowledged */
-    if(layer&&['md','rec','eta','dest'].includes(layer.t))c.held=layer;
-    layer={t:'dec',id:x.id};c.addTo=null;c.recap=null;
-    if(view==='C-04'&&!c.draft)view=c.ecgs.length?'WS':view;
-    renderLayer();
-  });
-  deriveState();refreshAll();
-}
-function refreshAll(){
-  if(view==='WS'){renderRail();renderMain()}else if(view==='C-01'||view==='HO')render();else renderTop();
-}
-
-/* ---------- actions ---------- */
-const unsent=()=>{view='C-05';render();toast(`ECG ${CASE.draft.n} is not sent yet. The prototype holds one unsent ECG at a time, so it opens ECG ${CASE.draft.n}.`,true)};
-function mdPost(k,a,kind){
-  const c=CASE,t=a&&a.at?a.at:now(),v={a,t,kind,opId:null};
-  c.md[k]=a;
-  const h=c.mdh[k]||(c.mdh[k]=[]),prev=h[h.length-1];
-  v.opId=op('md',{k,v:mdText(k,a),raw:a,at:t,kind,why:kind==='correct'?'Correction of an earlier entry':''}).id;
-  h.push(v);
-  ev(`${MDK[k].label} ${kind==='correct'?'corrected':kind==='clarify'?'clarified':'updated'}: ${mdText(k,a)}${prev?` (earlier ${mdText(k,prev.a)} kept)`:''}`,ME,now());
-  touch();
-}
-function closeMd(a){
-  const L=layer;
-  if(L.post){mdPost(L.k,a,L.post);layer=null;renderLayer();renderMain();renderRail();return}
-  CASE.md[L.k]=a;touch();layer=null;renderLayer();render();
-}
-function act(a,el){
-  const c=CASE;const d=el.dataset;
-  switch(a){
-  case 'home':view='C-01';render();break;
-  case 'open-path':
-    /* the case starts on this tablet; the EMT enters the CAD number next. The platform creates the case under it at Send */
-    clearTimers();CASE=newCase();CAD='';SRV=null;OUTQ=[];PENDIMG=[];layer=null;$('#layer').innerHTML='';
-    ev('STEMI pathway opened on this tablet · CAD number to be entered by the crew',ME);
-    view='CAD';saveLocal();render();focusCad();break;
-  case 'new-case':layer={t:'newcase'};renderLayer();break;
-  case 'newcase-go':if(OUTQ.length||PENDIMG.length)break;layer=null;renderLayer();act('open-path',el);break;
-  case 'open-case':view=!c.cad?'CAD':c.ecgs.length?'WS':c.draft?'C-05':'C-04';focus='C-07';render();if(view==='CAD')focusCad();break;
-  case 'cad-edit':if(c&&!cadLocked()){view='CAD';render();focusCad()}break;
-  /* ---------- transport, arrival, handover ---------- */
-  case 'handover':if(!c||!c.ecgs.length)break;view='HO';render();break;
-  case 'ho-back':view='WS';render();break;
-  case 'ho-img':{const S=view==='HIST'?HREC:SRV,e=S&&S.ecgs[Number(d.n)-1];if(!e)break;const x=e.imgs.find(i=>i.i===e.pri)||e.imgs[0];
-    layer={t:'hoimg',url:x.url,label:`ECG ${e.n} · acquired ${hm(e.acq)} · primary image`};renderLayer();break;}
-  case 'ho-complete':{const d0=SRV&&lastOf(SRV.dec);if(!SRV||!SRV.sub||SRV.closed||!d0||d0.k!=='confirm')break}layer={t:'hoconfirm'};renderLayer();break;
-  case 'ho-close':{
-    if(!SC.online||OUTQ.length){layer.err='Waiting for the connection and for your latest entries to be sent. Try again in a moment.';renderLayer();break}
-    layer.busy=true;layer.err='';renderLayer();
-    LIVE.request('POST','/api/cases/close',{cad:CAD}).then(x=>{const b=x.body||{};
-      if(x.status===200&&b.ok){layer=null;renderLayer();c.life={...c.life,closed:{at:now(),by:`${ME}, ${ROLE}`}};deriveState();view='C-01';HLIST=null;render();
-        toast(`<b>STEMI pathway completed.</b> CAD #${esc(b.cad)} is now under Completed cases, read-only.`,true);return}
-      layer={t:'hoconfirm',err:b.missing?b.missing.join(', '):(b.error||'The STEMI pathway could not be completed.')};renderLayer();
-    },()=>{layer={t:'hoconfirm',err:'No connection: the STEMI pathway could not be completed. Try again.'};renderLayer()});
-    break;}
-  case 'hist-open':{const cad=d.cad;HREC=null;view='HIST';render();
-    LIVE.request('GET','/api/cases/view?cad='+encodeURIComponent(cad)).then(x=>{if(x.status===200){HREC=x.body.rec;if(view==='HIST')render()}else toast('This completed case could not be opened.',true)},()=>toast('No connection.',true));break;}
-  case 'hist-back':view='C-01';HREC=null;render();break;
-  case 'cad-ok':{
-    if(!c||cadLocked()||c.cadEdit.busy)break;
-    const inp=$('#cadin');if(inp)c.cadEdit.val=inp.value;
-    const r=CADN.check(c.cadEdit.val);
-    /* an invalid number shows an inline message; nothing else on the case is touched */
-    if(!r.ok){c.cadEdit={...c.cadEdit,err:r.error,detail:r.detail};render();focusCad();break}
-    c.cadEdit.val=r.cad;
-    if(r.cad===c.cad&&!c.cadDup){cadAccept(c,r.cad);break}
-    if(!SC.online){cadAccept(c,r.cad,true);break}
-    c.cadEdit={...c.cadEdit,busy:true,err:'',detail:''};render();
-    LIVE.request('GET','/api/cases/check?cad='+encodeURIComponent(r.cad)).then(x=>{
-      c.cadEdit.busy=false;if(CASE!==c)return;
-      const b=x.body||{};
-      if(x.status!==200){cadAccept(c,r.cad,true);return}
-      if(!b.ok){c.cadEdit={...c.cadEdit,err:b.error||CADN.MSG,detail:b.detail||''};render();focusCad();return}
-      if(b.exists){render();layer={t:'dup',cad:b.cad,ex:b.existing};renderLayer();return}
-      cadAccept(c,b.cad);
-    },()=>{c.cadEdit.busy=false;if(CASE===c)cadAccept(c,r.cad,true)});
-    break;}
-  case 'dup-fix':{
-    const v=layer&&layer.cad;layer=null;renderLayer();if(!c)break;
-    c.cadEdit={val:v||c.cadEdit.val,err:`CASE ALREADY EXISTS under CAD #${v}.`,detail:'Check the CAD number on the MDT and correct it, or open the existing case.',busy:false};
-    view='CAD';render();focusCad();break;}
-  case 'dup-open':{
-    const v=layer&&layer.cad;if(!v)break;
-    if(!SC.online){toast('No connection: the existing case cannot be opened now.',true);break}
-    LIVE.request('POST','/api/cases/open',{cad:v}).then(x=>{
-      const b=x.body||{};
-      if(x.status!==200||!b.ok){toast(esc(b.error||'The existing case could not be opened.'),true);return}
-      /* the existing case replaces this tablet's unsent draft; nothing is created or overwritten on the platform */
-      clearTimers();layer=null;renderLayer();CASE=null;SRV=null;OUTQ=[];PENDIMG=[];CAD=b.cad;
-      try{localStorage.removeItem(LSK)}catch(_){}
-      if(b.rec&&b.rec.cad===CAD&&b.rec.path){SRV=b.rec;CASE=hydrate(SRV);applySnap()}
-      view=CASE&&CASE.ecgs.length?'WS':'C-01';render();saveLocal();
-      toast(`<b>Existing case CAD #${esc(b.cad)} opened.</b> No second case was created.`,true);
-    },()=>toast('No connection: the existing case cannot be opened now.',true));
-    break;}
-  case 'show-note':break;
-  case 'step':{
-    const k=d.k;
-    if(k==='CAD'){if(!cadLocked()){view='CAD';render();focusCad()}break}
-    if(k==='C-03'){view='C-03';render();break}
-    if(k==='C-04'){view=c.draft&&c.draft.imgs.length>=MAXI?'C-05':c.draft?'C-05':'C-04';render();break}
-    if(k==='C-05'){view=c.draft?'C-05':'C-04';render();break}
-    break;}
-  case 'set':c.md[d.k]={v:d.k==='gcs'?Number(d.v):d.v};touch();render();break;
-  case 'nv':c.md[d.k]=c.md[d.k]&&c.md[d.k].nv===d.v?null:{nv:d.v};touch();render();break;
-  case 'open':openMd(d.k);break;
-  case 'mdup':openMd(d.k,VIT.includes(d.k)?'update':'clarify');break;
-  case 'post-kind':layer.post=d.v;renderLayer();break;
-  case 'nvclose':if(layer&&layer.post){closeMd({nv:d.v,at:now()});break}c.md[d.k]={nv:d.v};touch();layer=null;renderLayer();render();break;
-  case 'part':layer.pi=Number(d.i);renderLayer();break;
-  case 'est':layer.est=!layer.est;renderLayer();break;
-  case 'approx':layer.approx=!layer.approx;renderLayer();break;
-  case 'at':layer.at=Number(d.d)===0?now():layer.at+Number(d.d)*MIN;if(layer.at>now())layer.at=now();renderLayer();break;
-  case 'tq':layer.tm=rmin(now()-Number(d.m)*MIN);if(layer.t==='md')layer.approx=Number(d.m)>0;renderLayer();break;
-  case 'tstep':layer.tm=Math.min(rmin(now())+(layer.t==='etime'?MIN:0),layer.tm+Number(d.m)*MIN);renderLayer();break;
-  case 'md-done':{
-    const L=layer;
-    if(L.k==='onset'){closeMd({v:L.tm,approx:L.approx});break}
-    if(!filled(L))break;if(partsErr(L,true)){L.tried=true;renderLayer();break}const v=L.parts.map(p=>Number(p.v));
-    if(L.k==='age')closeMd({v:v[0],est:L.est});if(L.k==='bp')closeMd({sys:v[0],dia:v[1],at:L.at});
-    if(L.k==='hr')closeMd({v:v[0],at:L.at});if(L.k==='spo2')closeMd({v:v[0],at:L.at});
-    break;}
-  case 'cpick':
-    if(d.v==='oth'||layer.post){layer.sel=d.v;renderLayer();if(d.v==='oth'){const i=$('#cdet');if(i)i.focus()}break}
-    c.md.complaint={v:d.v,det:layer.det.trim()};touch();layer=null;renderLayer();render();break;
-  case 'c-done':closeMd({v:layer.sel,det:layer.det.trim()});break;
-  case 'gcs':if(layer&&layer.post){closeMd({v:Number(d.v),at:now()});break}c.md.gcs={v:Number(d.v)};touch();layer=null;renderLayer();render();break;
-  case 'sexpick':layer.sel=d.v;renderLayer();break;
-  case 'sex-done':closeMd({v:layer.sel});break;
-  case 'light':SC.light=!SC.light;render();break;
-  case 'cam-cancel':if(c.recap)endRecap();c.addTo=null;view=c.draft?'C-05':c.ecgs.length?'WS':'C-01';c.nextN=null;render();break;
-  case 'upload':pickFile();break;
-  case 'shoot':{
-    const f=$('#flash');if(f&&!RM.matches){f.classList.remove('go');void f.offsetWidth;f.classList.add('go')}
-    setT(RM.matches?0:180,()=>{if(c.addTo){captureSent(a);return}capture();touch();view='C-05';render()});break;}
-  case 'recapture':if(c.draft){const e=c.draft,s=selImg(e);ev(`ECG ${e.n} image ${s.i} capture discarded before sending`,ME);
-      c.recap={n:e.n,i:s.i,pri:s.i===e.pri};e.imgs=e.imgs.filter(x=>x!==s);if(!e.imgs.length)c.draft=null}
-    view='C-04';render();break;
-  case 'sel-img':c.draft.sel=Number(d.i);render();focusSel();break;
-  case 'make-pri':{const e=c.draft,s=selImg(e);e.pri=s.i;ev(`ECG ${e.n} image ${s.i} made primary`,ME);touch();render();focusSel();break}
-  case 'rm-img':removeImg();touch();render();focusSel();break;
-  case 'add-img':view='C-04';render();break;
-  case 'add-sent':if(c.draft){unsent();break}c.addTo=Number(d.n);view='C-04';render();break;
-  case 'zoom':layer={t:'zoom'};renderLayer();break;
-  case 'ecg-time':layer={t:'etime',tm:rmin(c.draft.time||ecgAt(c.draft)),why:null,text:''};renderLayer();break;
-  case 'ewhy':layer.why=d.v;renderLayer();break;
-  case 'esave':c.draft.time=layer.tm;c.draft.timeWhy=layer.why==='Other'?layer.text.trim():layer.why+(layer.text.trim()?': '+layer.text.trim():'');ev(`ECG ${c.draft.n} time changed to ${hm(layer.tm)} · reason: ${c.draft.timeWhy}`,ME);touch();layer=null;renderLayer();render();break;
-  case 'send':
-    if(!c.cad){c.cadEdit={...c.cadEdit,err:CADN.MSG,detail:'The CAD number is empty.'};view='CAD';render();focusCad();break}
-    if(MD.every(f=>c.md[f.k]))send();break;
-  case 'add-ecg':case 'repeat':
-    if(c.draft){unsent();break}
-    c.addTo=null;c.nextN=c.ecgs.length+1;view='C-04';render();break;
-  case 'show-fail':layer={t:'fail'};renderLayer();break;
-  case 'fail-ack':c.failure.ackAt=now();op('downtime',{},c.failure.ackAt);ev('Downtime route in use · confirmed on the tablet',ME);layer=null;renderLayer();render();break;
-  case 'show-dec':{const x=lastDec();if(x){layer={t:'dec',id:x.id};renderLayer()}break}
-  case 'dec-ack':case 'dec-ack-rep':{
-    const x=c.decs.find(z=>z.id===layer.id);if(x&&!x.crewAck){x.crewAck=now();op('decack',{id:x.id},x.crewAck);ev(`Decision acknowledged: ${DECL[x.k]}`,ME)}
-    layer=null;
-    if(a==='dec-ack-rep'){c.held=null;renderLayer();act('repeat',el);break}
-    if(c.life&&c.life.closed){view='C-01';c.held=null;render();renderLayer();break}
-    view='WS';render();layer=c.held||null;c.held=null;renderLayer();break;}
-  case 'dest-accept':{const h=c.dest.hosp;c.dest={...c.dest,st:'conf',at:now(),by:ME};op('dest',{hosp:h,st:'conf'});ev(`Destination confirmed: ${HOSP[h].name} · by ${ME} · ACC notified`,ME);renderMain();renderRail();toast(`Destination confirmed: ${HOSP[h].name}. ACC notified.`);break}
-  case 'dest-change':layer={t:'dest',pick:null,why:null,text:''};renderLayer();break;
-  case 'dpick':layer.pick=d.v;renderLayer();break;
-  case 'dwhy':layer.why=d.v;renderLayer();break;
-  case 'dconfirm':{
-    const L=layer,prev=c.dest.hosp,why=L.why==='Other'?L.text.trim():L.why+(L.text.trim()?': '+L.text.trim():'');
-    c.dest={...c.dest,st:'conf',hosp:L.pick,from:prev,why,at:now(),by:ME};
-    op('dest',{hosp:L.pick,st:'chg',why,from:prev});
-    ev(`Destination changed: ${HOSP[prev].name} to ${HOSP[L.pick].name} · reason: ${why}`,ME);
-    if(c.eta){c.eta={...c.eta,min:HOSP[L.pick].eta,upd:now()};op('eta',{min:c.eta.min,why:'upd'})}
-    layer=null;renderLayer();render();toast(`Destination changed to ${HOSP[L.pick].name}. ACC notified.`);break;}
-  case 'depart':{const h=HOSP[c.dest.hosp];c.eta={dep:now(),min:h.eta,upd:null};op('eta',{min:h.eta,dep:c.eta.dep,why:'dep'});ev(`Departed scene · ETA ${h.eta} min`,ME);renderMain();renderRail();break}
-  case 'eta':layer={t:'eta',min:c.eta.min};renderLayer();break;
-  case 'eta-step':layer.min=Math.max(1,layer.min+Number(d.m));renderLayer();break;
-  case 'eta-save':c.eta={...c.eta,min:layer.min,upd:now()};op('eta',{min:layer.min,why:'upd'});ev(`ETA updated: ${layer.min} min`,ME);layer=null;renderLayer();renderMain();break;
-  case 'to-dest':focus='C-07b';syncNote();scrollToRegion('C-07b');break;
-  case 'to-ai':focus='C-07d';c.aiNew=null;renderMain();renderRail();syncNote();scrollToRegion('C-07d');break;
-  case 'ai-sel':c.aiSel=Number(d.n);c.aiNew=null;renderMain();renderRail();break;
-  case 'rec':openRec(d.id);break;
-  case 'ropt':{const it=RECK[layer.id],o=it.opts[Number(d.i)];layer.opt=Number(d.i);
-    if(o.dose!==undefined&&!layer.dose)layer.dose=o.dose;if(o.def&&!layer.text)layer.text=o.def;
-    if(o.num)Object.assign(layer,{parts:[{v:'',max:o.dec?3:2,dec:!!o.dec,rule:RULE[layer.id]}],pi:0,unit:o.num,slash:false,bp:null,tried:false});
-    if(o.vitals)Object.assign(layer,{parts:[{v:'',max:3,lab:'BP sys',rule:RULE.sys},{v:'',max:3,lab:'BP dia',rule:RULE.dia},{v:'',max:3,lab:'HR',rule:RULE.hr},{v:'',max:3,lab:'SpO₂',rule:RULE.spo2}],pi:0,unit:'',slash:false,bp:0,tried:false});
-    if(o.tpick&&!layer.tm)layer.tm=rmin(c.openedAt-MIN);
-    renderLayer();break;}
-  case 'rchip':layer.chips.has(d.v)?layer.chips.delete(d.v):layer.chips.add(d.v);renderLayer();break;
-  case 'rscore':layer.score=Number(d.v);renderLayer();break;
-  case 'rsave':saveRec();break;
-  case 'close':if(layer&&layer.t!=='fail'&&layer.t!=='dec'){layer=null;renderLayer()}break;
-  }
-}
-function openMd(k,post){
-  const a=CASE.md[k],f=MDK[k];
-  if(f.kind==='time'){layer={t:'md',k,tm:a&&!a.nv?a.v:rmin(now()),approx:a&&!a.nv?a.approx:false};}
-  else if(f.kind==='complaint')layer={t:'md',k,sel:a?a.v:null,det:a?a.det||'':''};
-  else if(f.kind==='gcs')layer={t:'md',k};
-  else if(f.kind==='sex')layer={t:'md',k,sel:null};
-  else if(k==='bp')layer={t:'md',k,parts:[{v:post==='update'?'':a&&!a.nv?String(a.sys):'',max:3,lab:'Systolic',rule:RULE.sys},{v:post==='update'?'':a&&!a.nv?String(a.dia):'',max:3,lab:'Diastolic',rule:RULE.dia}],pi:0,bp:0,unit:'mmHg',slash:true,at:post==='update'?now():a&&a.at?a.at:now()};
-  else layer={t:'md',k,parts:[{v:post==='update'?'':a&&!a.nv?String(a.v):'',max:3,rule:RULE[k]}],pi:0,unit:f.unit,est:a&&a.est,at:post==='update'?now():a&&a.at?a.at:now()};
-  if(post)layer.post=post;
-  renderLayer();
-}
-function openRec(id){
-  layer={t:'rec',id,opt:null,dose:'',text:'',chips:new Set(),score:null,at:now(),parts:[],pi:0};
-  if(RECK[id].opts.length===1)act('ropt',{dataset:{i:'0'}});else renderLayer();
-}
-function saveRec(){
-  const L=layer,it=RECK[L.id],o=it.opts[L.opt];if(!recOk(L))return;
-  if((o.num||o.vitals)&&partsErr(L,true)){L.tried=true;renderLayer();return}
-  if(L.id==='obs'){
-    /* a full set adds a new reading to BP, HR and SpO₂; nothing is replaced */
-    const v=L.parts.map(p=>Number(p.v)),at=L.at;layer=null;
-    mdPost('bp',{sys:v[0],dia:v[1],at},'update');mdPost('hr',{v:v[2],at},'update');mdPost('spo2',{v:v[3],at},'update');
-    renderLayer();renderMain();renderRail();return;
-  }
-  const prev=CASE.rec[L.id];
-  const r={sum:o.nv?o.l:o.sum(L),nv:!!o.nv,at:now(),count:(prev&&it.multi?prev.count:0)+1,prev:prev&&!it.multi?[...(prev.prev||[]),{sum:prev.sum,at:prev.at}]:[]};
-  r.opId=op('rec',{k:L.id,label:it.label,group:REC.find(g=>g.items.includes(it)).g,v:r.sum,nv:r.nv,at:o.time?L.at:r.at,multi:!!it.multi,ev:it.ev}).id;
-  CASE.rec[L.id]=r;ev(it.ev,ME);touch();layer=null;renderLayer();renderMain();renderRail();
-}
-function key(k){
-  if(layer&&layer.parts&&layer.parts.length){
-    const L=layer,P=L.parts[L.pi];
-    if(k==='del'){if(P.v)P.v=P.v.slice(0,-1);else if(L.pi>0)L.pi--}
-    else if(k==='/'||k==='Next'){if(P.v&&L.pi<L.parts.length-1)L.pi++}
-    else if(k==='.'){if(P.v&&!P.v.includes('.'))P.v+='.'}
-    else if(P.v.replace('.','').length<(P.v.includes('.')?P.max:P.max)){P.v+=k;if(!P.dec&&P.v.length>=P.max&&L.pi<L.parts.length-1)L.pi++}
-    renderLayer();return;
-  }
-}
-
-/* ---------- the demonstration driver: the page asks, the tablet does it on screen as a crew member would ---------- */
-function typeIn(vals,then){
-  /* fills the open value drawer one part at a time, so the reviewer sees it entered */
-  let i=0;const stepF=()=>{if(!layer||!layer.parts)return;if(i>=vals.length){setT(650,then);return}layer.parts[i].v=vals[i];layer.pi=Math.min(i+1,layer.parts.length-1);i++;renderLayer();setT(380,stepF)};setT(450,stepF);
-}
-function cmd(k){
-  if(layer&&layer.t!=='dec'&&layer.t!=='fail'){layer=null;renderLayer()}
-  switch(k){
-  case 'open':if(!CASE)act('open-path',{dataset:{}});break;
-  case 'capture':if(!CASE)act('open-path',{dataset:{}});if(!CASE.draft){view='C-04';render();setT(700,()=>act('shoot',{dataset:{}}))}break;
-  case 'fill':{if(!CASE)return;
-    const ks=MD.filter(f=>!CASE.md[f.k]);if(!ks.length){if(CASE.draft){view='C-05';render()}break}
-    fillMd(now());CASE.mdAt=now();view=CASE.draft?'C-05':'C-03';render();toast('Minimum dataset entered: 54, male, chest pain, onset about 35 min ago, BP 118/74, HR 84, SpO₂ 96 %, GCS 15.',true);break;}
-  case 'send':if(CASE&&CASE.draft&&MD.every(f=>CASE.md[f.k])){view='C-05';render();setT(500,()=>send())}break;
-  case 'bp':if(!CASE||!CASE.ecgs.length)return;view='WS';render();scrollToRegion('C-07a');setT(300,()=>{openMd('bp','update');typeIn(['94','60'],()=>act('md-done',{dataset:{}}))});break;
-  case 'aspirin':if(!CASE||!CASE.ecgs.length)return;view='WS';render();scrollToRegion('C-07a');setT(300,()=>{openRec('asp');setT(500,()=>{act('ropt',{dataset:{i:'0'}});setT(900,()=>saveRec())})});break;
-  case 'ecg2':if(!CASE||!CASE.ecgs.length||CASE.draft)return;act('add-ecg',{dataset:{}});setT(900,()=>{act('shoot',{dataset:{}});setT(1600,()=>{if(CASE.draft)send()})});break;
-  case 'decack':if(layer&&layer.t==='dec')act('dec-ack',{dataset:{}});break;
-  }
-}
-
-/* ---------- messages from the live link to the platform server ---------- */
-function onMsg(m){
-  switch(m.t){
-  case 'init':clearTimers();T0=m.T0;base=m.base;CAD=m.cad||'';EPOCH=m.epoch||'';SRV=null;OUTQ=[];PENDIMG=[];lastSync=null;CASE=null;layer=null;view='C-01';$('#layer').innerHTML='';SC={...SC0,ids:SC.ids,orient:SC.orient,online:true};
-    restoreLocal();render();fit();if(CASE)resumeSends();break;
-  case 'clock':T0=m.T0;base=m.base;break;
-  case 'cfg':{SIMV={...SIMV,...m.sim};SC.quality=SIMV.q;const ids=!!m.sim.ids;if(ids!==SC.ids){SC.ids=ids;render();if(layer)renderLayer()}if(view==='C-04')render();break}
-  case 'snap':{
-    const rec=m.rec;lastSync=m.at;
-    /* a case that is still on this tablet only (not sent yet) is not the platform's active case: ignore that one */
-    if(localOnly()){SRV=null;refreshAll();break}
-    if(!CASE&&rec&&!creating)CAD=rec.cad;
-    SRV=rec&&rec.cad===CAD?rec:null;
-    /* a tablet that lost its own copy (another browser, cleared storage) rebuilds the case from the server's record */
-    if(!CASE&&SRV&&SRV.path){CASE=hydrate(SRV);if(CASE){view=CASE.ecgs.length&&!CASE.life.closed?'WS':'C-01';render()}}
-    applySnap();saveLocal();break;}
-  case 'hb':lastSync=m.at;$$('[data-tick="sync"]').forEach(el=>el.textContent='Last update '+hms(lastSync));break;
-  case 'net':{
-    const was=SC.online;SC.online=!!m.up;
-    if(!was&&SC.online){
-      const n=OUTQ.length+PENDIMG.length;
-      if(CASE)ev(n?`Reconnected · ${n} saved item${n>1?'s':''} sent in order`:'Reconnected','Tablet');
-      pumpImgs();flush();
-      if(CASE&&CASE.failure&&!CASE.failure.late)setT(400,late);
-    } else if(was&&!SC.online&&CASE)ev('Connection lost · saving on this tablet','Tablet');
-    render();if(layer)renderLayer();break;}
-  case 'cmd':cmd(m.k);break;
-  }
-}
-
-/* ---------- this tablet's own copy: "Saved on this tablet" survives a page refresh (drafts, unsent entries) ---------- */
-const LSK='stemi.crew.v1';
-let lastSaved='';
-function saveLocal(){
-  try{
-    if(!CAD&&!CASE)return;
-    const c=CASE?{...CASE,held:null}:null;
-    const s=JSON.stringify({cad:CAD,epoch:EPOCH,user:AU.id,CASE:c,OUTQ,PENDIMG});
-    if(s!==lastSaved){localStorage.setItem(LSK,s);lastSaved=s}
-  }catch(_){/* storage full or blocked: the server still has everything already sent */}
-}
-function restoreLocal(){
-  try{
-    const s=JSON.parse(localStorage.getItem(LSK)||'null');
-    const mine=s&&s.epoch===EPOCH&&s.user===AU.id;
-    /* a case not yet created on the platform (not sent) is kept whatever the platform's active case is: its CAD number is the crew's */
-    const own=mine&&s.CASE&&s.CASE.srv===false;
-    if(!mine||(!own&&s.cad!==CAD)){localStorage.removeItem(LSK);return}
-    if(own)CAD=s.CASE.cad||'';
-    CASE=s.CASE;OUTQ=s.OUTQ||[];PENDIMG=s.PENDIMG||[];
-    if(CASE){CASE.held=null;if(CASE.cadEdit)CASE.cadEdit.busy=false;view=CASE.ecgs.length&&!(CASE.life&&CASE.life.closed)?'WS':'C-01'}
-  }catch(_){CASE=null}
-}
-/* an ECG that was being uploaded when the page closed is not silently forgotten: it goes back through the failure route and retries */
-function resumeSends(){
-  const c=CASE;if(!c)return;
-  const e=c.ecgs.find(x=>!x.tx.rcvAt&&!x.tx.opId);
-  if(e&&!(c.failure&&!c.failure.late)){e.tx.stage='fail';fail(e)}
-}
-/* rebuild the crew's view of a case from the server's record (after Send everything is on the server) */
-function hydrate(S){
-  const c=newCase();c.openedAt=S.path.at;c.savedAt=S.path.at;
-  c.srv=true;c.cad=S.cad;c.cadAt=S.cadEntry&&S.cadEntry.at;c.cadEdit.val=S.cad;CAD=S.cad;c.life=lifeOf(S);
-  MD.forEach(f=>{const a=S.pt[f.k];if(a&&a.length){c.md[f.k]=a[a.length-1].raw;c.mdh[f.k]=a.map(x=>({a:x.raw,t:x.t,kind:x.kind,opId:x.op}))}});
-  if(S.sub){c.mdDone=true;c.mdAt=S.sub.send;c.waitFrom=S.sub.rcv}
-  c.ecgs=S.ecgs.map(s=>({n:s.n,acq:s.acq,v:s.variant,pri:s.pri,sel:s.pri,repFlag:1,
-    imgs:s.imgs.map(x=>({i:x.i,at:x.at,q:x.q,kind:x.kind,img:x.url,url:x.url,src:x.src,after:x.after,opId:x.after?x.op:undefined})),
-    tx:{stage:'rcv',subAt:s.sent,conAt:s.sent,upAt:s.sent,pct:100,rcvAt:s.rcv,late:!!(S.sub&&S.sub.late&&s.n===1),opId:s.op},aiR:s.ai}));
-  const d0=S.dest[S.dest.length-1];
-  if(d0)c.dest=d0.st==='rec'?{st:'rec',hosp:d0.hosp,reason:d0.reason,recAt:d0.t}:{st:'conf',hosp:d0.hosp,at:d0.t,by:d0.by===`${ME}, ${ROLE}`?ME:d0.by,from:d0.from,why:d0.why};
-  if(S.eta.length){const L=S.eta[S.eta.length-1],dep=S.eta.find(x=>x.dep);c.eta={dep:dep?dep.dep:L.t,min:L.min,upd:L.why==='upd'?L.t:null}}
-  Object.entries(S.rec).forEach(([k,r])=>{const it=RECK[k],v=r.vers,L=v[v.length-1];if(!L)return;
-    c.rec[k]={sum:L.v,nv:L.nv,at:L.rcv,count:v.length,prev:it&&it.multi?[]:v.slice(0,-1).map(x=>({sum:x.v,at:x.rcv})),opId:L.op}});
-  if(S.alert){c.alert={at:S.alert.at,who:S.alert.who,hosp:S.alert.hosp};c.rem=S.alert.rem.slice();c.esc=S.alert.esc.map(x=>({t:x.lv===1?'Backup cardiologist alerted':'ACC duty officer alerted',who:x.to,at:x.t}))}
-  if(S.ack)c.ack={at:S.ack,who:S.alert?S.alert.who:'Cardiologist'};
-  if(S.opened)c.opened=S.opened;
-  c.events=S.audit.filter(a=>a.kind!=='view').map(a=>({t:a.t,text:a.text,who:a.who}));
-  c.decs=S.dec.map(x=>({...x}));
-  const L=c.decs[c.decs.length-1];
-  if(L&&L.k==='repeat'&&!c.ecgs.some(e=>e.tx.rcvAt>L.at)){c.repeatAsked=true;c.repeatFor=c.ecgs.length;c.repeatSent=false}
-  if(!c.life.closed)c.decs.forEach(x=>{if(!x.dlv)setT(300,()=>op('decrcv',{id:x.id}))});
-  if(L&&!L.crewAck&&!c.life.closed)setT(350,()=>{if(CASE===c&&!layer){layer={t:'dec',id:L.id};renderLayer()}});
-  CASE=c;deriveState();
-  return c;
-}
-
-/* ---------- events ---------- */
-$('#device').addEventListener('click',ev0=>{
-  if(view==='WS'&&!layer){const r=ev0.target.closest('.rail,#r-dest,#r-vit,#r-rec,#r-ecgs,#r-ai,.rep,.decb');if(r){const f=r.id==='r-dest'?'C-07b':r.id==='r-vit'||r.id==='r-rec'?'C-07a':r.id==='r-ecgs'?'C-07c':r.id==='r-ai'?'C-07d':r.classList.contains('decb')?'C-09':'C-07';if(f!==focus){focus=f;syncNote()}
-    /* looking at the AI section clears its NEW ECG ANALYSIS mark */
-    if(r.id==='r-ai'&&CASE.aiNew&&!ev0.target.closest('[data-act]')){CASE.aiNew=null;renderMain();renderRail()}}}
-  const t=ev0.target.closest('[data-act],[data-key],[data-note]');if(!t||t.disabled)return;
-  if(t.dataset.note){post({t:'note',id:t.dataset.note});return}
-  if(t.dataset.key){key(t.dataset.key);return}
-  act(t.dataset.act,t);
-});
-$('#layer').addEventListener('input',e=>{
-  const id=e.target.id;if(!layer)return;
-  if(id==='cdet'){layer.det=e.target.value;const b=$('[data-act="c-done"]');if(b)b.disabled=!(layer.sel&&(layer.sel!=='oth'||layer.det.trim()))}
-  if(id==='rdose')layer.dose=e.target.value;
-  if(id==='rtext'){layer.text=e.target.value;const b=$('[data-act="rsave"]');if(b)b.disabled=!recOk(layer)}
-  if(id==='dtext'){layer.text=e.target.value;const b=$('[data-act="dconfirm"]');if(b)b.disabled=!destOk(layer)}
-  if(id==='etext'){layer.text=e.target.value;const b=$('[data-act="esave"]');if(b)b.disabled=!(layer.why&&(layer.why!=='Other'||layer.text.trim()))}
-});
-/* the CAD number field keeps what is typed (a re-render or refresh does not lose it); Enter continues */
-$('#view').addEventListener('input',e=>{
-  if(e.target.id==='cadin'&&CASE){CASE.cadEdit.val=e.target.value;CASE.savedAt=now();saveLocal()}
-  if(e.target.id==='histq'){HQ=e.target.value;clearTimeout(histT);histT=setTimeout(loadHist,250)}});
-$('#view').addEventListener('keydown',e=>{if(e.target.id==='cadin'&&e.key==='Enter'){e.preventDefault();act('cad-ok',e.target)}});
-document.addEventListener('keydown',e=>{if(e.key==='Escape'&&layer&&layer.t!=='fail'&&layer.t!=='dec'&&layer.t!=='dup'){layer=null;renderLayer()}});
-
-/* ---------- ticking clocks ---------- */
-setInterval(()=>{
-  if(!document.getElementById('view'))return;
-  $$('[data-tick="clock"]').forEach(el=>el.textContent=hm(now()));
-  if(!CASE)return;
-  $$('[data-tick="caseclock"]').forEach(el=>el.textContent='Open '+dur(now()-CASE.openedAt));
-  if(CASE.waitFrom&&!CASE.ack)$$('[data-tick="wait"]').forEach(el=>el.textContent=dur(now()-CASE.waitFrom));
-  const f=CASE.failure;
-  if(f&&!f.late&&now()-f.last>6000){f.attempts++;f.last=now();
-    if(SC.online){late();return}
-    $$('[data-tick="attempt"]').forEach(el=>el.textContent=`Retrying automatically · attempt ${f.attempts} · last try ${hms(f.last)}`);
-    $$('[data-tick="attempt-n"]').forEach(el=>el.textContent=f.attempts);}
-},500);
-
-/* ---------- stage fit: the landscape tablet scaled to the frame; portrait below 700 px ---------- */
-function fit(){
-  /* the MDT keeps the approved landscape tablet layout (1180 × 820), scaled to fill this window */
-  const st=$('#stage'),dv=$('#device'),w=st.clientWidth,h=innerHeight;
-  const land=w>=700;
-  dv.classList.toggle('land',land);dv.classList.toggle('port',!land);
-  if(land){const s=Math.min(w/1180,h/820);dv.style.transform=`scale(${s})`;dv.style.left=Math.max(0,(w-1180*s)/2)+'px';st.style.height=(820*s)+'px'}
-  else{dv.style.transform='';dv.style.left='';st.style.height=''}
-}
-let fitQ=0;new ResizeObserver(()=>{cancelAnimationFrame(fitQ);fitQ=requestAnimationFrame(fit)}).observe($('#stage'));
-fit();render();
-LIVE=Live({onMsg});
-setInterval(()=>{if(SC.online){pumpImgs();flush()}saveLocal()},3000);
-addEventListener('pagehide',saveLocal);
+  restoreLocal();
+  render();
+  LIVE = Live({ role: ROLE, onMsg });
+  setInterval(() => { if (S.view !== 'draft') render(); outcomes(); }, 15000);
+  setInterval(outcomes, 2000);
 })();

@@ -7,7 +7,7 @@
    npm run dev:stop       stop the background server (only this project's STEMI development server)
 
    How it works: one small supervisor process starts server/index.js as a child and
-   - restarts it when a backend file changes (server/, public/shared/cad.js, package.json, .env);
+   - restarts it when a backend file changes (server/, public/shared/cad.js, public/shared/rules.js, package.json, .env);
      the screens (public/) are read from disk on every request, so a browser refresh shows a frontend change
    - restarts it if it stops unexpectedly (and stops retrying after repeated immediate crashes, until a file changes)
    - writes a timestamped log to .local/stemi-dev.log and its own identity to .local/stemi-dev.json
@@ -29,7 +29,7 @@ const PIDF = path.join(LOCAL, 'stemi-dev.json');
 try { process.loadEnvFile(path.join(ROOT, '.env')); } catch (e) { if (e.code !== 'ENOENT') throw e; }
 const PORT = Number(process.env.PORT || 3000);
 const PULL = process.argv.includes('--pull') || /^(1|true|yes)$/i.test(process.env.DEV_AUTO_PULL || '');
-const WATCH = ['server', 'public/shared/cad.js', 'package.json', '.env'];
+const WATCH = ['server', 'public/shared/cad.js', 'public/shared/rules.js', 'package.json', '.env'];
 const stamp = () => new Date().toISOString();
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 fs.mkdirSync(LOCAL, { recursive: true });
@@ -77,9 +77,10 @@ function urls() {
   const lan = lanIp(), ip = lan[0] ? lan[0].address : null;
   return [
     `Crew:                      http://localhost:${PORT}/crew`,
-    `Control:                   http://localhost:${PORT}/control`,
+    `ER Doctor:                 http://localhost:${PORT}/er`,
     `Cardiologist on this Mac:  http://localhost:${PORT}/cardiologist`,
     `Cardiologist on iPhone:    ${ip ? `http://${ip}:${PORT}/cardiologist` : 'no network address found: is this Mac on Wi-Fi?'}`,
+    `Test console:              http://localhost:${PORT}/control`,
     ...(lan.length > 1 ? [`Other addresses:           ${lan.slice(1).map(a => `${a.address} (${a.name})`).join(', ')}`] : [])
   ].join('\n');
 }

@@ -35,9 +35,7 @@ module.exports = {
   AI_PROVIDER: process.env.AI_PROVIDER || 'mock',
   MOCK_AI_DELAY_MS: num(process.env.MOCK_AI_DELAY_MS, 5000),
   HEARTBEAT_MS: num(process.env.HEARTBEAT_MS, 5000),
-  MAX_IMAGE_BYTES: num(process.env.MAX_IMAGE_BYTES, 8 * 1024 * 1024),
-  /* reminder and escalation times are governance configurable and NOT set (Q-15, Q-54, Q-72).
-     Left empty, nothing reminds or escalates on its own; the test console has buttons instead. */
-  ALERT_REMINDER_SECONDS: process.env.ALERT_REMINDER_SECONDS ? Number(process.env.ALERT_REMINDER_SECONDS) : null,
-  ALERT_ESCALATION_SECONDS: process.env.ALERT_ESCALATION_SECONDS ? Number(process.env.ALERT_ESCALATION_SECONDS) : null
+  MAX_IMAGE_BYTES: num(process.env.MAX_IMAGE_BYTES, 8 * 1024 * 1024)
+  /* acknowledgement reminders and escalation are governance decisions not yet made (Q-15, Q-54, Q-72): nothing in this
+     build reminds or escalates; the alarms continue until a clinician accepts / acknowledges */
 };

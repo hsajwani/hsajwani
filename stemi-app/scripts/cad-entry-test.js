@@ -1,102 +1,131 @@
-/* The CAD number entered manually by the EMT: the edge cases the main acceptance test does not walk through.
-   - offline at CAD entry: the number cannot be checked, is kept on the tablet, and the workflow continues
-   - the tablet's unsent case survives reconnection while the platform has another active case
-   - SEND with a CAD number that already has a case: CASE ALREADY EXISTS, the ECG and minimum dataset stay as the draft
-   - correcting the CAD number, then sending: the case is created under the corrected number; the existing case is untouched
-   - the correction before sending is in the audit trail
-   Needs Playwright, like scripts/acceptance.js.   Run:  npm run test:cad        Fictional test data only. */
-const { spawn } = require('node:child_process');
-const fs = require('node:fs');
-const path = require('node:path');
-const os = require('node:os');
-let chromium;
-try { ({ chromium } = require('playwright')); } catch (_) { console.error('Playwright is not installed. See the comment at the top of scripts/acceptance.js.'); process.exit(2); }
+/* The CAD number entered manually by the EMT, the unsent case kept on the tablet, and working without a connection:
+   - CAD#…, cad # …, plain, extra spaces and 13 digits are normalised; an invalid number is explained and refused
+   - a case that already exists under the number: CASE ALREADY EXISTS → correct the number (the correction is audited)
+     or OPEN EXISTING CASE; nothing entered is lost and no second case is created
+   - the unsent case survives a page reload; after SEND the CAD number is locked
+   - offline: the CAD number is kept unchecked; SEND waits (NOT SENT — NO CONNECTION) and goes on reconnection;
+     new vital signs wait as OFFLINE — CHANGES SAVED LOCALLY and are delivered on reconnection
+   Run: npm run test:cad   (cloud container: NODE_PATH=$(npm root -g) npm run test:cad). Fictional data only. */
+const H = require('./lib/harness');
+const { chromium } = H.playwright();
+const R = H.Results('CAD entry and offline');
+const ok = R.ok, sleep = H.sleep;
 
-const ROOT = path.resolve(__dirname, '..');
-const PORT = 3000 + Math.floor(Math.random() * 900) + 50;
-const BASE = `http://localhost:${PORT}`;
-const DATA = fs.mkdtempSync(path.join(os.tmpdir(), 'stemi-cad-'));
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-const p2 = n => String(n).padStart(2, '0');
-const T = new Date(), DAY = `${T.getFullYear()}${p2(T.getMonth() + 1)}${p2(T.getDate())}`;
-const EXISTING = `${DAY}-0777-1`, CORRECTED = `${DAY}-0778-1`;
-const results = [];
-const ok = (what, cond, detail) => { results.push(!!cond); console.log(`${cond ? 'PASS' : 'FAIL'}  ${what}${detail ? ' · ' + detail : ''}`); };
-
-async function main(server) {
+async function main(S) {
   const browser = await chromium.launch();
   const errors = [];
   try {
-    const cc = await browser.newContext({ viewport: { width: 1440, height: 860 } });
-    const p = await cc.newPage();
-    p.on('pageerror', e => errors.push(e.message));
-    await p.goto(BASE + '/login'); await p.fill('#email', 'crew@test.local'); await p.fill('#pw', 'stemi-test');
-    await Promise.all([p.waitForNavigation(), p.click('button[type=submit]')]);
-    await p.waitForSelector('text=LIVE — CONNECTED');
-    const tap = s => p.click(s), keys = async ks => { for (const k of ks) await tap(`[data-key="${k}"]`); };
-    const check = async cad => (await cc.request.get(BASE + '/api/cases/check?cad=' + encodeURIComponent(cad))).json();
+    const { ctx, page: C } = await H.crewPage(browser, S.BASE, errors);
+    const con = H.Api(S.BASE, 'control'); await con.start();
+    const EXISTING = H.cad(777), CORRECTED = H.cad(778), OFFL = H.cad(779);
+    const row = c => H.db(S.DATA, `SELECT * FROM cases WHERE cad='${c}'`)[0];
+    const waitText = (s, t) => C.waitForFunction(x => document.body.innerText.includes(x), s, { timeout: t || 15000 }).then(() => true, () => false);
+    /* the network is cut: wait until the screen says so (CONNECTION LOST or OFFLINE — CHANGES SAVED LOCALLY) */
+    const goOffline = async () => { await ctx.setOffline(true); await C.waitForSelector('.conn--down, .conn--offline', { timeout: 20000 }).catch(() => {}); };
+    const startNew = async () => { await C.click('[data-act="home"]').catch(() => {}); await C.click('[data-act="new-case"]'); await C.waitForSelector('#cadin'); };
 
-    /* a case already exists under EXISTING (sent from the test console) */
-    const demo = await cc.request.post(BASE + '/api/control/demo-case', { data: { cad: EXISTING } });
-    ok('A case exists under ' + EXISTING, demo.status() === 200);
-    await p.waitForSelector('[data-act="home"]'); await sleep(1500);
-    await tap('[data-act="home"]'); await tap('[data-act="new-case"]'); await tap('[data-act="newcase-go"]');
-    await p.waitForSelector('#cadin');
+    /* ---------- normalisation and validation ---------- */
+    await startNew();
+    for (const [typed, why] of [['2026', 'incomplete'], ['20261399-0001-1', 'impossible date'], ['', 'empty']]) {
+      await C.fill('#cadin', typed); await C.click('[data-act="cad-ok"]'); await sleep(150);
+      ok('CAD', `Invalid CAD number (${why}) refused with an explanation`, await C.isVisible('#cad-err') && /Enter a valid CAD number before continuing/.test(await C.textContent('#cad-err')) && (await C.getAttribute('#cadin', 'aria-invalid')) === 'true');
+    }
+    await C.fill('#cadin', `  CAD# ${H.cad(770)}  `); await C.click('[data-act="cad-ok"]');
+    await C.waitForSelector('[data-act="img-add"]');
+    ok('CAD', '"  CAD# …  " accepted and shown as CAD #… (canonical)', (await C.textContent('.draft-h')).includes(`CAD #${H.cad(770)}`));
+    await C.click('[data-act="step"][data-k="cad"]');
+    await C.fill('#cadin', 'cad # ' + H.cad(771).replace(/-/g, ' - ')); await C.click('[data-act="cad-ok"]'); await C.waitForSelector('[data-act="img-add"]');
+    ok('CAD', '"cad # 2026… - 0771 - 1" (lower case, extra spaces) normalised', (await C.textContent('.draft-h')).includes(`CAD #${H.cad(771)}`));
+    await C.click('[data-act="step"][data-k="cad"]');
+    await C.fill('#cadin', H.cad(772).replace(/-/g, '')); await C.click('[data-act="cad-ok"]'); await C.waitForSelector('[data-act="img-add"]');
+    ok('CAD', '13 digits without dashes normalised', (await C.textContent('.draft-h')).includes(`CAD #${H.cad(772)}`));
 
-    /* offline: the number is kept and checked at Send */
-    await cc.setOffline(true); await p.waitForSelector('text=CONNECTION LOST', { timeout: 20000 });
-    await p.fill('#cadin', EXISTING); await tap('[data-act="cad-ok"]');
-    await p.waitForSelector('[data-act="upload"]', { timeout: 5000 });
-    ok('Offline: CAD number kept unchecked, the workflow continues to the ECG', (await p.textContent('.toast')).includes('checks it for an existing case when you send'));
-    await tap('[data-act="shoot"]'); await sleep(1200);
-    await cc.setOffline(false); await p.waitForSelector('text=LIVE — CONNECTED', { timeout: 20000 });
-    ok('After reconnecting, the tablet keeps its unsent case and CAD number', (await p.textContent('.ch-l1')).includes(`CAD #${EXISTING}`));
+    /* ---------- the unsent case survives a reload ---------- */
+    await C.click('[data-act="img-add"]'); await C.click('[data-act="img-gen"]'); await sleep(200);
+    await C.click('[data-act="step"][data-k="md"]');
+    await C.fill('#md-age', '67'); await C.click('[data-act="md-nv"][data-k="sex"][data-v="Unknown"]');
+    await sleep(500);
+    await C.reload(); await C.waitForSelector('[data-act="new-case"]');
+    const card = await C.waitForSelector('.draftcard', { timeout: 5000 }).then(() => true, () => false);
+    ok('DRAFT', 'After a reload the unsent case is kept on the tablet (home shows it, not sent)', card && (await C.textContent('.draftcard')).includes(`CAD #${H.cad(772)}`) && (await C.textContent('.draftcard')).includes('1 ECG image'));
+    await C.click('[data-act="draft-open"]');
+    await C.waitForSelector('#md-age');
+    ok('DRAFT', 'Continue: the step, the ECG and the answers are all there', (await C.inputValue('#md-age')) === '67' && (await C.getAttribute('[data-act="md-nv"][data-k="sex"][data-v="Unknown"]', 'aria-pressed')) === 'true' && /ECG 1 · 1 image/.test(await C.textContent('.steps')));
+    ok('DRAFT', 'Nothing was created on the platform before SEND', !row(H.cad(772)));
+    await C.click('[data-act="draft-discard"]'); await C.click('[data-act="draft-discard-go"]');
+    ok('DRAFT', 'An unsent case can be discarded, with confirmation', await waitText('Unsent case discarded') && !(await C.isVisible('.draftcard')));
 
-    /* minimum dataset, then SEND */
-    await tap('[data-act="step"][data-k="C-03"]');
-    await tap('[data-act="open"][data-k="age"]'); await keys(['6', '1']); await tap('[data-act="md-done"]');
-    await tap('[data-act="set"][data-k="sex"][data-v="Female"]');
-    await tap('[data-act="open"][data-k="complaint"]'); await tap('[data-act="cpick"][data-v="cp"]');
-    await tap('[data-act="open"][data-k="onset"]'); await tap('[data-act="tq"][data-m="30"]'); await tap('[data-act="md-done"]');
-    await tap('[data-act="open"][data-k="bp"]'); await keys(['1', '3', '0', '8', '0']); await tap('[data-act="md-done"]');
-    await tap('[data-act="open"][data-k="hr"]'); await keys(['7', '0']); await tap('[data-act="md-done"]');
-    await tap('[data-act="open"][data-k="spo2"]'); await keys(['9', '8']); await tap('[data-act="md-done"]');
-    await tap('[data-act="set"][data-k="gcs"][data-v="15"]');
-    await tap('[data-act="step"][data-k="C-05"]');
-    await tap('[data-act="send"]');
-    await p.waitForSelector('.dlg.dup', { timeout: 8000 }).catch(() => {});
-    ok('SEND under a CAD number that already has a case: CASE ALREADY EXISTS', await p.isVisible('.dlg.dup') && (await p.textContent('#layer')).includes(`CAD #${EXISTING}`));
+    /* ---------- CASE ALREADY EXISTS at SEND (offline at CAD entry, so the number could not be checked) ---------- */
+    ok('DUP', 'A case exists under the number (sent from the test console)', (await con.req('POST', '/api/control/demo-case', { cad: EXISTING })).status === 200);
+    await startNew();
+    await goOffline();
+    await C.fill('#cadin', EXISTING); await C.click('[data-act="cad-ok"]');
+    await C.waitForSelector('[data-act="img-add"]', { timeout: 5000 });
+    ok('OFF', 'Offline at CAD entry: the number is kept unchecked and the workflow continues', /checked for an existing case when you send/.test(await C.textContent('#toast')));
+    ok('OFF', 'The connection status reads OFFLINE — CHANGES SAVED LOCALLY', /Offline — changes saved locally/i.test(await C.textContent('#tb-conn')));
+    await ctx.setOffline(false);
+    await C.waitForSelector('.conn:not(.conn--down):not(.conn--offline):not(.conn--wait)', { timeout: 20000 });
+    await C.click('[data-act="img-add"]'); await C.click('[data-act="img-gen"]'); await sleep(200);
+    await C.click('[data-act="step"][data-k="md"]');
+    await C.fill('#md-age', '61'); await C.click('[data-act="md-set"][data-k="sex"][data-v="Female"]'); await C.click('[data-act="md-set"][data-k="complaint"][data-v="sob"]');
+    await C.click('[data-act="md-nv"][data-k="onset"][data-v="Unknown"]'); await C.fill('#md-sys', '130'); await C.fill('#md-dia', '80');
+    await C.click('[data-act="md-nv"][data-k="hr"][data-v="Unable to obtain"]'); await C.fill('#md-spo2', '98'); await C.fill('#md-gcs', '15');
+    await C.click('[data-act="md-done"]');
+    await C.click('[data-act="send"]');
+    const dup = await C.waitForSelector('.modal >> text=CASE ALREADY EXISTS', { timeout: 10000 }).then(() => true, () => false);
+    ok('DUP', 'SEND under an existing number: CASE ALREADY EXISTS, nothing created or changed', dup && (await C.textContent('.modal')).includes(`CAD #${EXISTING}`) && H.db(S.DATA, 'SELECT COUNT(*) n FROM cases')[0].n === 1);
+    await H.shot(C, 'cad-01-case-exists');
+    await C.click('[data-act="dup-fix"]');
+    await C.waitForSelector('#cadin');
+    ok('DUP', 'Correct the CAD number: the ECG and the minimum data stay as the unsent case', /ECG 1 · 1 image/.test(await C.textContent('.steps')) && /8 of 8/.test(await C.textContent('.steps')));
+    await C.fill('#cadin', CORRECTED); await C.click('[data-act="cad-ok"]');
+    await C.waitForSelector('[data-act="send"]:not([disabled])', { timeout: 8000 });
+    await C.click('[data-act="send"]');
+    await C.waitForSelector(`.case-h__cad:has-text("CAD #${CORRECTED}")`, { timeout: 20000 });
+    ok('DUP', 'Sent under the corrected number: SENT TO ER', (await C.textContent('.status-panel')).includes('SENT TO ER') && row(CORRECTED).server_received_at > 0);
+    ok('DUP', 'The existing case was not changed', row(EXISTING).unit === 'Ambulance 214' && H.auditOf(S.DATA, EXISTING).every(a => !a.action.includes(CORRECTED)));
+    const aud = H.auditOf(S.DATA, CORRECTED).map(a => a.action);
+    ok('DUP', 'Audit: the correction before sending, and the manual CAD entry', aud.some(a => a.includes(`CAD number corrected by crew before sending: CAD #${EXISTING} → CAD #${CORRECTED}`)) && aud.some(a => a.includes('CAD number manually entered by crew from dispatch/MDT information')));
+    ok('LOCK', 'After SEND the CAD number is locked: no CAD field on the case', !(await C.$('#cadin')));
 
-    /* correct the number: nothing entered is lost */
-    await tap('[data-act="dup-fix"]'); await p.waitForSelector('#cadin');
-    const steps = await p.textContent('.steps');
-    ok('The ECG and the minimum dataset stay as the unsent draft', steps.includes('ECG 1 captured') && steps.includes('8 of 8'));
-    await p.fill('#cadin', CORRECTED); await tap('[data-act="cad-ok"]');
-    await p.waitForSelector('[data-act="send"]', { timeout: 5000 });
-    await tap('[data-act="send"]'); await sleep(3000);
-    const c = await check(CORRECTED), e = await check(EXISTING);
-    ok('Sent under the corrected CAD number: the case is created under it', c.exists && !!c.existing.submittedAt, CORRECTED);
-    ok('The existing case was not changed (only made inactive as the active case moved on)', e.exists && e.existing.cad === EXISTING);
-    ok('No script errors', !errors.filter(x => !/ERR_INTERNET_DISCONNECTED/.test(x)).length, errors.slice(0, 3).join(' | '));
-  } finally {
-    await browser.close();
-    server.kill();
-  }
-  const { DatabaseSync } = require('node:sqlite');
-  const d = new DatabaseSync(path.join(DATA, 'stemi-test.db'));
-  const A = d.prepare('SELECT action FROM audit_events WHERE cad=? ORDER BY at, id').all(CORRECTED).map(r => r.action);
-  d.close();
-  ok('The correction before sending is in the audit trail', A.some(a => a.includes(`CAD number corrected by crew before sending: CAD #${EXISTING} → CAD #${CORRECTED}`)));
+    /* ---------- OPEN EXISTING CASE ---------- */
+    await startNew();
+    await C.fill('#cadin', EXISTING); await C.click('[data-act="cad-ok"]');
+    await C.waitForSelector('.modal >> text=CASE ALREADY EXISTS', { timeout: 8000 });
+    await C.click('[data-act="dup-open"]');
+    ok('DUP', 'OPEN EXISTING CASE opens that case; no second case', await C.waitForSelector(`.case-h__cad:has-text("CAD #${EXISTING}")`, { timeout: 8000 }).then(() => true, () => false) && H.db(S.DATA, `SELECT COUNT(*) n FROM cases WHERE cad='${EXISTING}'`)[0].n === 1);
+    ok('DUP', 'Audit: the existing case was opened on the tablet', H.auditOf(S.DATA, EXISTING).some(a => a.action.startsWith(`Existing case CAD #${EXISTING} opened on the Ambulance 214 tablet`)));
+    await C.click('[data-act="home"]');
+    if (await C.isVisible('.draftcard')) { await C.click('.draftcard [data-act="draft-discard"]'); await C.click('[data-act="draft-discard-go"]'); }
+
+    /* ---------- offline SEND: waits on the tablet, goes on reconnection ---------- */
+    await H.crewNewCase(C, OFFL, { noSend: true });
+    await goOffline();
+    await C.click('[data-act="send"]');
+    const q = await C.waitForSelector('.sendbar >> text=NOT SENT', { timeout: 8000 }).then(() => true, () => false);
+    ok('OFF', 'SEND without a connection: NOT SENT — NO CONNECTION, saved on the tablet', q && /sent automatically when the connection returns/.test(await C.textContent('.sendbar')) && !row(OFFL));
+    await H.shot(C, 'cad-02-offline-send');
+    await ctx.setOffline(false);
+    const sent = await C.waitForSelector(`.case-h__cad:has-text("CAD #${OFFL}")`, { timeout: 25000 }).then(() => true, () => false);
+    ok('OFF', 'On reconnection the case is sent automatically (marked delivered after a failed attempt)', sent && row(OFFL).server_received_at > 0 && row(OFFL).delivered_late === 1);
+
+    /* ---------- offline update after SEND ---------- */
+    await goOffline();
+    await C.click('[data-act="vitals"]');
+    await C.fill('#v-hr', '104');
+    await C.click('[data-act="vitals-save"]');
+    ok('OFF', 'Offline: the new heart rate waits, shown as OFFLINE — CHANGES SAVED LOCALLY', /Offline — changes saved locally/i.test(await C.textContent('#tb-conn')) && /waiting to send/.test(await C.textContent('#c-pt')));
+    await sleep(6000);
+    await ctx.setOffline(false);
+    let delivered = false;
+    for (let i = 0; i < 40 && !delivered; i++) { await sleep(500); delivered = H.db(S.DATA, `SELECT COUNT(*) n FROM observations WHERE cad='${OFFL}' AND field='hr' AND entry_kind='update'`)[0].n === 1; }
+    ok('OFF', 'On reconnection the update is delivered once, with both times kept in the audit', delivered && H.auditOf(S.DATA, OFFL).some(a => /HR updated by crew: 104 bpm.*saved on the tablet/.test(a.action)));
+    ok('', 'No script errors', !errors.length, errors.slice(0, 3).join(' | '));
+  } finally { await browser.close(); }
 }
 
-const server = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', 'server/index.js'], { cwd: ROOT, env: { ...process.env, PORT: String(PORT), DATA_DIR: DATA, MOCK_AI_DELAY_MS: '1000' }, stdio: ['ignore', 'pipe', 'pipe'] });
-let log = ''; server.stdout.on('data', d => { log += d; }); server.stderr.on('data', d => { log += d; });
 (async () => {
-  for (let i = 0; i < 50 && !log.includes('Test console'); i++) await sleep(100);
-  await main(server);
-})().catch(e => { console.error(e); results.push(false); server.kill(); }).finally(() => {
-  fs.rmSync(DATA, { recursive: true, force: true });
-  const failed = results.filter(r => !r).length;
-  console.log(`\n${results.length - failed}/${results.length} checks passed.`);
-  process.exit(failed ? 1 : 0);
-});
+  const S = await H.startServer({ MOCK_AI_DELAY_MS: '800' });
+  try { await main(S); } catch (e) { console.error(e); R.ok('', 'The test ran to the end', false, e.message); } finally { await S.stop(); }
+  process.exit(R.summary() ? 1 : 0);
+})();

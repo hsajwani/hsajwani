@@ -1,6 +1,6 @@
 # What must change before production
 
-This test build proves the crew ↔ cardiologist workflow on two devices with fictional data. It is **not** fit for
+This test build proves the crew → ER Doctor → cardiologist workflow with fictional data. It is **not** fit for
 real patient information. Real patient data stays out of every environment until hosting, InfoSec, privacy and
 data-governance requirements are approved. Nothing below has been chosen yet: vendors, hosting and architecture are
 decided after design approval, with National Ambulance InfoSec and the governance bodies.
@@ -9,11 +9,15 @@ decided after design approval, with National Ambulance InfoSec and the governanc
 
 - **HTTPS everywhere.** The test build uses plain HTTP on a local Wi-Fi network, with no encryption. Production needs
   TLS on approved hosting, with certificates managed by the hosting team.
-- **Authentication.** Replace the two test users with National Ambulance single sign-on (and the participating
-  hospitals' identities for cardiologists), multi-factor authentication where policy requires it, roles and
-  privileges from the directory, session expiry and revocation, and lost-device handling.
-- **Authorisation.** Per-case access (a cardiologist sees the cases routed to them, their backup and ACC), not the
-  single active case of the test build.
+- **Authentication.** The test build has one crew test login, and the ER Doctor and Cardiologist screens need no
+  login at all: the clinician **types their name**, which is recorded per CAD number. That is prototype clinician
+  identification only and gives **no identity assurance** (anyone can type any name). Production needs the hospitals'
+  and National Ambulance's identity providers: organisation single sign-on (for example Microsoft Entra ID), staff ID,
+  badge or PIN at the point of care, multi-factor authentication where policy requires it, roles and privileges from
+  the directory, session expiry and revocation, and lost-device handling. The recorded name must come from the
+  verified identity, not from typing.
+- **Authorisation.** Per-case access by role and organisation (an ER sees its own cases, a cardiologist the cases
+  routed to them, their backup and ACC); the test build lets every ER screen see every sent case.
 - **The server as the authority for time.** The test build accepts the device's time for some events (it also
   records the server's receipt time). Production records authoritative server times and synchronised device clocks.
 - **InfoSec review**, penetration testing and vulnerability management before any pilot.
@@ -24,8 +28,8 @@ The test build's alarm is a sound played by an open web page. A locked phone, a 
 or Do Not Disturb can stop it. The production system must not rely on a browser sound alone. It needs an approved
 alerting method that covers at least:
 
-- An in-app alarm while the app is open, behaving as in this build: one alarm, only for a new case, until
-  ACKNOWLEDGE & OPEN.
+- An in-app alarm while the app is open, behaving as in this build: on the ER screen only for a new case until it is
+  accepted; on the cardiologist's phone only for a new cardiology activation until ACKNOWLEDGE & OPEN.
 - A secure push notification that reaches a locked phone or a closed app and can be heard, with no patient details on
   the lock screen (Q-59).
 - Escalation to the backup cardiologist and ACC when the alert is not acknowledged, at governance-configurable
@@ -46,8 +50,8 @@ alerting method that covers at least:
   migrations and an agreed retention period.
 - **ECG image storage** with encryption, integrity checks (the build already records SHA-256) and retention.
 - **Audit trail** protected against alteration, retained and exportable for clinical governance.
-- **Several cases and users at once:** many crews, several cardiologists and hospitals, rosters and backups (Q-11,
-  Q-73); the build has one active case.
+- **Several cases and users at once:** the build handles several open cases on every screen, but has one crew unit and
+  no rosters; production needs many crews, several EDs, cardiologists and hospitals, rosters and backups (Q-11).
 - **Availability and downtime:** monitoring, alerting to the support team, failover, and the approved STEMI downtime
   route with its number (Q-21).
 
@@ -63,7 +67,9 @@ alerting method that covers at least:
 
 - How the CAD number reaches the tablet in V1 (Q-70), then CAD integration.
 - ePCR, and ECG devices (corpuls, ZOLL, LIFEPAK). The core works without them.
-- Hospital, ED, cath-lab, ACC and administration views (not built yet).
+- Hospital, cath-lab, ACC and administration views (not built yet). The ED view in this build is the ER Doctor's
+  screening step only.
+- An authorised amendment workflow for closed cases (a closed STEMI pathway is read-only here).
 
 ## Privacy and governance
 

@@ -1,6 +1,7 @@
-/* Unified STEMI Platform · first functional multi-device test build (crew ↔ cardiologist).
+/* STEMI Coordination Platform · test build (crew → ER Doctor → Cardiologist).
    TEST DATA ONLY: fictional patients, simulated CAD numbers, simulated ECG images, test users.
-   One process serves both role-based interfaces (/crew, /cardiologist), the API, the live event stream and the stored images. */
+   One process serves every role's screen (/crew, /er, /cardiologist, /control), the API, the live event stream and the
+   stored ECG images. */
 const [major, minor] = process.versions.node.split('.').map(Number);
 if (major < 22 || (major === 22 && minor < 13)) {
   console.error(`This test build needs Node.js 22.13 or later; this computer has ${process.version}. Install the current LTS from https://nodejs.org`);
@@ -29,7 +30,16 @@ process.on('unhandledRejection', e => console.error(`[${stamp()}] unhandled prom
 
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json',
   '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.svg': 'image/svg+xml', '.woff2': 'font/woff2', '.ico': 'image/x-icon', '.txt': 'text/plain; charset=utf-8' };
-const PAGES = { '/crew': ['crew', 'crew/index.html'], '/cardiologist': ['cardiologist', 'cardiologist/index.html'], '/control': [null, 'control/index.html'], '/login': [undefined, 'login/index.html'] };
+/* path → [who may open it, file]. crew: the crew login · er / cardiologist / control: a prototype device session, given
+   on first visit (no login) · null: anyone */
+const PAGES = {
+  '/': [null, 'index.html'],
+  '/login': [null, 'login/index.html'],
+  '/crew': ['crew', 'crew/index.html'],
+  '/er': ['er', 'er/index.html'],
+  '/cardiologist': ['cardiologist', 'cardiologist/index.html'],
+  '/control': ['control', 'control/index.html']
+};
 
 function send(res, status, body, headers) {
   const isBuf = Buffer.isBuffer(body), isStr = typeof body === 'string';
@@ -60,20 +70,19 @@ function serveFile(res, file, extraHeaders) {
 async function route(req, res) {
   const url = new URL(req.url, 'http://x');
   const p = url.pathname;
-  const user = auth.currentUser(req);
 
   /* ---------- pages ---------- */
-  if (req.method === 'GET' && p === '/') return redirect(res, !user ? '/login' : user.role === 'crew' ? '/crew' : '/cardiologist');
   if (req.method === 'GET' && PAGES[p]) {
-    const [role, file] = PAGES[p];
-    if (role !== undefined) {
+    const [role, file] = PAGES[p], headers = { 'Content-Type': 'text/html; charset=utf-8' };
+    let user = null;
+    if (role === 'crew') {
+      user = auth.currentUser(req);
       if (!user) return redirect(res, '/login?next=' + encodeURIComponent(p));
-      if (role && user.role !== role) return redirect(res, '/login?next=' + encodeURIComponent(p) + '&wrong=' + user.role);
-    }
-    /* the page learns who is logged in without an extra request */
+    } else if (role && !auth.device(req, role)) headers['Set-Cookie'] = auth.deviceCookie(role);
+    /* the page learns its role, the crew user and the version without an extra request */
     const html = fs.readFileSync(path.join(cfg.PUBLIC_DIR, file), 'utf8')
-      .replace('<!--APP-->', `<script>window.APP=${JSON.stringify({ user: user || null }).replace(/</g, '\\u003c')};</script>`);
-    return send(res, 200, html, { 'Content-Type': 'text/html; charset=utf-8' });
+      .replace('<!--APP-->', `<script>window.APP=${JSON.stringify({ role, user, version: VERSION }).replace(/</g, '\\u003c')};</script>`);
+    return send(res, 200, html, headers);
   }
   if (req.method === 'GET' && p.startsWith('/assets/')) {
     const f = path.normalize(path.join(cfg.PUBLIC_DIR, p.slice(8)));
@@ -82,10 +91,10 @@ async function route(req, res) {
   }
   if (req.method === 'GET' && p === '/favicon.ico') return send(res, 204, '');
 
-  /* ---------- login ---------- */
+  /* ---------- crew login ---------- */
   if (req.method === 'POST' && p === '/api/login') {
     const b = await json(req), r = auth.login(b.email, b.password);
-    if (!r) return send(res, 401, { error: 'Email or password not recognised' });
+    if (!r.user) return send(res, 401, { error: r.error });
     return send(res, 200, { role: r.user.role, name: r.user.name }, { 'Set-Cookie': r.cookie });
   }
   if (req.method === 'POST' && p === '/api/logout') return send(res, 200, { ok: true }, { 'Set-Cookie': auth.logoutCookie });
@@ -96,100 +105,105 @@ async function route(req, res) {
       port: cfg.PORT, pid: process.pid, startedAt: new Date(STARTED).toISOString(), uptimeSeconds: Math.round((Date.now() - STARTED) / 1000) });
   }
 
-  /* everything below needs a logged-in test user */
-  if (!user) return send(res, 401, { error: 'Not logged in' });
+  /* ---------- ECG images: shown on every role's screen ---------- */
+  if (req.method === 'GET' && p.startsWith('/files/')) {
+    if (!auth.anySession(req)) return send(res, 401, { error: 'Not signed in' });
+    const row = D.get('SELECT file_name FROM ecg_images WHERE id=?', p.slice(7));
+    if (!row) return send(res, 404, 'Not found');
+    return serveFile(res, path.join(cfg.IMAGE_DIR, row.file_name), { 'Cache-Control': 'private, max-age=86400, immutable' });
+  }
 
-  if (req.method === 'GET' && p === '/api/me') return send(res, 200, { user });
+  /* everything below needs the screen's session: the crew login, or the ER / cardiologist / console device session */
+  const role = String(req.headers['x-stemi-role'] || url.searchParams.get('role') || 'crew');
+  const A = auth.actor(req, role);
+  if (!A) return send(res, 401, { error: role === 'crew' ? 'Not logged in' : 'No session for this screen: reload the page' });
+
+  if (req.method === 'GET' && p === '/api/me') return send(res, 200, { role: A.role, user: A.role === 'crew' ? A : null, version: VERSION });
   if (req.method === 'GET' && p === '/api/info') {
     const lan = lanAddresses();
-    return send(res, 200, { cardiologistUrls: lan.map(a => `http://${a.address}:${cfg.PORT}/cardiologist`), aiProvider: cfg.AI_PROVIDER, clients: live.clientCount(),
-      reminderSeconds: cfg.ALERT_REMINDER_SECONDS, escalationSeconds: cfg.ALERT_ESCALATION_SECONDS });
+    return send(res, 200, { version: VERSION, aiProvider: cfg.AI_PROVIDER, clients: live.clientCount(), presence: live.presence(),
+      urls: lan.map(a => ({ name: a.name, er: `http://${a.address}:${cfg.PORT}/er`, cardiologist: `http://${a.address}:${cfg.PORT}/cardiologist` })) });
   }
 
   /* ---------- the live link ---------- */
-  if (req.method === 'GET' && p === '/api/stream') {
-    const view = url.searchParams.get('view');
-    /* the test console watches without counting as the crew tablet or the cardiologist's device */
-    const who = view === 'control' ? { ...user, role: 'control' } : user;
-    return live.add(req, res, who, platform.hello);
-  }
+  if (req.method === 'GET' && p === '/api/stream') return live.add(req, res, A, platform.hello);
 
-  /* ---------- the case under the CAD number the crew entered manually ---------- */
+  /* ---------- cases ---------- */
+  const crewOnly = what => send(res, 403, { error: `Only the crew ${what}` });
   if (p === '/api/cases/check' && req.method === 'GET') {
-    if (user.role !== 'crew') return send(res, 403, { error: 'Only the crew opens cases' });
+    if (A.role !== 'crew') return crewOnly('opens cases');
     return send(res, 200, platform.checkCad(url.searchParams.get('cad')));
   }
   if (p === '/api/cases' && req.method === 'POST') {
-    if (user.role !== 'crew') return send(res, 403, { error: 'Only the crew opens cases' });
-    const r = platform.createCase(user, await json(req));
+    if (A.role !== 'crew') return crewOnly('opens cases');
+    const r = platform.createCase(A, await json(req));
     if (r.status === 'invalid') return send(res, 400, { code: 'invalid', ...r });
     if (r.status === 'exists') return send(res, 409, { code: 'exists', ...r });
     return send(res, r.status === 'created' ? 201 : 200, { ok: true, ...r, rec: platform.snapshot(r.cad) });
   }
-  /* completed cases: listed and opened read-only by CAD number, for the crew and the cardiologist */
-  if (p === '/api/cases' && req.method === 'GET') return send(res, 200, { cases: platform.listClosed(url.searchParams.get('q')) });
+  /* completed cases: found by CAD number and opened read-only, by every role allowed to see them */
+  if (p === '/api/cases' && req.method === 'GET') return send(res, 200, { cases: platform.listClosed(A, url.searchParams.get('q')) });
   if (p === '/api/cases/view' && req.method === 'GET') {
-    const rec = platform.viewClosed(url.searchParams.get('cad'));
-    return rec ? send(res, 200, { rec }) : send(res, 404, { error: 'No completed case with this CAD number' });
+    const rec = platform.viewCase(A, url.searchParams.get('cad'));
+    return rec ? send(res, 200, { rec }) : send(res, 404, { error: 'No case with this CAD number for this screen' });
   }
-  /* COMPLETE HANDOVER & CLOSE CASE */
-  if (p === '/api/cases/close' && req.method === 'POST') {
-    if (user.role !== 'crew') return send(res, 403, { error: 'Only the crew completes the handover' });
-    const r = platform.closeCase(user, (await json(req)).cad);
-    if (r.status === 'notactive') return send(res, 409, { code: 'notactive', error: 'This case is no longer the active case' });
+  /* COMPLETE STEMI PATHWAY: only while the current Cardiologist decision is CONFIRMED STEMI */
+  if ((p === '/api/cases/complete' || p === '/api/cases/close') && req.method === 'POST') {
+    if (A.role !== 'crew') return crewOnly('completes the STEMI pathway');
+    const r = platform.completeCase(A, (await json(req)).cad);
+    if (r.status === 'missing') return send(res, 404, { code: 'missing', error: 'There is no case with this CAD number for this tablet' });
+    if (r.status === 'closed') return send(res, 409, { code: 'closed', ...r, error: 'This STEMI pathway is already closed: it is read-only.' });
     if (r.status === 'incomplete') return send(res, 409, { code: 'incomplete', ...r });
     return send(res, 200, { ok: true, ...r });
   }
   if (p === '/api/cases/open' && req.method === 'POST') {
-    if (user.role !== 'crew') return send(res, 403, { error: 'Only the crew opens cases' });
-    const r = platform.openExisting(user, (await json(req)).cad);
+    if (A.role !== 'crew') return crewOnly('opens cases');
+    const r = platform.openExisting(A, (await json(req)).cad);
     if (r.status === 'invalid') return send(res, 400, { code: 'invalid', ...r });
     if (r.status === 'missing') return send(res, 404, { code: 'missing', ...r, error: 'There is no case with this CAD number' });
+    if (r.status === 'other-unit') return send(res, 403, { code: 'other-unit', ...r, error: 'This CAD number belongs to a case of another unit' });
     return send(res, 200, { ok: true, ...r });
   }
 
-  /* ---------- actions from the devices ---------- */
+  /* ---------- actions from the screens ---------- */
   if (req.method === 'POST' && p === '/api/ops') {
+    if (!['crew', 'er', 'cardiologist'].includes(A.role)) return send(res, 403, { error: 'This screen does not record clinical actions' });
     const b = await json(req);
     const ops = Array.isArray(b.ops) ? b.ops : [];
     if (!ops.length || ops.length > 200) return send(res, 400, { error: 'No actions' });
-    return send(res, 200, { results: platform.applyOps(user, ops), now: Date.now() });
+    return send(res, 200, { results: platform.applyOps(A, ops), now: Date.now() });
   }
 
-  /* ---------- ECG images: uploaded from the crew tablet, stored on disk, linked to their ECG when the ECG is sent ---------- */
+  /* ---------- ECG images: uploaded from the crew MDT, stored on disk, linked to their ECG when it is sent ---------- */
   if (req.method === 'POST' && p === '/api/images') {
-    if (user.role !== 'crew') return send(res, 403, { error: 'Only the crew uploads ECG images' });
+    if (A.role !== 'crew') return crewOnly('uploads ECG images');
     const mime = String(req.headers['content-type'] || '').split(';')[0];
     if (!['image/jpeg', 'image/png'].includes(mime)) return send(res, 415, { error: 'JPEG or PNG only' });
+    const F = platform.facts(String(url.searchParams.get('cad') || ''));
+    if (!F || F.C.unit !== A.unit) return send(res, 404, { error: 'There is no case with this CAD number for this tablet' });
+    if (F.C.closed_at) return send(res, 409, { error: 'This STEMI pathway is closed: it is read-only' });
     const buf = await readBody(req, cfg.MAX_IMAGE_BYTES);
     if (!buf.length) return send(res, 400, { error: 'Empty image' });
-    const cad = seed.activeCad();
-    if (!cad) return send(res, 409, { error: 'No case is open on the platform' });
-    if (D.get('SELECT closed_at FROM cases WHERE cad=?', cad).closed_at) return send(res, 409, { error: 'This case is closed (handover completed): it is read-only' });
-    if (url.searchParams.get('cad') && url.searchParams.get('cad') !== cad) return send(res, 409, { error: 'This case is no longer the active test case' });
     const id = D.uid('img'), file = `${id}${mime === 'image/png' ? '.png' : '.jpg'}`;
     const sha = crypto.createHash('sha256').update(buf).digest('hex');
     fs.writeFileSync(path.join(cfg.IMAGE_DIR, file), buf);
     const src = url.searchParams.get('src') === 'file' ? 'file' : 'test-generator';
     D.run('INSERT INTO ecg_images(id,cad,uploaded_at,source,file_name,mime,bytes,sha256,uploaded_by) VALUES(?,?,?,?,?,?,?,?,?)',
-      id, cad, Date.now(), src, file, mime, buf.length, sha, `${user.name}, ${user.title}`);
+      id, F.C.cad, Date.now(), src, file, mime, buf.length, sha, `${A.name}, ${A.title}`);
     return send(res, 200, { id, url: `/files/${id}`, sha256: sha });
   }
-  if (req.method === 'GET' && p.startsWith('/files/')) {
-    const row = D.get('SELECT file_name, mime FROM ecg_images WHERE id=?', p.slice(7));
-    if (!row) return send(res, 404, 'Not found');
-    return serveFile(res, path.join(cfg.IMAGE_DIR, row.file_name), { 'Cache-Control': 'private, max-age=86400, immutable' });
-  }
 
-  /* ---------- the test console (stands in for the CAD feed and the prototype's simulation controls) ---------- */
-  if (req.method === 'POST' && p.startsWith('/api/control/')) {
+  /* ---------- the test console (TEST ONLY: test data and simulation controls) ---------- */
+  if (p.startsWith('/api/control/')) {
+    if (A.role !== 'control') return send(res, 403, { error: 'Test console only' });
     const what = p.slice(13);
+    if (req.method === 'GET' && what === 'cases') return send(res, 200, { cases: platform.consoleCases() });
+    if (req.method !== 'POST') return send(res, 404, { error: 'Not found' });
     if (what === 'sim') {
       const b = await json(req), patch = {};
       if (['border', 'clear'].includes(b.find)) patch.find = b.find;
       if (['good', 'glare', 'cut'].includes(b.q)) patch.q = b.q;
       if (['ok', 'down', 'proc'].includes(b.ai)) patch.ai = b.ai;
-      if (typeof b.ids === 'boolean') patch.ids = b.ids;
       const sim = D.setSim(patch);
       live.broadcast('cfg', { sim });
       if (patch.ai && patch.ai !== 'proc') platform.aiResume();
@@ -198,27 +212,27 @@ async function route(req, res) {
     if (what === 'reset') {
       resetData();
       D.bumpEpoch();
-      live.broadcast('init', { now: Date.now(), cad: null, epoch: D.epoch() });
-      platform.push();
+      platform.restartScreens();
       return send(res, 200, { ok: true });
     }
-    if (what === 'close-case') return send(res, 200, { ok: platform.closeActive() });
+    if (what === 'screens') {
+      const b = await json(req);
+      return send(res, 200, { ok: platform.setOnScreens(A, b.cad, !!b.on) });
+    }
     if (what === 'demo-case') {
-      const r = platform.demoCase((await json(req)).cad);
+      const r = platform.demoCase(A, (await json(req)).cad);
       if (r.status === 'invalid') return send(res, 400, { code: 'invalid', ...r, error: r.error + ' ' + r.detail });
       if (r.status === 'exists') return send(res, 409, { code: 'exists', ...r, error: `CASE ALREADY EXISTS: CAD #${r.cad}. No second case was created.` });
       return send(res, 200, { ok: true, cad: r.cad });
     }
-    if (what === 'reminder') return send(res, 200, { ok: platform.reminder() });
-    if (what === 'escalate') return send(res, 200, { ok: platform.escalate() });
   }
   return send(res, 404, { error: 'Not found' });
 }
 
-/* wipe every test case and image (users stay) */
+/* wipe every test case and image (the crew test user stays) */
 function resetData() {
   D.tx(() => {
-    ['final_vitals', 'handovers', 'arrivals', 'ops', 'audit_events', 'case_updates', 'etas', 'destinations', 'decisions', 'ecg_views', 'alert_followups', 'cardiologist_alerts',
+    ['final_vitals', 'handovers', 'arrivals', 'ops', 'audit_events', 'case_updates', 'etas', 'destinations', 'decisions', 'ecg_views', 'ecg_role_views', 'alert_followups', 'cardiologist_alerts',
       'ai_interpretations', 'ecg_images', 'ecgs', 'treatments', 'observations', 'patient_details', 'cases'].forEach(t => D.run(`DELETE FROM ${t}`));
   });
   for (const f of fs.readdirSync(cfg.IMAGE_DIR)) fs.unlinkSync(path.join(cfg.IMAGE_DIR, f));
@@ -252,25 +266,16 @@ server.listen(cfg.PORT, cfg.HOST, () => {
   const lan = lanAddresses();
   const ip = lan[0] ? lan[0].address : '<this computer\'s IP address>';
   const line = '─'.repeat(64);
-  if (DEV) {
-    console.log(`\n${line}\n STEMI Development Server Running · ${stamp()} · FICTIONAL TEST DATA ONLY\n${line}`);
-    console.log(` Crew:                      http://localhost:${cfg.PORT}/crew`);
-    console.log(` Control:                   http://localhost:${cfg.PORT}/control`);
-    console.log(` Cardiologist on this Mac:  http://localhost:${cfg.PORT}/cardiologist`);
-    console.log(` Cardiologist on iPhone:    http://${ip}:${cfg.PORT}/cardiologist`);
-    if (lan.length > 1) console.log(` Other addresses: ${lan.slice(1).map(a => `${a.address} (${a.name})`).join(', ')}`);
-    console.log(` Health: http://localhost:${cfg.PORT}/health · database: ${path.relative(cfg.ROOT, cfg.DB_FILE)} (kept across restarts)\n${line}\n`);
-    return;
-  }
-  console.log(`\n${line}\n Unified STEMI Platform · test build · FICTIONAL TEST DATA ONLY\n${line}`);
-  console.log(` Crew MDT (this computer):   http://localhost:${cfg.PORT}/crew`);
-  console.log(` Cardiologist (iPhone):      http://${ip}:${cfg.PORT}/cardiologist`);
+  console.log(`\n${line}\n ${DEV ? 'STEMI Development Server Running' : 'STEMI Coordination Platform · test build'} · v${VERSION} · ${stamp()}\n FICTIONAL TEST DATA ONLY\n${line}`);
+  console.log(` Crew (this Mac):            http://localhost:${cfg.PORT}/crew`);
+  console.log(` ER Doctor (this Mac):       http://localhost:${cfg.PORT}/er`);
+  console.log(` Cardiologist on this Mac:   http://localhost:${cfg.PORT}/cardiologist`);
+  console.log(` Cardiologist on iPhone:     http://${ip}:${cfg.PORT}/cardiologist`);
   console.log(` Test console:               http://localhost:${cfg.PORT}/control`);
-  if (lan.length > 1) console.log(` Other addresses of this computer: ${lan.slice(1).map(a => `${a.address} (${a.name})`).join(', ')}`);
-  console.log(`\n Test users: crew@test.local and cardio@test.local · password: ${process.env.TEST_USER_PASSWORD ? '(from .env)' : cfg.TEST_PASSWORD}`);
-  const act = seed.activeCad();
-  console.log(` Active case: ${act ? 'CAD #' + act : 'none (the crew enters the CAD number when opening the STEMI pathway)'} · database: ${path.relative(cfg.ROOT, cfg.DB_FILE)} · AI: ${cfg.AI_PROVIDER} (simulated)`);
-  console.log(` The iPhone must be on the same Wi-Fi. Stop the server with Ctrl+C.\n${line}\n`);
+  if (lan.length > 1) console.log(` Other addresses: ${lan.slice(1).map(a => `${a.address} (${a.name})`).join(', ')}`);
+  console.log(` Health: http://localhost:${cfg.PORT}/health · database: ${path.relative(cfg.ROOT, cfg.DB_FILE)} (kept across restarts) · AI: ${cfg.AI_PROVIDER} (simulated)`);
+  if (!DEV) console.log(` Crew test login: crew@test.local · password: ${process.env.TEST_USER_PASSWORD ? '(from .env)' : cfg.TEST_PASSWORD}\n The iPhone must be on the same Wi-Fi. Stop the server with Ctrl+C.`);
+  console.log(`${line}\n`);
 });
 
 module.exports = server;

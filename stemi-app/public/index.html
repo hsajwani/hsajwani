@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#142030">
+<title>STEMI Coordination Platform (test)</title>
+<link rel="stylesheet" href="/assets/shared/fonts/fonts.css">
+<link rel="stylesheet" href="/assets/shared/ds.css">
+<style>
+.roles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s4); }
+@media (max-width: 760px) { .roles { grid-template-columns: minmax(0, 1fr); } }
+.role { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: var(--s2) var(--s4); align-items: center; padding: var(--s5); background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); box-shadow: var(--sh-1); text-decoration: none; color: var(--text); min-height: 120px; }
+.role:hover { border-color: var(--primary-line); box-shadow: var(--sh-2); }
+.role__ic { width: 52px; height: 52px; border-radius: var(--r-lg); display: grid; place-items: center; background: var(--primary-soft); color: var(--primary-text); }
+.role__ic .ico { width: 28px; height: 28px; }
+.role h2 { font-size: var(--fs-lg); }
+.role p { color: var(--text-2); font-size: var(--fs-md); margin-top: 4px; }
+.role .path { font: 600 var(--fs-sm) var(--font-data); color: var(--primary-text); }
+.role--test .role__ic { background: var(--warn-soft); color: var(--warn-text); }
+.flow { display: flex; flex-wrap: wrap; gap: var(--s2); align-items: center; color: var(--text-2); font-weight: 600; font-size: var(--fs-md); margin: var(--s2) 0 var(--s6); }
+.flow b { color: var(--text); }
+</style>
+<!--APP-->
+</head>
+<body>
+<div class="app">
+  <div id="top"></div>
+  <main class="page" style="max-width:1000px">
+    <div class="page-h"><div class="page-h__t"><h1>STEMI Coordination Platform</h1><p>Choose the screen for this device.</p></div><span class="sp"></span><span class="test-note">TEST BUILD · FICTIONAL DATA ONLY</span></div>
+    <div class="flow" aria-label="Pathway"><b>Crew</b><span>→</span><b>ER Doctor</b><span>→</span><b>Cardiologist</b> if the ER activates cardiology <span>→</span> decision <span>→</span> pathway closure</div>
+    <div class="roles" id="roles"></div>
+    <p class="footnote"><span id="ver"></span><span>Fictional test data only — never real patient information</span><span>The ER Doctor and Cardiologist screens use a typed name: prototype identification, not secure authentication</span></p>
+  </main>
+</div>
+<script src="/assets/shared/rules.js"></script>
+<script src="/assets/shared/ui.js"></script>
+<script>
+(() => {
+  const { icon, esc, topbar, patch } = UI;
+  patch('top', topbar({ role: 'Choose a screen', home: '/', conn: '' }));
+  const R = [
+    ['ambulance', 'Crew MDT', 'Open the STEMI pathway: CAD number, ECG, minimum data, SEND. Follow the case live. Crew test login.', '/crew', ''],
+    ['er', 'ER Doctor', 'New cases arrive with an alarm. Accept, review the ECG, and activate the Cardiologist — or not. Desktop or tablet.', '/er', ''],
+    ['steth', 'Cardiologist', 'Cardiology activations arrive with an alarm. Acknowledge, review, decide. Phone first: open it on the iPhone.', '/cardiologist', ''],
+    ['console', 'Test console', 'TEST ONLY: demo cases, simulations, devices, the full audit trail, resetting the test data.', '/control', ' role--test']
+  ];
+  document.getElementById('roles').innerHTML = R.map(([ic, t, p, href, cls]) => `<a class="role${cls}" href="${href}"><span class="role__ic">${icon(ic)}</span><span><h2>${t}</h2><p>${p}</p></span><span class="path">${href}</span></a>`).join('');
+  document.getElementById('ver').textContent = `Version ${UI.APP.version} · test build`;
+})();
+</script>
+</body>
+</html>

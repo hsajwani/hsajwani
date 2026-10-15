@@ -25,6 +25,14 @@ addColumn('cases', 'closed_by', 'TEXT');
 addColumn('cases', 'closed_user_id', 'TEXT');
 addColumn('cases', 'closure_reason', 'TEXT');
 addColumn('cases', 'closure_source', 'TEXT');
+/* 0.5.0: the ER Doctor step and the cardiology activation (older cases keep these empty and still open) */
+addColumn('audit_events', 'device', 'TEXT');
+[['er_alerted_at', 'INTEGER'], ['er_alert_shown_at', 'INTEGER'], ['er_doctor_name', 'TEXT'], ['er_accepted_at', 'INTEGER'],
+  ['er_assessment', 'TEXT'], ['er_assessment_at', 'INTEGER'], ['er_assessed_by', 'TEXT'], ['er_assessment_ecg', 'INTEGER'],
+  ['er_non_activation_reason', 'TEXT'], ['er_non_activation_comment', 'TEXT'], ['er_outcome_seen_at', 'INTEGER'],
+  ['cardiology_activated_at', 'INTEGER'], ['cardiology_activation_reason', 'TEXT'], ['cardiology_activated_by', 'TEXT'],
+  ['cardiologist_name', 'TEXT'], ['cardiologist_acknowledged_at', 'INTEGER'], ['cardiologist_decision', 'TEXT'], ['cardiologist_decision_at', 'INTEGER']
+].forEach(([c, t]) => addColumn('cases', c, t));
 
 const cache = new Map();
 const st = sql => { let s = cache.get(sql); if (!s) { s = db.prepare(sql); cache.set(sql, s); } return s; };

@@ -1,5 +1,5 @@
 /* Deletes the test database and stored images (every CAD case, active and completed, with its ECGs and audit events),
-   so the next start begins with no cases. The test users are recreated on start.
+   so the next start begins with no cases. The crew test user is recreated on start.
    Run it with the server stopped. While the server runs, use "Delete all test data" in the test console instead. */
 const fs = require('node:fs');
 const cfg = require('../server/config');
