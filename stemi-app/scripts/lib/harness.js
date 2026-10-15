@@ -98,6 +98,8 @@ async function testConsole(BASE) {
   return CONSOLES.get(BASE);
 }
 async function sim(BASE, c, action, body) { return (await testConsole(BASE)).req('POST', '/api/control/corpuls/' + action, { cad: c, ...(body || {}) }); }
+/* whether the server runs the simulated corpuls feed in demo mode (CORPULS_DEMO_MODE, the default): ECG 1 comes by itself */
+async function demoMode(BASE) { const r = await (await testConsole(BASE)).req('GET', '/api/control/corpuls'); return !!(r.body && r.body.demo); }
 /* a complete crew SEND through the API (for tests that are about what happens after it): the case is created and linked
    to the simulated corpuls monitor, ECG 1 arrives from it, then the crew's four items are sent.
    opts.manual: the manual ECG fallback instead (an uploaded image, no corpuls) */
@@ -153,8 +155,10 @@ async function clinPage(browser, BASE, role, errors, ctxOpts) {
   return { ctx, page, tones: () => page.evaluate(() => window.__tones.length) };
 }
 /* the crew's whole new-case pathway through the screen: OPEN STEMI PATHWAY → CAD number → LINK CORPULS → ECG 1 arrives
-   from the simulated corpuls (the test console triggers the acquisition) → age, sex, complaint, onset → SEND TO ER.
-   opts.fallback: corpuls is not used; the crew adds ECG 1 with the manual ECG fallback (fictional test image) */
+   from the simulated corpuls (by itself in demo mode; otherwise the test console triggers the acquisition) → age, sex,
+   complaint, onset → SEND TO ER.
+   opts.fallback: corpuls is not used; the crew adds ECG 1 with the manual ECG fallback (fictional test image); in demo
+   mode the monitor is disconnected first, so no automatic ECG 1 arrives */
 async function crewNewCase(page, c, opts) {
   opts = opts || {};
   const BASE = new URL(page.url()).origin;
@@ -165,12 +169,14 @@ async function crewNewCase(page, c, opts) {
   await page.fill('#cadin', opts.typed || c);
   await page.click('[data-act="cad-ok"]');
   await page.waitForSelector('#d-bar .cbar', { timeout: 10000 });
+  const demo = await demoMode(BASE);
+  if (opts.fallback && demo) { await page.waitForSelector('#d-bar .cbar--ok, #d-bar .cbar--busy', { timeout: 10000 }); await sim(BASE, c, 'disconnect'); await page.waitForSelector('#d-bar .cbar--warn', { timeout: 10000 }); }
   if (opts.fallback) {
     for (let i = 0; i < (opts.images || 1); i++) { await page.click('[data-act="fb-draft"], [data-act="img-add"]'); await page.click('[data-act="img-gen"]'); await sleep(150); }
   } else {
     await page.waitForSelector('.cbar--ok', { timeout: 10000 });
-    await sim(BASE, c, 'trigger-ecg', { sample: opts.sample || 'A' });
-    await page.waitForSelector('#d-viewer:not([hidden]) .ecgv__scroll img', { timeout: 10000 });
+    if (!demo) await sim(BASE, c, 'trigger-ecg', { sample: opts.sample || 'A' });
+    await page.waitForSelector('#d-viewer:not([hidden]) .ecgv__scroll img', { timeout: 15000 });
   }
   await page.fill('#md-age', String(opts.age || 58));
   await page.click(`[data-act="md-set"][data-k="sex"][data-v="${opts.sex || 'Male'}"]`);
@@ -192,4 +198,4 @@ async function shot(page, name, full) {
   await page.screenshot({ path: path.join(OUT, name + '.png'), fullPage: !!full }).catch(() => {});
 }
 
-module.exports = { ROOT, OUT, sleep, cad, DAY, playwright, Results, startServer, db, auditOf, Api, apiSend, testConsole, sim, SOUND_PROBE, PHONE, watch, crewPage, clinPage, crewNewCase, giveName, shot };
+module.exports = { ROOT, OUT, sleep, cad, DAY, playwright, Results, startServer, db, auditOf, Api, apiSend, testConsole, sim, demoMode, SOUND_PROBE, PHONE, watch, crewPage, clinPage, crewNewCase, giveName, shot };

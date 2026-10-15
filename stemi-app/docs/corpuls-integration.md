@@ -1,4 +1,4 @@
-# The corpuls integration · test build 0.6.0
+# The corpuls integration · test build 0.6.1
 
 TEST BUILD · FICTIONAL DATA ONLY. **The corpuls integration in this build is simulated.** No real corpuls monitor
 and no corpuls.mission environment is connected. No vendor API was used or assumed, and the build makes no network
@@ -35,17 +35,24 @@ values and every ECG with its source. A real provider can replace the mock witho
 ## The crew's flow with corpuls
 
 ```
-OPEN STEMI PATHWAY → CAD number → LINK CORPULS → CORPULS CONNECTED → ECG 1 appears → vital signs appear
-  → age, sex, presenting complaint, symptom onset → SEND TO ER
+OPEN STEMI PATHWAY → CAD number → LINK CORPULS → CONNECTING TO CORPULS… → CORPULS CONNECTED → live vital signs
+  → ECG 1 RECEIVED FROM CORPULS → age, sex, presenting complaint, symptom onset → SEND TO ER
 ```
+
+In the prototype's **demo mode** (`CORPULS_DEMO_MODE`, on by default) this runs by itself, as the future integration
+would: the simulated monitor connects about a second after LINK CORPULS, the live values appear at once and ECG 1
+arrives about 3 s later. No test console, hardware or upload is needed (see *Demo mode* below).
 
 1. The crew types the CAD number from the dispatch / MDT information. Entry and normalisation are unchanged: stored
    as `20261004-0123-1` and shown as `CAD #20261004-0123-1`.
 2. **LINK CORPULS** checks the number and creates the case on the platform. It is still unsent and not visible to the
-   ER. The case is then linked to the unit's monitor. The bar says WAITING FOR CORPULS, then **CORPULS CONNECTED · CAD
-   #…**. From then on every update attaches to that case; an update never creates a new case.
-3. The 12-lead acquired on corpuls3 appears by itself: **ECG 1 RECEIVED FROM CORPULS · Acquired hh:mm:ss**. The
-   vital signs appear by themselves as **LIVE FROM CORPULS · Updated N s ago**.
+   ER. The case is then linked to the unit's monitor. The bar shows the feed starting step by step: **CONNECTING TO
+   CORPULS…**, then **CORPULS CONNECTED · CAD #…** with a subtle *Simulated corpuls feed* tag (✓ CAD linked · ✓ Corpuls
+   connected · ✓ Live vitals received · ✓ ECG 1 received). From then on every update attaches to that case; an update
+   never creates a new case.
+3. The vital signs appear by themselves as **LIVE FROM CORPULS · Updated N s ago**. While the 12-lead comes, the ECG
+   card says **RECEIVING 12-LEAD ECG FROM CORPULS…**; then it appears by itself: **ECG 1 RECEIVED FROM CORPULS ·
+   Acquired hh:mm:ss**.
 4. The crew enters only what corpuls cannot know: age, sex, presenting complaint and symptom onset.
 5. **SEND TO ER** becomes available when the CAD number is valid, an ECG exists and the four items are answered. The
    crew does not confirm the vital signs: the latest monitor values travel with the case automatically and are
@@ -54,10 +61,11 @@ OPEN STEMI PATHWAY → CAD number → LINK CORPULS → CORPULS CONNECTED → ECG
    and reach the ER and the Cardiologist silently. The crew acknowledges only the outcomes: the ER's outcome and each
    cardiologist decision. Monitor updates are never acknowledged.
 
-The **manual ECG fallback** (photograph or upload the 12-lead) and manual vital signs remain available. They are
-secondary and become prominent only when corpuls is not available: waiting, connection lost, feed ended, offline, or
-no ECG yet when everything else is complete. An ECG added this way is recorded as `manual_fallback` and audited as
-*Manual ECG fallback used*.
+The **manual ECG fallback** (photograph or upload the 12-lead) and manual vital signs remain available as a quiet link
+while the feed works or is still connecting. They become prominent only when corpuls cannot deliver: connection lost,
+a monitor that does not connect at all (CORPULS NOT CONNECTED, after 15 s), the feed ended on an open case, or no
+connection to the platform. An ECG added this way is recorded as `manual_fallback` and audited as *Manual ECG fallback
+used*.
 
 ## The provider contract (`server/integrations/corpuls/contract.js`)
 
@@ -114,7 +122,10 @@ source.
 
 | Situation | Crew | ER Doctor and Cardiologist |
 |---|---|---|
+| Connecting | CONNECTING TO CORPULS… (a transitional state, with the steps) | (the case is not sent yet) |
+| Connected, first values on their way | CORPULS CONNECTED · RECEIVING LIVE MONITOR DATA… | — |
 | Live | CORPULS CONNECTED · CAD #… and LIVE FROM CORPULS · Updated N s ago | the values in the patient strip with *corpuls · N s ago*; the details card has LIVE FROM CORPULS |
+| Not connecting at all (15 s) | CORPULS NOT CONNECTED · MANUAL FALLBACK AVAILABLE | NO LIVE MONITOR DATA |
 | No new values | LAST DATA RECEIVED hh:mm:ss | the same |
 | Connection lost | CORPULS CONNECTION LOST · Last data received hh:mm:ss · MANUAL FALLBACK AVAILABLE | LIVE MONITOR DATA TEMPORARILY UNAVAILABLE · Last data received hh:mm:ss (the last values stay, with their time) |
 | Restored | CORPULS CONNECTED again (*Corpuls connection restored* in the timeline) | live again |
@@ -153,17 +164,21 @@ Never audited: routine samples, heartbeats, or individual HR changes.
 
 - **One simulated corpuls3 per unit:** Ambulance 214 → `SIM-C3-214`. Demo cases from the test console get their own
   `SIM-C3-DEMO-…` so they never take the crew's monitor.
-- **Linking:** WAITING, then CONNECTED about 0.8 s later if the simulated monitor is available.
+- **Linking:** WAITING (shown as CONNECTING TO CORPULS…), then CONNECTED `CORPULS_SIM_CONNECT_MS` (0.8 s) later if
+  the simulated monitor is available.
 - **Vital signs** come every `CORPULS_SIM_TICK_MS` (default 5 s). They change gradually and never randomly.
-  - HR moves 2 /min per update towards its set value.
+  - HR moves 2 /min per update towards its set value; in demo mode it also shows a monitor's small beat-to-beat
+    variation (±1 /min, a fixed pattern).
   - SpO₂ moves 1 % per update.
   - RR moves 1 /min every 30 s.
   - NIBP is measured every `CORPULS_SIM_NIBP_SECONDS` (default 120 s), and at once when the tester sends an update.
-  - The default values are HR 84, SpO₂ 97, BP 142/88 and RR 18.
-- **A 12-lead** comes only when the test console triggers it. It is a synthetic SVG on ECG paper:
-  - Three internal samples are used: ECG Sample A (borderline, then evolving), B (evolved) and C (clear pattern).
+  - The default values are HR 88, SpO₂ 98, BP 132/78 and RR 17.
+- **A 12-lead** comes when the crew "acquires" one: in demo mode ECG 1 by itself and a requested repeat from the crew
+  screen; otherwise when the test console triggers it. It is a synthetic SVG on ECG paper:
+  - Three internal samples are used: ECG Sample A (borderline, then evolving), B (evolved) and C (clear pattern); the
+    demo uses A for ECG 1, B for ECG 2 and C after.
   - Each sample sets the ST/T morphology.
-  - The drawn rate is the simulated monitor's HR at that moment, and the HR then drifts towards the sample's own rate.
+  - The drawn rate is the HR the simulated monitor shows at that moment, so the 12-lead and the live HR agree.
   - Every image is marked *FICTIONAL TEST DATA · NOT A PATIENT* and *synthetic waveform, not a diagnosis*.
   - The samples are not validated diagnoses.
   - The mock AI returns its scripted findings for the sample, with the monitor's rate.
@@ -173,12 +188,36 @@ Never audited: routine samples, heartbeats, or individual HR changes.
 - **On reconnection** the feed resends its last ECG and last sample, as a real feed might. The platform stores each
   once.
 - **Restarts:** the simulator's settings (available, paused, set values) survive a server restart, and linked feeds
-  carry on without a false *connection lost*.
+  carry on without a false *connection lost* (in demo mode a linked case still without an ECG gets its ECG 1).
+
+### Demo mode (`CORPULS_DEMO_MODE`, the prototype default)
+
+The basic demonstration needs nothing but the crew, ER and cardiologist screens:
+
+- **Every LINK CORPULS starts a fresh simulated monitor** (available, signal on, data flowing, the default values),
+  whatever an earlier demonstration left behind.
+- **ECG 1 by itself:** `CORPULS_DEMO_ECG_SECONDS` (3) seconds after CORPULS CONNECTED the simulated crew acquires the
+  first 12-lead — unless a 12-lead was already acquired on this link, or the tablet already holds a manual fallback
+  ECG for the case (the case creation says so).
+- **Repeat ECG:** when the Cardiologist requests one, the crew's REPEAT ECG REQUESTED panel offers **SIMULATE REPEAT ECG
+  ACQUISITION** (*prototype only*: it stands in for the 12-lead acquired on corpuls3, because no physical monitor is
+  connected). The platform asks the simulated provider for the acquisition; ECG 2 then arrives through the feed like
+  any corpuls ECG, on the same CAD number, never as an upload. The audit records *Prototype demo: repeat 12-lead
+  acquisition on the simulated corpuls3 started from the crew screen*, then *ECG 2 received from corpuls*.
+  `POST /api/corpuls/demo-acquire` — crew only, demo mode only, open and linked cases only.
+- **RESET CORPULS DEMO** (test console, `POST /api/control/corpuls/reset-demo`): every simulated monitor back to the
+  clean state; a linked monitor reconnects and sends the default values at once; a linked case still without an ECG
+  gets its ECG 1 again. Cases, ECGs and the record are not touched.
+- **Closed or discarded cases** get nothing automatic: the feed ends with the case, pending timers stop, and late
+  events are refused like any other.
+- `CORPULS_DEMO_MODE=false`: the simulated monitor does only what the test console tells it (the automated corpuls
+  test suite runs this way).
 
 ### The test console's CORPULS SIMULATOR (TEST ONLY)
 
 These controls exist only at `/control`, never on the crew, ER or cardiologist screens.
 
+- The demo mode (on or off) and **RESET CORPULS DEMO**.
 - Choose a case. Its linked simulated monitor and status are shown.
 - **Connection:** CONNECT MONITOR, DISCONNECT MONITOR, RECONNECT, SIMULATE SIGNAL LOSS, RESTORE SIGNAL, PAUSE DATA /
   RESUME DATA.
@@ -194,7 +233,7 @@ These controls exist only at `/control`, never on the crew, ER or cardiologist s
 
 This is a placeholder: **not implemented**. With `CORPULS_PROVIDER=corpuls-mission` the build:
 - makes no network call and receives nothing;
-- keeps every linked case WAITING FOR CORPULS;
+- keeps every linked case connecting, then CORPULS NOT CONNECTED (with the fallback prominent);
 - leaves the manual ECG fallback as the only way to add an ECG.
 
 The real provider must emit exactly the normalized events above, so that no screen and no platform rule changes.

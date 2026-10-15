@@ -2,10 +2,13 @@
    - no horizontal page overflow (only the ECG viewer may scroll sideways, inside itself)
    - no control smaller than 40 × 40 px (inline text links excepted)
    - every image has alt text, every button and form field has an accessible name
-   Covered (0.6.0, corpuls-driven): the crew waiting for corpuls, connected, receiving vital signs, receiving ECG 1, ready
-   to send, after SEND, repeat ECG requested, corpuls connection lost, the manual fallback; the ER and the Cardiologist
-   with live data; the serial ECG view; the completed Case Summary; the test console's corpuls simulator; and the rest
-   of the pathway. Fictional test data is created through the API and the simulated corpuls feed first.
+   Covered (corpuls-driven, in the prototype's demo mode): the crew's demo flow — CONNECTING TO CORPULS…, CORPULS
+   CONNECTED with live values while ECG 1 is received, ECG 1 RECEIVED FROM CORPULS, ready to send, after SEND, repeat ECG
+   requested with SIMULATE REPEAT ECG ACQUISITION, ECG 2 received, corpuls connection lost, the manual fallback; the ER
+   and the Cardiologist with live data; the serial ECG view; the completed Case Summary; the test console's corpuls
+   simulator; and the rest of the pathway. Fictional test data is created through the API and the simulated corpuls feed
+   first. The simulated monitor connects in 2.5 s and sends ECG 1 4 s later here, so each transitional state is held
+   long enough for its screenshot (the demo's own timing: 0.8 s and 3 s).
    Run: npm run test:visual   (cloud container: NODE_PATH=$(npm root -g) npm run test:visual). */
 const fs = require('node:fs');
 const path = require('node:path');
@@ -99,22 +102,16 @@ async function main(S) {
         await p.click('.modal [data-act="dec-ack"], .modal [data-act="er-ack"]');
       }
       await check(p, `crew-home-${k}`, `Crew home (${k})`);
-      /* the unit's simulated monitor is first switched off, to show WAITING FOR CORPULS */
-      const X = H.cad(500 + (++n)), Y = H.cad(500 + (++n));
-      await p.click('[data-act="new-case"]'); await p.fill('#cadin', X); await p.click('[data-act="cad-ok"]'); await p.waitForSelector('#d-bar .cbar', { timeout: 10000 });
-      await H.sim(S.BASE, X, 'connect'); await p.waitForSelector('.cbar--ok', { timeout: 10000 });
-      await H.sim(S.BASE, X, 'disconnect');
-      await p.click('[data-act="draft-discard"]'); await p.click('[data-act="draft-discard-go"]');
+      /* the demo: LINK CORPULS → CONNECTING TO CORPULS… → CORPULS CONNECTED with live values → ECG 1, all by itself */
+      const Y = H.cad(500 + (++n));
       await p.click('[data-act="new-case"]'); await p.fill('#cadin', Y);
       await check(p, `crew-cad-${k}`, `Crew · CAD number (${k})`);
-      await p.click('[data-act="cad-ok"]'); await p.waitForSelector('#d-bar .cbar--neutral', { timeout: 10000 });
-      await check(p, `crew-waiting-${k}`, `Crew · waiting for corpuls (${k})`);
-      await H.sim(S.BASE, Y, 'connect'); await p.waitForSelector('.cbar--ok', { timeout: 10000 });
-      await check(p, `crew-connected-${k}`, `Crew · corpuls connected (${k})`);
-      await H.sim(S.BASE, Y, 'set', { hr: 102, spo2: 94, sys: 136, dia: 82, rr: 22 }); await H.sim(S.BASE, Y, 'send-vitals'); await p.waitForTimeout(800);
-      await check(p, `crew-vitals-${k}`, `Crew · receiving vital signs (${k})`);
-      await H.sim(S.BASE, Y, 'trigger-ecg', { sample: 'A' }); await p.waitForSelector('#d-viewer:not([hidden]) img', { timeout: 10000 });
-      await check(p, `crew-ecg1-${k}`, `Crew · ECG 1 received from corpuls (${k})`);
+      await p.click('[data-act="cad-ok"]'); await p.waitForSelector('#d-bar .cbar--busy', { timeout: 10000 });
+      await check(p, `crew-connecting-${k}`, `Crew · CONNECTING TO CORPULS… (${k})`);
+      await p.waitForSelector('#d-bar .cbar--ok', { timeout: 10000 }); await p.waitForTimeout(300);
+      await check(p, `crew-connected-${k}`, `Crew · corpuls connected, live values, receiving ECG 1 (${k})`);
+      await p.waitForSelector('#d-viewer:not([hidden]) img', { timeout: 15000 });
+      await check(p, `crew-ecg1-${k}`, `Crew · ECG 1 received from corpuls by itself (${k})`);
       await p.click('[data-act="send"]', { force: true });
       await check(p, `crew-missing-${k}`, `Crew · SEND pressed with patient items missing (${k})`);
       await p.fill('#md-age', '58'); await p.click('[data-act="md-set"][data-k="sex"][data-v="Male"]'); await p.click('[data-act="md-set"][data-k="complaint"][data-v="oth"]');
@@ -125,7 +122,9 @@ async function main(S) {
       await er.one(Y, 'er_accept', { name: DRN }); await er.one(Y, 'er_assess', { kind: 'activate', on: 1, name: DRN });
       await doc.one(Y, 'ack', { name: DCN }); await doc.one(Y, 'decision', { k: 'repeat', on: 1, reasons: ['Poor ECG quality'], instr: 'Repeat with V7 to V9', name: DCN });
       await p.waitForSelector('.modal [data-act="dec-ack"]', { timeout: 15000 }); await p.click('.modal [data-act="dec-ack"]');
-      await check(p, `crew-repeat-${k}`, `Crew · repeat ECG requested (${k})`);
+      await check(p, `crew-repeat-${k}`, `Crew · repeat ECG requested, SIMULATE REPEAT ECG ACQUISITION (${k})`);
+      await p.click('.status-panel [data-act="demo-acq"]'); await p.waitForSelector('.status-panel >> text=REPEAT ECG SENT', { timeout: 10000 });
+      await check(p, `crew-repeat-received-${k}`, `Crew · ECG 2 received from corpuls (simulated acquisition) (${k})`);
       await H.sim(S.BASE, Y, 'disconnect'); await p.waitForSelector('#c-bar .cbar--warn', { timeout: 10000 });
       await check(p, `crew-lost-${k}`, `Crew · corpuls connection lost (${k})`);
       await p.click('#c-bar [data-act="ecg-new"]'); await p.click('.modal [data-act="img-add"]'); await p.click('[data-act="img-gen"]'); await p.waitForSelector('[data-act="ecg-send"]:not([disabled])');
@@ -225,7 +224,7 @@ async function main(S) {
 }
 
 (async () => {
-  const S = await H.startServer({ MOCK_AI_DELAY_MS: '400' });
+  const S = await H.startServer({ MOCK_AI_DELAY_MS: '400', CORPULS_SIM_CONNECT_MS: '2500', CORPULS_DEMO_ECG_SECONDS: '4' });
   try { await main(S); } catch (e) { console.error(e); R.ok('', 'The visual QA ran to the end', false, e.message); } finally { await S.stop(); }
   console.log(`Screenshots: ${path.relative(process.cwd(), DIR)}`);
   process.exit(R.summary() ? 1 : 0);

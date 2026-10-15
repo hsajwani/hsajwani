@@ -42,7 +42,15 @@ module.exports = {
   /* the simulated monitor: one vital-signs update every CORPULS_SIM_TICK_MS, a non-invasive BP measurement every
      CORPULS_SIM_NIBP_SECONDS. Simulation settings, not clinical ones */
   CORPULS_SIM_TICK_MS: num(process.env.CORPULS_SIM_TICK_MS, 5000),
-  CORPULS_SIM_NIBP_SECONDS: num(process.env.CORPULS_SIM_NIBP_SECONDS, 120)
+  CORPULS_SIM_NIBP_SECONDS: num(process.env.CORPULS_SIM_NIBP_SECONDS, 120),
+  /* how long the simulated monitor takes to connect after LINK CORPULS (milliseconds) */
+  CORPULS_SIM_CONNECT_MS: num(process.env.CORPULS_SIM_CONNECT_MS, 800),
+  /* the prototype demo mode of the simulated feed (on unless CORPULS_DEMO_MODE=false): LINK CORPULS starts a fresh
+     simulated monitor that connects, sends live values and, CORPULS_DEMO_ECG_SECONDS after connecting, ECG 1 by itself
+     (no test console needed for the basic demonstration); the crew can simulate a requested repeat 12-lead. Off: the
+     simulated monitor does only what the test console's simulator tells it. Simulation settings, not clinical ones */
+  CORPULS_DEMO_MODE: !/^(false|0|off|no)$/i.test(process.env.CORPULS_DEMO_MODE || ''),
+  CORPULS_DEMO_ECG_SECONDS: num(process.env.CORPULS_DEMO_ECG_SECONDS, 3)
   /* acknowledgement reminders and escalation are governance decisions not yet made (Q-15, Q-54, Q-72): nothing in this
      build reminds or escalates; the alarms continue until a clinician accepts / acknowledges */
 };

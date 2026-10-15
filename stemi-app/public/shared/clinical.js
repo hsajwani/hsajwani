@@ -24,11 +24,13 @@
   /* ---------- the corpuls feed: live vital signs, the connection, and how fresh the data is ----------
      Values are never erased: when the feed stops they stay, marked with the time they were received. "Not updating"
      is a technical freshness indicator only (three missed updates of the feed), never a clinical threshold. */
+  const CONNECT_SLOW_MS = 15000;
   function monState(rec) {
     const m = rec && rec.monitor;
     if (!m) return { kind: 'none', m: null };
     if (m.ended || RULES.isClosed(rec.state)) return { kind: 'ended', m };
-    if (m.status === 'waiting') return { kind: 'waiting', m };
+    /* connecting normally takes a second; still not connected after CONNECT_SLOW_MS: say so (technical, not clinical) */
+    if (m.status === 'waiting') return { kind: now() - (m.statusAt || m.linked || now()) > CONNECT_SLOW_MS ? 'slow' : 'waiting', m };
     if (m.status === 'connected') return { kind: m.last && now() - m.last > (m.every || 5000) * 3 ? 'stale' : 'live', m };
     return { kind: 'lost', m };
   }
@@ -56,15 +58,18 @@
   /* "… ago" is filled in (and kept current) by tickAgo, so the HTML of a panel changes only when its data does */
   const ago = t => (t ? `<span data-ago="${t}"></span>` : '');
   const devLine = m => (m && m.label ? esc(m.label) : 'corpuls');
+  /* the subtle prototype marker: the feed is simulated, never a production corpuls connection */
+  const simTag = () => '<span class="simtag" title="Prototype: the monitor data come from a simulated corpuls feed, not a real monitor">Simulated corpuls feed</span>';
   /* the state of the feed in words. role: crew sees CORPULS CONNECTION LOST, the clinicians LIVE MONITOR DATA
      TEMPORARILY UNAVAILABLE */
   function monWords(rec, role) {
     const s = monState(rec), m = s.m, last = m && m.last;
     const lastTxt = last ? `Last data received ${hms(last)}` : 'No data received yet';
     switch (s.kind) {
-      case 'live': return { s, tone: 'ok', title: 'LIVE FROM CORPULS', sub: last ? `Updated ${ago(last)}` : 'Connected · waiting for the first values' };
+      case 'live': return last ? { s, tone: 'ok', title: 'LIVE FROM CORPULS', sub: `Updated ${ago(last)}` } : { s, tone: 'ok', title: 'RECEIVING LIVE MONITOR DATA…', sub: 'Connected · the first values are on their way' };
       case 'stale': return { s, tone: 'warn', title: `LAST DATA RECEIVED ${hms(last)}`, sub: `${ago(last)} · the monitor is connected but no new values are arriving` };
-      case 'waiting': return { s, tone: 'neutral', title: 'WAITING FOR CORPULS', sub: `Linked to ${devLine(m)} · values appear when the monitor connects` };
+      case 'waiting': return { s, tone: 'neutral', title: role === 'crew' ? 'CONNECTING TO CORPULS…' : 'WAITING FOR MONITOR DATA', sub: `Linked to ${devLine(m)} · live values appear as soon as the monitor connects` };
+      case 'slow': return { s, tone: 'warn', title: role === 'crew' ? 'CORPULS NOT CONNECTED' : 'NO LIVE MONITOR DATA', sub: `Linked to ${devLine(m)} · the monitor has not connected` };
       case 'lost': return { s, tone: 'warn', title: role === 'crew' ? 'CORPULS CONNECTION LOST' : 'LIVE MONITOR DATA TEMPORARILY UNAVAILABLE', sub: `${lastTxt}${last ? ` (${ago(last)})` : ''}${m.status === 'reconnecting' ? ' · reconnecting' : ' · monitor disconnected'}` };
       case 'ended': return { s, tone: 'neutral', title: 'MONITOR FEED ENDED', sub: `${lastTxt}${m && m.endWhy ? ` · ${esc(m.endWhy)}` : ''}` };
       default: return { s, tone: 'neutral', title: 'NO CORPULS DATA', sub: 'Vital signs entered by the crew' };
@@ -76,16 +81,19 @@
     const w = monWords(rec, o.role || 'crew'), V = vitals(rec), dim = w.s.kind !== 'live' ? ' is-dim' : '', m = w.s.m;
     /* on the crew's screen the connection itself is in the corpuls bar: the panel only says how fresh the values are */
     if ((o.role || 'crew') === 'crew') {
-      if (w.s.kind === 'waiting') { w.title = 'LIVE FROM CORPULS'; w.sub = 'No values yet: the monitor has not connected'; }
+      if (w.s.kind === 'waiting') { w.title = 'CONNECTING TO CORPULS…'; w.sub = 'Live values appear as soon as the monitor connects'; }
+      if (w.s.kind === 'slow') { w.title = 'NO LIVE VALUES'; w.sub = 'corpuls has not connected'; }
       if (w.s.kind === 'lost') { w.title = m.last ? `LAST DATA RECEIVED ${hms(m.last)}` : 'NO DATA RECEIVED'; w.sub = `${m.last ? `${ago(m.last)} · ` : ''}corpuls connection lost`; }
     }
     const ks = ['hr', 'spo2', 'bp', 'rr'].concat(V.gcs ? ['gcs'] : []);
     const tile = k => { const x = V[k], tag = x && x.src !== 'corpuls' ? `<span class="mtile__src">entered by the crew ${hm(x.at)}</span>` : '';
       return `<div class="mtile mtile--${k}${x && !x.nv ? '' : ' is-none'}"><span class="mtile__k">${VL[k]}</span><span class="mtile__v">${x ? esc(x.v) : '—'}</span><span class="mtile__u">${x && !x.nv ? VU[k] : ''}${k === 'bp' && x && x.src === 'corpuls' ? ` · ${hm(x.at)}` : ''}</span>${tag}</div>`; };
+    /* connecting, or connected with the first values on their way: a transitional state, shown as one */
+    const busy = w.s.kind === 'waiting' || (w.s.kind === 'live' && !(m && m.last));
     return `<section class="mon mon--${w.tone}${dim}" aria-label="Live monitor data">
-      <div class="mon__h"><span class="mon__st">${w.s.kind === 'live' ? '<span class="mon__dot"></span>' : ''}${w.title}</span><span class="mon__sub">${w.sub}</span></div>
+      <div class="mon__h"><span class="mon__st">${w.s.kind === 'live' && m.last ? '<span class="mon__dot"></span>' : busy ? '<span class="spinner spinner--xs" aria-hidden="true"></span>' : ''}${w.title}</span><span class="mon__sub">${w.sub}</span></div>
       <div class="mtiles">${ks.map(tile).join('')}</div>
-      ${w.s.m ? `<div class="mon__f">${devLine(w.s.m)}${w.s.m.simulated ? ' · simulated feed' : ''}</div>` : ''}</section>`;
+      ${m ? `<div class="mon__f"><span>${devLine(m)}</span></div>` : ''}</section>`;
   }
   /* the live monitor as items of the patient strip (the ER Doctor's and the Cardiologist's screens) */
   function monitorInline(rec, role) {
@@ -604,6 +612,6 @@
     };
   }
 
-  window.CLIN = { latest, ecgN, imgOf, cur, isNv, vText, MDL, AIST, STATEMENT, ecgSrc, monState, monWords, vitals, monitorPanel, monitorInline, vitalsGroup, tickAgo, paint,
+  window.CLIN = { simTag, latest, ecgN, imgOf, cur, isNv, vText, MDL, AIST, STATEMENT, ecgSrc, monState, monWords, vitals, monitorPanel, monitorInline, vitalsGroup, tickAgo, paint,
     ptStrip, ptDetails, aiPanel, timeline, timelineHtml, summary, progress, Viewer, showFull, updateFull, closeFull, identity, namePrompt, Alarm };
 })();

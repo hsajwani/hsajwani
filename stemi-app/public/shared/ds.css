@@ -339,6 +339,8 @@ button.qrow--crit:hover { background: #fde8e6; }
 
 /* ---------- loading ---------- */
 .spinner { width: 22px; height: 22px; border-radius: 50%; border: 3px solid var(--line); border-top-color: var(--primary); animation: spin .9s linear infinite; flex: none; }
+.spinner--xs { width: 14px; height: 14px; border-width: 2px; }
+.spinner--sm { width: 18px; height: 18px; border-width: 2px; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .loading { display: flex; align-items: center; gap: var(--s3); color: var(--text-2); padding: var(--s6); justify-content: center; }
 .bar { height: 6px; border-radius: 3px; background: var(--surface-3); overflow: hidden; }
@@ -416,7 +418,9 @@ button.qrow--crit:hover { background: #fde8e6; }
 .mtile__u { font-size: var(--fs-sm); color: var(--text-2); white-space: nowrap; }
 .mtile__src { font-size: var(--fs-xs); color: var(--warn-text); font-weight: 600; }
 .mtile.is-none .mtile__v, .mon.is-dim .mtile__v { color: var(--text-3); }
-.mon__f { padding: var(--s2) var(--s4); font-size: var(--fs-xs); color: var(--text-3); border-top: 1px solid var(--line); }
+.mon__f { padding: var(--s2) var(--s4); font-size: var(--fs-xs); color: var(--text-3); border-top: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 4px var(--s2); align-items: center; }
+/* the subtle marker of the prototype's simulated corpuls feed */
+.simtag { display: inline-flex; align-items: center; padding: 1px 7px; border: 1px solid var(--line-2); border-radius: 999px; font: 700 10px/1.5 var(--font-ui); letter-spacing: .07em; text-transform: uppercase; color: var(--text-2); background: var(--surface); white-space: nowrap; }
 .pstrip__item .u { font-size: var(--fs-xs); color: var(--text-3); }
 .pstrip__item.is-dim .v { color: var(--text-3); }
 .mon-st { font-size: var(--fs-sm); color: var(--text-2); align-items: center; }

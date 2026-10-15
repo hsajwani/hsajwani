@@ -1,4 +1,4 @@
-# Architecture · test build 0.6.0
+# Architecture · test build 0.6.1
 
 TEST BUILD · FICTIONAL DATA ONLY. This describes the test build, not the production system.
 
@@ -97,7 +97,10 @@ corpuls.mission is connected. The provider emits normalized events (`VITALS_UPDA
 - It audits only the significant moments.
 
 The screens never see the provider. Linking happens at the crew's LINK CORPULS, which creates the unsent case. One
-monitor serves one case at a time, and closing the pathway ends the feed. The contract, the mock's behaviour, the
+monitor serves one case at a time, and closing the pathway ends the feed. In the prototype's demo mode
+(`CORPULS_DEMO_MODE`, the default) the simulated provider plays the crew's side by itself: it connects, sends live values
+and ECG 1 a few seconds later, and a requested repeat ECG can be simulated from the crew screen
+(`POST /api/corpuls/demo-acquire`); the test console can reset every simulated monitor (RESET CORPULS DEMO). The contract, the mock's behaviour, the
 simulator and what MEAD / corpuls must still provide are in [corpuls-integration.md](corpuls-integration.md).
 
 ## Data model (new in 0.6.0)
@@ -161,7 +164,7 @@ its feed ends), `POST /api/corpuls/link` (link again), `GET /api/cases/check`, `
 `GET /api/cases/view?cad=` (one case, read-only), `POST /api/images?cad=` (crew), `GET /files/:id` (stored images),
 and the test console's `/api/control/*` (console session only), including `GET /api/control/corpuls` and
 `POST /api/control/corpuls/<action>` (the simulator: connect, disconnect, reconnect, signal-loss, restore-signal,
-pause, resume, set, send-vitals, trigger-ecg).
+pause, resume, set, send-vitals, trigger-ecg, reset-demo). Demo mode only: `POST /api/corpuls/demo-acquire` (crew).
 
 ## Identity (prototype only)
 

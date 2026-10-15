@@ -97,7 +97,7 @@ function render(variant, acq, hr) {
 }
 
 /* the image of one simulated acquisition. hr: the simulated monitor's heart rate at that moment, so the 12-lead and the
-   live HR agree. nominal: the rate the sample was scripted at (the simulated HR drifts towards it afterwards) */
+   live HR agree. nominal: the rate the sample was scripted at (used only when no heart rate is known) */
 function sampleEcg(sample, n, acquiredAt, hr) {
   const s = SAMPLES[sample] ? sample : 'A', variant = variantOf(s, n), nominal = (VAR[variant] || VAR.border).hr, rate = rateOf(hr, nominal);
   return { sample: s, label: SAMPLES[s].label, variant, rate, nominal, mime: 'image/svg+xml', data: Buffer.from(render(variant, acquiredAt, rate)) };

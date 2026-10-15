@@ -3,7 +3,9 @@
    G repeat ECGs 2 and 3 · H connection loss · J manual ECG fallback · I reconnection without duplicates · K closed case ·
    L duplicate CAD — and: data paused (freshness indicator), signal loss with an ECG held on the monitor, a server
    restart, the corpuls.mission placeholder provider.
-   The test console's CORPULS SIMULATOR plays the crew's corpuls3 (MockCorpulsProvider). Fictional data only.
+   The test console's CORPULS SIMULATOR plays the crew's corpuls3 (MockCorpulsProvider), with the demo mode off
+   (CORPULS_DEMO_MODE=false) so that every acquisition is the test's own; the demo mode is tested by demo-test.js.
+   Fictional data only.
    Run: npm run test:corpuls   (cloud container: NODE_PATH=$(npm root -g) npm run test:corpuls). */
 const H = require('./lib/harness');
 const { chromium } = H.playwright();
@@ -52,7 +54,8 @@ async function main(S) {
     ok('B', 'Vital signs are not written to the clinical audit trail; the history stays light', !aud(A).some(a => /^(HR|SpO|BP|RR)\b/.test(a)) && nv <= 6, `${nv} history rows`);
 
     /* ---------- C. automatic ECG 1 ---------- */
-    ok('C', 'Crew: WAITING FOR ECG FROM CORPULS before the acquisition', /WAITING FOR ECG FROM CORPULS/.test(await C.textContent('#d-ecgh')));
+    ok('C', 'Crew: READY FOR THE 12-LEAD ECG before the acquisition (no dead-end wording, fallback quiet)', /READY FOR THE 12-LEAD ECG/.test(await C.textContent('#d-ecgalt')) && !/WAITING FOR ECG|No ECG has arrived/.test(await C.textContent('#main')) && !(await C.isVisible('#d-bar [data-act="fb-draft"]')));
+    ok('C', 'API: the crew\'s simulated acquisition is not available with the demo mode off', (await crew.req('POST', '/api/corpuls/demo-acquire', { cad: A })).status === 409);
     const e1 = await sim('trigger-ecg', { sample: 'A' });
     ok('C', 'Simulator: ECG 1 acquired on corpuls3 and received by the platform', e1.status === 200 && e1.body.n === 1);
     const shown = await C.waitForSelector('#d-viewer:not([hidden]) .ecgv__scroll img', { timeout: 8000 }).then(() => true, () => false);
@@ -216,7 +219,7 @@ async function main(S) {
 
 /* after a server restart, a linked feed carries on (no false "connection lost"); the corpuls.mission placeholder */
 async function restartAndStub() {
-  let S = await H.startServer({});
+  let S = await H.startServer({ CORPULS_DEMO_MODE: 'false' });
   try {
     const crew = H.Api(S.BASE, 'crew'); await crew.start();
     const Z = H.cad(403);
@@ -225,7 +228,7 @@ async function restartAndStub() {
     await sleep(1200);
     await S.stop(true);
     const DATA = S.DATA, before = H.db(DATA, `SELECT vitals_at FROM cases WHERE cad='${Z}'`)[0].vitals_at;
-    S = await H.startServer({ DATA_DIR: DATA });
+    S = await H.startServer({ DATA_DIR: DATA, CORPULS_DEMO_MODE: 'false' });
     await sleep(2500);
     const r = H.db(DATA, `SELECT corpuls_status, vitals_at FROM cases WHERE cad='${Z}'`)[0];
     ok('R', 'After a server restart the linked feed carries on: still connected, new samples, no false loss', r.corpuls_status === 'connected' && r.vitals_at > before && !H.auditOf(DATA, Z).some(a => /connection lost|restored/.test(a.action)));
@@ -243,7 +246,7 @@ async function restartAndStub() {
 }
 
 (async () => {
-  const S = await H.startServer({ MOCK_AI_DELAY_MS: '600' });
+  const S = await H.startServer({ MOCK_AI_DELAY_MS: '600', CORPULS_DEMO_MODE: 'false' });
   try { await main(S); } catch (e) { console.error(e); R.ok('', 'The test ran to the end', false, e.message); } finally { await S.stop(); }
   try { await restartAndStub(); } catch (e) { console.error(e); R.ok('', 'The restart / placeholder checks ran to the end', false, e.message); }
   process.exit(R.summary() ? 1 : 0);

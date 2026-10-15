@@ -1,6 +1,8 @@
 /* End-to-end acceptance test of the STEMI pathway on three screens at once, in the browser:
    crew MDT (landscape tablet 1180 × 820) → ER Doctor (desktop 1440 × 900) → Cardiologist (phone 393 × 852).
-   The ECGs and vital signs come from the simulated corpuls feed, driven through the test console's simulator.
+   The ECGs and vital signs come from the simulated corpuls feed in its demo mode (the default): after LINK CORPULS the
+   feed connects and ECG 1 arrives by itself; the repeat ECG is simulated from the crew screen; the test console only
+   changes a vital sign.
    Scenarios: 1 crew SEND · 2 ER accept with a name · 3 ER ACTIVATE · 7 cardiologist acknowledge with a name ·
    10 repeat ECG · 8 CONFIRMED STEMI · 11 COMPLETE STEMI PATHWAY · 15 nothing reaches the cardiologist before the ER ·
    16 everything arrives without a refresh · 17 the alarms sound only for a new case / activation, until accepted.
@@ -96,8 +98,11 @@ async function main(S) {
     ok('10', 'Crew: REPEAT ECG REQUESTED arrives at once, with the instruction', rq && (await C.textContent('.modal')).includes('Repeat with V7 to V9'));
     await C.click('[data-act="dec-ack"]');
     ok('10', 'Crew: told to acquire the repeat 12-lead on corpuls; COMPLETE STEMI PATHWAY not available', /Acquire a new 12-lead on corpuls3/.test(await C.textContent('.status-panel')) && !(await C.isVisible('[data-act="complete"]')));
-    /* the crew acquires the repeat ECG on corpuls3 (the test console's simulator): nothing to upload */
-    ok('10', 'corpuls: the repeat 12-lead is acquired and sent as ECG 2', (await H.sim(S.BASE, A, 'trigger-ecg', { sample: 'B' })).body.n === 2);
+    /* the crew acquires the repeat ECG on corpuls3 — in the prototype's demo mode simulated from the crew screen: nothing to upload */
+    await C.click('.status-panel [data-act="demo-acq"]');
+    let n2 = 0;
+    for (let i = 0; i < 30 && n2 < 2; i++) { await sleep(200); n2 = H.db(S.DATA, `SELECT COUNT(*) n FROM ecgs WHERE cad='${A}' AND source='corpuls'`)[0].n; }
+    ok('10', 'corpuls: the repeat 12-lead (SIMULATE REPEAT ECG ACQUISITION on the crew screen) arrives as ECG 2 from corpuls', n2 === 2);
     ok('10', 'Crew: REPEAT ECG SENT — CARDIOLOGIST REVIEWING', await waitText(C, 'REPEAT ECG SENT — CARDIOLOGIST REVIEWING'));
     const newDoc = await D.waitForSelector('.ecgv__new >> text=ECG 2', { timeout: 15000 }).then(() => true, () => false);
     ok('10', 'Cardiologist: ECG 2 arrives silently and is announced, not swapped in', newDoc && (await quiet(doc.tones, 500)) === 0 && (await D.textContent('.ecgv__cap')).includes('ECG 1 of 2'));
@@ -105,7 +110,7 @@ async function main(S) {
     ok('10', 'Cardiologist: a decision is held until the new ECG 2 has been viewed', (await D.getAttribute('#c-dock [data-act="decide"]', 'aria-disabled')) === 'true');
     /* new vital signs from corpuls: arrive silently on both screens */
     await H.sim(S.BASE, A, 'set', { sys: 128, dia: 76 }); await H.sim(S.BASE, A, 'send-vitals');
-    ok('16', 'ER: the new BP from corpuls arrives without refresh, the earlier reading kept, no sound', await waitText(E, '128/76') && /Earlier: 142\/88/.test(await E.textContent('#c-details')) && (await quiet(er.tones, 300)) === 0);
+    ok('16', 'ER: the new BP from corpuls arrives without refresh, the earlier reading kept, no sound', await waitText(E, '128/76') && /Earlier: 132\/78/.test(await E.textContent('#c-details')) && (await quiet(er.tones, 300)) === 0);
 
     /* ---------- 8. CONFIRMED STEMI ---------- */
     await D.click('#c-dock [data-act="view-latest"]');

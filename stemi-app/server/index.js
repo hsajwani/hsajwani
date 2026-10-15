@@ -192,6 +192,14 @@ async function route(req, res) {
     if (r.status === 'closed') return send(res, 409, { code: 'closed', ...r, error: 'This STEMI pathway is closed: it is read-only.' });
     return send(res, 200, { ok: true, ...r, rec: platform.snapshot(r.cad) });
   }
+  /* demo mode only (prototype): the crew acquires a 12-lead on the simulated corpuls3 from the crew screen, because no
+     physical monitor is connected; the ECG arrives through the simulated feed */
+  if (p === '/api/corpuls/demo-acquire' && req.method === 'POST') {
+    if (A.role !== 'crew') return crewOnly('acquires the simulated 12-lead');
+    const r = platform.monitor.demoAcquire(A, (await json(req)).cad);
+    const code = { ok: 200, missing: 404, off: 409, closed: 409, unlinked: 409, refused: 409 }[r.status] || 409;
+    return send(res, code, { ok: r.status === 'ok', code: r.status, ...r });
+  }
 
   /* ---------- actions from the screens ---------- */
   if (req.method === 'POST' && p === '/api/ops') {
@@ -228,6 +236,11 @@ async function route(req, res) {
     if (req.method === 'GET' && what === 'cases') return send(res, 200, { cases: platform.consoleCases() });
     /* the corpuls simulator (TEST ONLY): the simulated monitors, and what the tester makes them do */
     if (req.method === 'GET' && what === 'corpuls') return send(res, 200, platform.monitor.simInfo());
+    /* RESET CORPULS DEMO: every simulated monitor back to the clean demo state (cases and records untouched) */
+    if (req.method === 'POST' && what === 'corpuls/reset-demo') {
+      const r = platform.monitor.resetDemo();
+      return send(res, r.ok ? 200 : 409, { ...r, sim: platform.monitor.simInfo() });
+    }
     if (req.method === 'POST' && what.startsWith('corpuls/')) {
       const b = await json(req), r = platform.monitor.simulate(b.cad, what.slice(8), b);
       return send(res, r.ok ? 200 : 409, { ...r, sim: platform.monitor.simInfo() });
@@ -311,7 +324,7 @@ server.listen(cfg.PORT, cfg.HOST, () => {
   console.log(` Cardiologist on iPhone:     http://${ip}:${cfg.PORT}/cardiologist`);
   console.log(` Test console:               http://localhost:${cfg.PORT}/control`);
   if (lan.length > 1) console.log(` Other addresses: ${lan.slice(1).map(a => `${a.address} (${a.name})`).join(', ')}`);
-  console.log(` Health: http://localhost:${cfg.PORT}/health · database: ${path.relative(cfg.ROOT, cfg.DB_FILE)} (kept across restarts) · AI: ${cfg.AI_PROVIDER} (simulated) · corpuls: ${cfg.CORPULS_PROVIDER === 'mock' ? 'simulated feed (MockCorpulsProvider)' : cfg.CORPULS_PROVIDER + ' (not implemented)'}`);
+  console.log(` Health: http://localhost:${cfg.PORT}/health · database: ${path.relative(cfg.ROOT, cfg.DB_FILE)} (kept across restarts) · AI: ${cfg.AI_PROVIDER} (simulated) · corpuls: ${cfg.CORPULS_PROVIDER === 'mock' ? `simulated feed (MockCorpulsProvider${cfg.CORPULS_DEMO_MODE ? ', demo mode: automatic ECG 1' : ''})` : cfg.CORPULS_PROVIDER + ' (not implemented)'}`);
   if (!DEV) console.log(` Crew test login: crew@test.local · password: ${process.env.TEST_USER_PASSWORD ? '(from .env)' : cfg.TEST_PASSWORD}\n The iPhone must be on the same Wi-Fi. Stop the server with Ctrl+C.`);
   console.log(`${line}\n`);
 });

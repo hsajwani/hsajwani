@@ -1,4 +1,4 @@
-# Open decisions in this build (0.6.0)
+# Open decisions in this build (0.6.1)
 
 Where a decision is still open, the build uses a working default and says so. None of these defaults is confirmed.
 Reminder and escalation times are governance configurable and not set; the build invents no numbers, rosters,
@@ -43,7 +43,9 @@ pathway progress (CREW → ER → CARDIOLOGY → DECISION), and the clinical tim
 trail stays in the test console). From 0.6.0: the crew's single page (the corpuls connection bar, the large ECG, the
 compact live-values panel, the four patient items, one sticky SEND TO ER with the list of what is missing), the
 wording of the connection states (CORPULS CONNECTED · WAITING FOR CORPULS · CORPULS CONNECTION LOST / LIVE MONITOR
-DATA TEMPORARILY UNAVAILABLE), and the manual fallback as a quiet secondary control. Each needs a yes or no.
+DATA TEMPORARILY UNAVAILABLE), and the manual fallback as a quiet secondary control. From 0.6.1, for the prototype
+demonstration only: the automatic simulated feed (ECG 1 about 3 s after CORPULS CONNECTED), the step line in the corpuls
+bar, and SIMULATE REPEAT ECG ACQUISITION on the crew screen (no physical monitor is connected). Each needs a yes or no.
 
 ## Not built in this round
 

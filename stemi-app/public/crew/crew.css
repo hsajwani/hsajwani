@@ -36,6 +36,15 @@
 .cbar--warn { background: var(--warn-soft); border-color: var(--warn-line); }
 .cbar--warn .cbar__t > b, .cbar--warn .cbar__sub, .cbar--warn .cbar__ic { color: var(--warn-text); }
 .cbar--neutral .cbar__ic { color: var(--text-2); }
+/* connecting: a transitional state, shown as one (never a dead end) */
+.cbar--busy { background: var(--info-soft); border-color: var(--info-line); }
+.cbar--busy .cbar__t > b { color: var(--info-text); }
+.cbar__t .simtag { align-self: center; }
+/* the feed starting on the unsent case: CAD linked → corpuls connected → live vitals → ECG 1 */
+.csteps { list-style: none; margin: 4px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px var(--s4); flex-basis: 100%; }
+.csteps li { display: inline-flex; gap: 6px; align-items: center; font-size: var(--fs-sm); font-weight: 600; color: var(--text-3); }
+.csteps li.is-done { color: var(--ok-text); }
+.csteps li.is-now { color: var(--info-text); }
 .c-bar:empty { display: none; }
 .c-bar { margin-top: var(--s4); }
 
@@ -48,8 +57,14 @@
 .ecgwait__t { display: flex; flex-direction: column; gap: 4px; }
 .ecgwait__t b { font-size: var(--fs-lg); }
 .ecgwait__t span { color: var(--text-2); }
-.ecgwait__fb { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: var(--s2) var(--s3); align-items: center; padding: var(--s3); border: 1px dashed var(--warn-line); border-radius: var(--r-md); background: var(--warn-soft); }
-.ecgwait__q { grid-column: 1 / -1; justify-self: start; }
+.ecgwait--busy .ecgwait__ic { background: var(--info-soft); }
+.ecgwait--busy .ecgwait__t b { color: var(--info-text); letter-spacing: .02em; }
+.ecgwait--warn .ecgwait__ic { background: var(--warn-soft); color: var(--warn-text); }
+.ecgwait--warn .ecgwait__t b { color: var(--warn-text); letter-spacing: .02em; }
+.ecgcard .card__f--quiet { border-top: 0; padding-top: 0; }
+/* demo mode only: the crew's simulated acquisition of a requested repeat 12-lead */
+.demoacq { display: flex; flex-wrap: wrap; gap: var(--s2) var(--s4); align-items: center; margin-top: var(--s2); }
+.demoacq .small { flex: 1 1 260px; }
 .fbblock { display: flex; flex-direction: column; gap: var(--s3); padding: var(--s3) var(--s4); }
 
 /* the patient: four items, labels above the answers */
@@ -127,3 +142,4 @@
   .sendbar .btn--xl { min-width: 0; width: 100%; }
   .ecgwait { grid-template-columns: minmax(0, 1fr); padding: var(--s4); }
 }
+.ecgwait__ic .spinner { width: 28px; height: 28px; }

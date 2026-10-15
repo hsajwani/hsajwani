@@ -476,7 +476,7 @@ function createCase(A, b, source) {
   const cad = c.cad, cid = String((b && b.cid) || '').slice(0, 64) || null, rcv = Date.now();
   const ex = caseRow(cad);
   if (ex) {
-    if (cid && ex.created_cid === cid) { if (b.link && A.role === 'crew') monitor.link(A, cad); return { status: 'same', cad }; }
+    if (cid && ex.created_cid === cid) { if (b.link && A.role === 'crew') monitor.link(A, cad, { autoEcg: b.autoEcg !== false }); return { status: 'same', cad }; }
     return { status: 'exists', cad, existing: casePublic(ex) };
   }
   const crew = A.role === 'crew' ? A : { ...seed.crewUser(), device: A.device };
@@ -495,8 +495,9 @@ function createCase(A, b, source) {
     W.flush();
   });
   /* the crew's tablet links the case to the unit's corpuls monitor at once: from then on the ECGs and vital signs
-     acquired on corpuls attach to this CAD number */
-  if (b && b.link) monitor.link(crew, cad);
+     acquired on corpuls attach to this CAD number (autoEcg false: the tablet already holds a fallback ECG, so the
+     simulated demo does not add an ECG 1 of its own) */
+  if (b && b.link) monitor.link(crew, cad, { autoEcg: b.autoEcg !== false });
   push(cad);
   return { status: 'created', cad };
 }
@@ -731,7 +732,7 @@ function demoCase(A, rawCad) {
   const r = createCase(crew, { cad: rawCad, openedAt: Date.now() - 5000 }, 'manual-test-console');
   if (r.status !== 'created') return r;
   const cad = r.cad;
-  monitor.link(crew, cad, { device_id: `SIM-C3-DEMO-${cad.replace(/\D/g, '').slice(-5)}` });
+  monitor.link(crew, cad, { device_id: `SIM-C3-DEMO-${cad.replace(/\D/g, '').slice(-5)}`, autoEcg: false });
   monitor.simulate(cad, 'connect');
   const ecg = monitor.simulate(cad, 'trigger-ecg', { sample: D.sim().find === 'clear' ? 'C' : 'A' });
   if (!ecg || !ecg.ok) return { status: 'error', cad, error: (ecg && ecg.error) || 'The simulated ECG was not received.' };

@@ -135,7 +135,8 @@ async function main(S) {
 }
 
 (async () => {
-  const S = await H.startServer({ MOCK_AI_DELAY_MS: '800' });
+  /* the demo mode is off: the corrections and the offline flow are timed by the test, not by the demo's automatic ECG 1 */
+  const S = await H.startServer({ MOCK_AI_DELAY_MS: '800', CORPULS_DEMO_MODE: 'false' });
   try { await main(S); } catch (e) { console.error(e); R.ok('', 'The test ran to the end', false, e.message); } finally { await S.stop(); }
   process.exit(R.summary() ? 1 : 0);
 })();

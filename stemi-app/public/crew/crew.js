@@ -254,7 +254,7 @@
   function ensureCreated(d) {
     if (d.created) return Promise.resolve(true);
     if (creating) return creating;
-    creating = LIVE.request('POST', '/api/cases', { cad: d.cad, cid: d.cid, openedAt: d.openedAt, hist: d.cadHist, link: true }).then(x => {
+    creating = LIVE.request('POST', '/api/cases', { cad: d.cad, cid: d.cid, openedAt: d.openedAt, hist: d.cadHist, link: true, autoEcg: !(d.ecg && d.ecg.imgs.length) }).then(x => {
       creating = null;
       if (S.draft !== d) return false;
       if (x.status === 201 || x.status === 200) { d.created = true; d.cadChecked = true; if (x.body.rec) S.cases.set(d.cad, x.body.rec); saveLocal(true); render(); return true; }
@@ -408,22 +408,34 @@
 
   /* ---------- the corpuls connection (the monitor's link to the platform, not this tablet's) ---------- */
   /* is the manual fallback to be offered prominently? when corpuls cannot deliver, or no ECG came once the rest is done */
+  /* the manual fallback is offered prominently only when corpuls cannot deliver: not linked for want of a connection,
+     the connection lost, corpuls not connecting at all, or the feed ended on an open case. While the (simulated) feed
+     works, or is still connecting, it stays a quiet secondary option */
   function fbProminent(rec, d) {
-    if (d && !d.created) return true;
+    if ((d && !d.created) || !rec) return !S.up;
     const k = CLIN.monState(rec).kind;
-    if (k === 'waiting' || k === 'lost' || k === 'none' || (k === 'ended' && !RULES.isClosed(rec.state))) return true;
-    return !!(d && !rec.ecgs.length && !Object.keys(mdErrors(d.md)).length);
+    return k === 'lost' || k === 'slow' || k === 'none' || (k === 'ended' && !RULES.isClosed(rec.state));
+  }
+  /* the start of the feed on the unsent case, step by step: CAD linked → corpuls connected → live vitals → ECG 1 */
+  function feedSteps(rec, d) {
+    const m = rec && rec.monitor, L = rec && CLIN.latest(rec), demo = !!(m && m.demo);
+    const linked = !!(d.created && m && m.linked), conn = !!(m && (m.status === 'connected' || m.last)), vit = !!(m && m.last), ecg = !!L;
+    const step = (done, busy, label) => `<li class="${done ? 'is-done' : busy ? 'is-now' : ''}">${done ? icon('check', 'ico-sm') : busy ? '<span class="spinner spinner--xs" aria-hidden="true"></span>' : icon('dot', 'ico-sm')}<span>${label}</span></li>`;
+    return `<ol class="csteps" aria-label="corpuls feed">${step(linked, !linked, 'CAD linked')}${step(conn, linked && !conn, conn ? 'Corpuls connected' : 'Connecting to corpuls')}${step(vit, conn && !vit, vit ? 'Live vitals received' : 'Live vitals')}${step(ecg, vit && !ecg && demo, ecg ? `ECG ${L.n} received${L.src === 'corpuls' ? ' from corpuls' : ''}` : demo && vit ? 'Receiving ECG 1' : 'ECG 1')}</ol>`;
   }
   function cbar(rec, d) {
-    const cad = (rec && rec.cad) || (d && d.cad);
-    const bar = (tone, ic, title, sub, action) => `<div class="cbar cbar--${tone}" role="status"><span class="cbar__ic">${ic}</span><div class="cbar__t"><b>${title}</b>${cad ? `<span class="cad">CAD #${esc(cad)}</span>` : ''}${sub ? `<span class="cbar__sub">${sub}</span>` : ''}</div>${action || ''}</div>`;
+    const cad = (rec && rec.cad) || (d && d.cad), m = rec && rec.monitor, tag = m && m.simulated ? CLIN.simTag() : '';
+    const bar = (tone, ic, title, sub, action, extra) => `<div class="cbar cbar--${tone}" role="status"><span class="cbar__ic">${ic}</span><div class="cbar__t"><b>${title}</b>${cad ? `<span class="cad">CAD #${esc(cad)}</span>` : ''}${tag}${sub ? `<span class="cbar__sub">${sub}</span>` : ''}${extra || ''}</div>${action || ''}</div>`;
     const fbBtn = where => `<button class="btn btn--secondary" data-act="${where === 'draft' ? 'fb-draft' : 'ecg-new'}">${icon('camera')}MANUAL ECG FALLBACK</button>`;
-    if (d && !d.created) return bar('warn', icon('wifi-off'), S.up ? 'LINKING CORPULS…' : 'NO CONNECTION — CORPULS NOT LINKED YET', S.up ? '' : 'The case is created and corpuls linked when the connection returns. Manual fallback available.', S.up ? '' : fbBtn('draft'));
+    const spin = '<span class="spinner spinner--sm" aria-hidden="true"></span>';
+    if (d && !d.created) return S.up ? bar('busy', spin, 'CONNECTING TO CORPULS…', '', '', feedSteps(rec, d)) : bar('warn', icon('wifi-off'), 'NO CONNECTION — CORPULS NOT LINKED YET', 'The case is created and corpuls linked when the connection returns. Manual fallback available.', fbBtn('draft'));
     if (!rec) return '';
-    const w = CLIN.monWords(rec, 'crew'), m = rec.monitor, where = d ? 'draft' : 'case', dev = m && m.label ? esc(m.label) + (m.simulated ? ' · simulated feed' : '') : '';
+    const w = CLIN.monWords(rec, 'crew'), where = d ? 'draft' : 'case', dev = m && m.label ? esc(m.label) : '';
     switch (w.s.kind) {
-      case 'live': case 'stale': return bar('ok', '<span class="mon__dot"></span>', 'CORPULS CONNECTED', dev);
-      case 'waiting': return bar('neutral', icon('clock'), 'WAITING FOR CORPULS', `${dev} · the monitor has not connected yet`, fbBtn(where));
+      /* on the unsent case the bar shows the feed starting, step by step; afterwards the monitor it comes from */
+      case 'live': case 'stale': return bar('ok', '<span class="mon__dot"></span>', 'CORPULS CONNECTED', d ? '' : dev, '', d ? feedSteps(rec, d) : '');
+      case 'waiting': return bar('busy', spin, 'CONNECTING TO CORPULS…', d ? '' : dev, '', d ? feedSteps(rec, d) : '');
+      case 'slow': return bar('warn', icon('wifi-off'), 'CORPULS NOT CONNECTED', `${dev ? dev + ' · ' : ''}no monitor data has arrived · <b>MANUAL FALLBACK AVAILABLE</b>`, RULES.isClosed(rec.state) ? '' : fbBtn(where));
       case 'lost': return bar('warn', icon('wifi-off'), 'CORPULS CONNECTION LOST', `${m.last ? `Last data received ${hms(m.last)}` : 'No data received yet'} · ${m.status === 'reconnecting' ? 'reconnecting' : 'monitor disconnected'} · <b>MANUAL FALLBACK AVAILABLE</b>`, RULES.isClosed(rec.state) ? '' : fbBtn(where));
       case 'ended': return RULES.isClosed(rec.state) ? bar('neutral', icon('lock'), 'CORPULS FEED ENDED', `${m.last ? `Last data received ${hms(m.last)} · ` : ''}the last values are kept with the case`)
         : bar('warn', icon('info'), 'CORPULS FEED ENDED', `${esc(m.endWhy || '')}`, `<button class="btn btn--secondary" data-act="relink">LINK CORPULS AGAIN</button>`);
@@ -432,9 +444,9 @@
   }
   /* the live values, with the manual vital signs offered when corpuls has none */
   function monBox(rec, d) {
-    if (!rec) return `<section class="mon mon--neutral"><div class="mon__h"><span class="mon__st">LIVE FROM CORPULS</span><span class="mon__sub">${S.up ? 'Linking…' : 'Not linked yet: no connection'}</span></div><div class="mtiles">${['HR', 'SpO₂', 'BP', 'RR'].map(k => `<div class="mtile is-none"><span class="mtile__k">${k}</span><span class="mtile__v">—</span><span class="mtile__u"></span></div>`).join('')}</div></section>`;
+    if (!rec) return `<section class="mon mon--neutral is-dim"><div class="mon__h"><span class="mon__st">${S.up ? '<span class="spinner spinner--xs" aria-hidden="true"></span>CONNECTING TO CORPULS…' : 'LIVE FROM CORPULS'}</span><span class="mon__sub">${S.up ? 'Live values appear as soon as the monitor connects' : 'Not linked yet: no connection'}</span></div><div class="mtiles">${['HR', 'SpO₂', 'BP', 'RR'].map(k => `<div class="mtile is-none"><span class="mtile__k">${k}</span><span class="mtile__v">—</span><span class="mtile__u"></span></div>`).join('')}</div></section>`;
     const k = CLIN.monState(rec).kind, closed = RULES.isClosed(rec.state);
-    const manual = !closed && (k === 'waiting' || k === 'lost' || k === 'none' || k === 'ended' || k === 'stale')
+    const manual = !closed && (k === 'lost' || k === 'slow' || k === 'none' || k === 'ended' || k === 'stale')
       ? `<div class="mon__more"><button class="btn btn--sm btn--quiet" data-act="vitals">${icon('plus', 'ico-sm')}Enter vital signs manually (fallback)</button></div>` : '';
     return CLIN.monitorPanel(rec, { role: 'crew' }).replace(/<\/section>$/, `${manual}</section>`);
   }
@@ -538,14 +550,24 @@
     const d = S.draft, rec = dRec(), L = rec && CLIN.latest(rec), fb = d.ecg.imgs.length, n = nextN(d.created && d.cad), prom = fbProminent(rec, d);
     const head = L ? `<h2 id="d-ecgh-t">${L.src === 'corpuls' ? `ECG ${L.n} RECEIVED FROM CORPULS` : `ECG ${L.n}`}</h2><span class="sp"></span><span class="small">Acquired <b class="mono">${hms(L.acq)}</b></span>`
       : fb ? `<h2 id="d-ecgh-t">MANUAL ECG FALLBACK · ECG ${n}</h2><span class="sp"></span><span class="small muted">sent with the case</span>`
-      : `<h2 id="d-ecgh-t">WAITING FOR ECG FROM CORPULS</h2>`;
+      : `<h2 id="d-ecgh-t">ECG ${n}</h2><span class="sp"></span><span class="small muted">arrives from corpuls</span>`;
     const fbBlock = fb ? `<div class="fbblock"><div class="row"><span class="tag">Manual fallback</span><span class="small muted">ECG ${L ? n : n} · ${fb} image${fb > 1 ? 's' : ''} · acquired <span class="mono">${hms(d.ecg.acq)}</span> · <button type="button" class="link-btn" data-act="acq" data-where="draft">change time</button> · not sent yet: it goes with the case</span></div>${shotsHtml(d.ecg, 'draft')}</div>` : '';
     let alt;
     if (L) alt = `${fbBlock}<div class="card__f"><span class="small muted">${L.src === 'corpuls' ? `${icon('check', 'ico-sm')} Arrived from corpuls by itself — nothing to upload.` : ''}</span><span class="sp"></span>${fb ? '' : `<button class="btn btn--sm btn--quiet" data-act="fb-draft">${icon('camera', 'ico-sm')}Manual ECG fallback</button>`}</div>`;
     else if (fb) alt = `<div class="card__b">${fbBlock}</div>`;
-    else alt = `<div class="ecgwait"><div class="ecgwait__ic">${icon('ecg')}</div><div class="ecgwait__t"><b>Acquire the 12-lead ECG on corpuls3.</b><span>It appears here automatically${d.created ? '' : ' once corpuls is linked'}: nothing to photograph or upload.</span></div>
-        ${prom ? `<div class="ecgwait__fb"><span class="small muted">${d.created && CLIN.monState(rec).kind === 'live' ? 'No ECG has arrived from corpuls yet.' : 'corpuls cannot deliver the ECG right now.'}</span><button class="btn btn--secondary" data-act="fb-draft">${icon('camera')}MANUAL ECG FALLBACK</button></div>`
-        : `<button class="btn btn--sm btn--quiet ecgwait__q" data-act="fb-draft">${icon('camera', 'ico-sm')}Manual ECG fallback</button>`}</div>`;
+    else {
+      const k = rec ? CLIN.monState(rec).kind : 'waiting', demo = !!(rec && rec.monitor && rec.monitor.demo);
+      const wait = (ic, title, sub, cls) => `<div class="ecgwait${cls || ''}" role="status"><div class="ecgwait__ic">${ic}</div><div class="ecgwait__t"><b>${title}</b><span>${sub}</span></div></div>`;
+      const spin = '<span class="spinner" aria-hidden="true"></span>';
+      /* corpuls cannot deliver now: the fallback, prominently */
+      if (prom) alt = `${wait(icon('alert'), 'THE ECG CANNOT COME FROM CORPULS RIGHT NOW', `${rec ? esc(CLIN.monWords(rec, 'crew').title) : 'NO CONNECTION'}. Use the manual ECG fallback, or wait for corpuls to return.`, ' ecgwait--warn')}
+        <div class="card__f"><button class="btn btn--secondary" data-act="fb-draft">${icon('camera')}MANUAL ECG FALLBACK</button><span class="small muted">Photograph or upload the 12-lead printout.</span></div>`;
+      /* the feed starting: transitional states, never a dead end */
+      else if (!d.created || k === 'waiting') alt = wait(spin, 'CONNECTING TO CORPULS…', 'The 12-lead ECG appears here automatically once the monitor is connected.', ' ecgwait--busy');
+      else if (demo) alt = wait(spin, 'RECEIVING 12-LEAD ECG FROM CORPULS…', 'Acquired on corpuls3 · it appears here automatically.', ' ecgwait--busy');
+      else alt = wait(icon('ecg'), 'READY FOR THE 12-LEAD ECG', 'Acquire the 12-lead on corpuls3: it appears here automatically. Nothing to photograph or upload.');
+      if (!prom) alt += `<div class="card__f card__f--quiet"><span class="sp"></span><button class="btn btn--sm btn--quiet" data-act="fb-draft">${icon('camera', 'ico-sm')}Manual ECG fallback</button></div>`;
+    }
     return { head, alt, rec };
   }
   function sendBar() {
@@ -553,8 +575,11 @@
     if (s && ['create', 'upload', 'submit'].includes(s.stage)) return `<div class="sending" role="status" aria-live="polite"><div class="row"><span class="spinner"></span><b>${{ create: 'Creating the case and linking corpuls…', upload: 'Uploading the fallback ECG images…', submit: 'Sending to the ER…' }[s.stage]}</b></div><div id="send-pct">${sendPct()}</div></div>`;
     if (s && (s.stage === 'queued' || s.stage === 'failed')) return `<div class="sendbar" style="border-color:var(--warn-line);background:var(--warn-soft)" role="alert"><div class="sendbar__t"><b>${icon('wifi-off', 'ico-sm')} NOT SENT${s.stage === 'queued' ? ' — NO CONNECTION' : ''}</b><span class="small">${s.stage === 'queued' ? 'Saved on this tablet. It is sent automatically when the connection returns.' : esc(s.err || 'The case was not sent.')} If it cannot wait, use your STEMI downtime procedure (phone).</span></div><button class="btn btn--primary btn--xl" data-act="send"${S.up ? '' : ' disabled'}>${icon('send')}SEND AGAIN</button></div>`;
     const chk = (ok, t) => `<li class="${ok ? 'is-ok' : ''}">${icon(ok ? 'check' : 'dot', 'ico-sm')}<span>${t}</span></li>`;
-    const all = r.cad && r.ecg && r.md;
-    return `<div class="sendbar"><ul class="readylist" aria-label="Ready to send">${chk(r.cad, d.cadOk ? `CAD #${esc(d.cad)}` : 'CAD number')}${chk(r.ecg, r.corp ? `ECG ${r.corp > 1 ? '1–' + r.corp : '1'} from corpuls` : r.fb ? 'Manual fallback ECG' : 'ECG — waiting')}${chk(r.md, `Patient ${r.n} of 4`)}<li class="is-info">${icon('info', 'ico-sm')}<span>Vital signs travel automatically</span></li></ul>
+    const all = r.cad && r.ecg && r.md, rec = dRec(), k = rec ? CLIN.monState(rec).kind : 'waiting', demo = !!(rec && rec.monitor && rec.monitor.demo);
+    /* ECG 1 on its way: said as such, never as a dead end */
+    const ecgNext = !d.created ? (S.up ? 'ECG 1 — connecting to corpuls' : 'ECG — no connection') : k === 'waiting' ? 'ECG 1 — connecting to corpuls'
+      : k === 'live' || k === 'stale' ? (demo ? 'ECG 1 — receiving from corpuls' : 'ECG 1 — acquire on corpuls3') : 'ECG — manual fallback available';
+    return `<div class="sendbar"><ul class="readylist" aria-label="Ready to send">${chk(r.cad, d.cadOk ? `CAD #${esc(d.cad)}` : 'CAD number')}${chk(r.ecg, r.corp ? `ECG ${r.corp > 1 ? '1–' + r.corp : '1'} from corpuls` : r.fb ? 'Manual fallback ECG' : ecgNext)}${chk(r.md, `Patient ${r.n} of 4`)}<li class="is-info">${icon('info', 'ico-sm')}<span>Vital signs travel automatically</span></li></ul>
       <button class="btn btn--primary btn--xl" data-act="send"${all ? '' : ' aria-disabled="true"'}>${icon('send')}SEND TO ER</button></div>`;
   }
   /* the dynamic parts of the page (the patient form is never redrawn while the crew types) */
@@ -654,6 +679,25 @@
       ${closed ? `<span class="lockline">${icon('lock')}Read-only</span>` : ''}
       <button class="btn btn--secondary btn-sum" data-act="summary" aria-label="Case Summary">${icon('file')}<span class="lbl">Case Summary</span></button></div>`;
   }
+  /* demo mode (prototype only): no physical corpuls3 is connected, so the crew's acquisition of the requested 12-lead is
+     simulated from here; the ECG then arrives through the simulated corpuls feed like any corpuls ECG (never an upload) */
+  function demoAcqHtml(r, n) {
+    const busy = S.demoAcq === r.cad;
+    return `<div class="demoacq"><button class="btn btn--primary btn--lg" data-act="demo-acq"${busy ? ' disabled' : ''}>${busy ? '<span class="spinner spinner--sm" aria-hidden="true"></span>ACQUIRING ON CORPULS3…' : `${icon('ecg')}SIMULATE REPEAT ECG ACQUISITION`}</button>
+      <span class="small muted">Prototype only: stands in for the crew acquiring ECG ${n} on corpuls3 (no physical monitor is connected). It arrives from the simulated corpuls feed.</span></div>`;
+  }
+  function demoAcquire() {
+    const r = cur();
+    if (!r || S.demoAcq) return;
+    if (!S.up) return toast('No connection: the simulated acquisition needs the connection.', 'err');
+    S.demoAcq = r.cad; patchCase();
+    const done = () => { S.demoAcq = null; patchCase(); };
+    LIVE.request('POST', '/api/corpuls/demo-acquire', { cad: r.cad }).then(x => {
+      done();
+      if (x.status === 200) toast(x.body.held ? `ECG ${x.body.n} acquired: corpuls3 sends it when the connection returns` : `ECG ${x.body.n} received from corpuls`);
+      else toast(x.body.error || 'The simulated acquisition did not work.', 'err');
+    }, () => { done(); toast('No connection: the simulated acquisition did not reach the platform.', 'err'); });
+  }
   /* what is happening now, in plain words, and what the crew can do */
   function statusPanel(r) {
     const er = r.er, cd = r.cardio, d = r.dec[r.dec.length - 1], L = CLIN.latest(r);
@@ -669,7 +713,7 @@
       case 'repeat_requested': return P('tone-warn', 'repeat', 'REPEAT ECG REQUESTED', `${esc(d.by)} (Cardiologist) at ${hm(d.at)} · on ECG ${d.on}.`,
         `${d.reasons.length || d.instr || d.within ? `<dl class="kv" style="margin-top:6px">${d.reasons.length ? `<dt>Reason</dt><dd>${esc(d.reasons.join(', '))}</dd>` : ''}${d.instr ? `<dt>Instruction</dt><dd>${esc(d.instr)}</dd>` : ''}${d.within ? `<dt>Within</dt><dd>${d.within} min</dd>` : ''}</dl>` : ''}
          <p class="status-panel__do">${icon('ecg')}<span><b>Acquire a new 12-lead on corpuls3.</b> ${fbProminent(r) ? `The corpuls connection is not live: if ECG ${L.n + 1} does not arrive, use the manual ECG fallback.` : `ECG ${L.n + 1} appears here by itself and reaches the Cardiologist silently.`}</span></p>
-<p class="small muted">COMPLETE STEMI PATHWAY becomes available only after CONFIRMED STEMI.</p>`);
+         ${r.monitor && r.monitor.demo && !fbProminent(r) ? demoAcqHtml(r, L.n + 1) : ''}<p class="small muted">COMPLETE STEMI PATHWAY becomes available only after CONFIRMED STEMI.</p>`);
       case 'repeat_received': return P('tone-info', 'eye', 'REPEAT ECG SENT — CARDIOLOGIST REVIEWING', `ECG ${L.n} ${L.src === 'corpuls' ? 'received from corpuls' : 'received'} at ${hm(L.rcv)}. The Cardiologist reviews it and decides.`);
       case 'confirmed': return P('tone-crit-solid', 'alert', 'CONFIRMED STEMI', `Decision by ${esc(d.by)} (Cardiologist) at ${hm(d.at)} · on ECG ${d.on}.`,
         `${d.note ? `<p><b>Note:</b> ${esc(d.note)}</p>` : ''}<p class="small muted">When the STEMI pathway is finished for this case, press COMPLETE STEMI PATHWAY. Nothing more is documented here.</p><div class="btn-row"><button class="btn btn--secondary btn--lg" data-act="complete">${icon('check-circle')}COMPLETE STEMI PATHWAY</button></div>`);
@@ -932,6 +976,7 @@
       case 'dup-fix': modal.close(); if (S.draft) { S.draft.editCad = true; if (!S.draft.created) S.draft.cadOk = false; saveLocal(true); } go('draft'); setTimeout(() => { const i = $('#cadin'); if (i) { i.focus(); i.select(); } }, 30); return;
       case 'dup-open': return openExisting(d.cad);
       case 'relink': return relink();
+      case 'demo-acq': return demoAcquire();
       case 'fb-draft': return addMenu('draft');
       case 'img-add': return addMenu(d.where);
       case 'img-gen': case 'img-camera': case 'img-file': {

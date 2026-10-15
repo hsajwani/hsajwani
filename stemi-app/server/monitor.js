@@ -48,13 +48,16 @@ function init(platform) {
 const event = (cad, at, kind, text) => D.run('INSERT INTO monitor_events(cad,at,kind,text) VALUES(?,?,?,?)', cad, at, kind, text);
 
 /* ---------- linking a case to the unit's monitor ---------- */
-/* A: who links (the crew, or the test console for a demo case). → { status: 'linked' | 'missing' | 'closed', cad } */
+/* A: who links (the crew, or the test console for a demo case). o: { device_id, autoEcg } — autoEcg false: the case
+   already has (or is about to get) an ECG another way, so the demo's automatic ECG 1 is not wanted.
+   → { status: 'linked' | 'missing' | 'closed', cad } */
 function link(A, raw, o) {
+  o = o || {};
   const cad = CADN.normalize(raw), C = cad && caseRow(cad);
   if (!C || (A.role === 'crew' && C.unit !== A.unit)) return { status: 'missing', cad };
   if (C.closed_at) return { status: 'closed', cad };
   if (C.corpuls_linked_at && !C.corpuls_link_ended_at) return { status: 'linked', cad, already: true };
-  const r = provider.connectCase({ cad, unit: C.unit, device_id: o && o.device_id });
+  const r = provider.connectCase({ cad, unit: C.unit, device_id: o.device_id, autoEcg: o.autoEcg !== false && PF.facts(cad).nEcg === 0 });
   const t = Date.now(), who = A.role === 'crew' ? PF.crewT(A) : 'Test console', W = PF.writer(cad, A);
   const others = r.device_id ? D.all('SELECT cad FROM cases WHERE corpuls_device_id=? AND cad<>? AND corpuls_linked_at IS NOT NULL AND corpuls_link_ended_at IS NULL', r.device_id, cad) : [];
   D.tx(() => {
@@ -173,7 +176,7 @@ function monitorOf(C) {
   if (!C.corpuls_linked_at && !C.vitals_json) return null;
   const name = C.corpuls_provider || provider.name;
   return {
-    provider: name, simulated: name === 'mock', device: C.corpuls_device_id || null, label: C.corpuls_device_label || null,
+    provider: name, simulated: name === 'mock', demo: name === 'mock' && !!provider.demo, device: C.corpuls_device_id || null, label: C.corpuls_device_label || null,
     linked: C.corpuls_linked_at || null, by: C.corpuls_linked_by || null, status: C.corpuls_status || null, statusAt: C.corpuls_status_at || null,
     ended: C.corpuls_link_ended_at || null, endWhy: C.corpuls_link_end_reason || null, last: C.corpuls_last_data_at || null,
     every: provider.expectedIntervalMs, v: P(C.vitals_json),
@@ -201,9 +204,10 @@ function fallbackUsed(cad, t, n) { event(cad, t, 'fallback', `Manual ECG fallbac
 
 /* ---------- after a restart, and the test console ---------- */
 function resume() {
-  const rows = D.all(`SELECT c.cad, c.unit, c.corpuls_device_id d, c.corpuls_status s, c.vitals_json v, (SELECT COUNT(*) FROM ecgs e WHERE e.cad=c.cad AND e.source='corpuls') n
+  const rows = D.all(`SELECT c.cad, c.unit, c.corpuls_device_id d, c.corpuls_status s, c.vitals_json v, (SELECT COUNT(*) FROM ecgs e WHERE e.cad=c.cad AND e.source='corpuls') n,
+                      (SELECT COUNT(*) FROM ecgs e WHERE e.cad=c.cad) total
                       FROM cases c WHERE c.corpuls_linked_at IS NOT NULL AND c.corpuls_link_ended_at IS NULL AND c.closed_at IS NULL AND c.corpuls_device_id IS NOT NULL`);
-  provider.resume(rows.map(r => ({ cad: r.cad, unit: r.unit, device_id: r.d, status: r.s, vitals: P(r.v), ecgs: r.n })));
+  provider.resume(rows.map(r => ({ cad: r.cad, unit: r.unit, device_id: r.d, status: r.s, vitals: P(r.v), ecgs: r.n, total: r.total })));
 }
 /* the test console's simulator acts on the monitor of one case (TEST ONLY) */
 function simulate(raw, action, params) {
@@ -213,12 +217,40 @@ function simulate(raw, action, params) {
   if (!C.corpuls_device_id) return { ok: false, error: `CAD #${cad} has no corpuls link.` };
   return provider.simulate({ cad, device_id: C.corpuls_device_id }, action, { ...(params || {}), n: PF.facts(cad).nEcg + 1 }) || { ok: true };
 }
+/* demo mode (prototype only): the crew acquires the requested repeat 12-lead on the simulated corpuls3 from the crew
+   screen, because no physical monitor is connected. The ECG then arrives from the simulated feed like any corpuls ECG
+   (never an upload). → { status: 'ok' | 'off' | 'missing' | 'closed' | 'unlinked' | 'refused', n, error } */
+function demoAcquire(A, raw) {
+  if (!provider.demo || typeof provider.simulate !== 'function') return { status: 'off', error: 'The simulated corpuls demo is not on in this build.' };
+  const cad = CADN.normalize(raw || ''), C = cad && caseRow(cad);
+  if (!C || C.unit !== A.unit) return { status: 'missing', cad, error: 'There is no case with this CAD number for this tablet.' };
+  if (C.closed_at) return { status: 'closed', cad, error: 'This STEMI pathway is closed: it is read-only.' };
+  if (!C.corpuls_linked_at || C.corpuls_link_ended_at || !C.corpuls_device_id) return { status: 'unlinked', cad, error: 'This case is not linked to the simulated corpuls monitor.' };
+  const n = PF.facts(cad).nEcg + 1, t = Date.now(), W = PF.writer(cad, A);
+  W.by(t, `Prototype demo: ${n > 1 ? 'repeat ' : ''}12-lead acquisition on the simulated corpuls3 started from the crew screen (stands in for ECG ${n} acquired on the monitor)`, PF.crewT(A), 'evt');
+  W.flush();
+  const r = provider.simulate({ cad, device_id: C.corpuls_device_id }, 'trigger-ecg', { n }) || { ok: false };
+  if (!r.ok) {
+    const why = r.error || 'The simulated monitor did not send the ECG.';
+    W.by(Date.now(), `Prototype demo: the simulated corpuls3 did not transmit ECG ${n} (${why})`, PF.crewT(A), 'evt');
+    W.flush();
+    return { status: 'refused', cad, error: why };
+  }
+  return { status: 'ok', cad, n: r.n || n, held: !!r.held };
+}
+/* RESET CORPULS DEMO (test console, TEST ONLY): every simulated monitor back to the clean demo state */
+function resetDemo() {
+  if (typeof provider.resetDemo !== 'function') return { ok: false, error: 'The corpuls simulator works only with the simulated provider (CORPULS_PROVIDER=mock).' };
+  const n = provider.resetDemo(cad => PF.facts(cad).nEcg > 0);
+  return { ok: true, monitors: n };
+}
 function simInfo() {
   const cases = D.all(`SELECT cad, unit, corpuls_device_id device, corpuls_device_label label, corpuls_status status, corpuls_last_data_at last, corpuls_link_ended_at ended,
                        closed_at closed, server_received_at sent, corpuls_linked_at linked FROM cases WHERE corpuls_linked_at IS NOT NULL ORDER BY corpuls_linked_at DESC LIMIT 30`);
-  return { provider: provider.name, simulated: provider.simulated, every: provider.expectedIntervalMs, devices: provider.simState ? provider.simState() : [], cases };
+  return { provider: provider.name, simulated: provider.simulated, demo: !!provider.demo, demoEcgMs: provider.demoEcgMs || null, every: provider.expectedIntervalMs,
+    defaults: provider.constructor.defaults || null, devices: provider.simState ? provider.simState() : [], cases };
 }
 function reset() { if (provider.reset) provider.reset(); }
-const providerInfo = () => ({ name: provider.name, simulated: provider.simulated, every: provider.expectedIntervalMs });
+const providerInfo = () => ({ name: provider.name, simulated: provider.simulated, demo: !!provider.demo, every: provider.expectedIntervalMs });
 
-module.exports = { init, link, endLink, closeIfNeeded, relink, monitorOf, pushMonitor, atSend, fallbackUsed, vitalsText, resume, simulate, simInfo, reset, providerInfo };
+module.exports = { init, link, endLink, closeIfNeeded, relink, monitorOf, pushMonitor, atSend, fallbackUsed, vitalsText, resume, simulate, demoAcquire, resetDemo, simInfo, reset, providerInfo };

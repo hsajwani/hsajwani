@@ -23,7 +23,8 @@
     </div><div class="con__col">
       <section class="card simcard" aria-labelledby="corp-h"><div class="card__h"><h2 id="corp-h">CORPULS SIMULATOR — TEST ONLY</h2><span class="sp"></span><span class="tag">MockCorpulsProvider</span></div>
         <div class="card__b stack">
-          <p class="small muted">Plays the crew's corpuls3 for one case: what it does here reaches the platform exactly as the simulated corpuls feed would send it. Fictional data only; no real monitor or corpuls.mission is connected. To show WAITING FOR CORPULS, disconnect the monitor first: the next case the crew links stays waiting until CONNECT MONITOR.</p>
+          <p class="small muted">Plays the crew's corpuls3 for one case: what it does here reaches the platform exactly as the simulated corpuls feed would send it. Fictional data only; no real monitor or corpuls.mission is connected. In demo mode the basic demonstration runs by itself; use these controls for the advanced demonstration (other values, ECG 2 and 3, connection loss and return).</p>
+          <div id="corp-demo"></div>
           <div class="field"><label class="label" for="corp-cad">Case and its simulated monitor</label><div id="corp-sel"></div></div>
           <div id="corp-st"></div>
           <div class="simgroup"><span class="label">Connection</span><div id="corp-conn" class="btn-wrap"></div></div>
@@ -164,8 +165,27 @@
     for (let k = 1; k <= Math.max(3, n); k++) btns.push(k < n ? `<button class="btn btn--sm btn--quiet" disabled>${icon('check', 'ico-sm')}ECG ${k} received</button>` : B('trigger-ecg', `TRIGGER ECG ${k}`, k === n ? 'btn--primary' : '', k !== n).replace('data-k="trigger-ecg"', `data-k="trigger-ecg" data-n="${k}"`));
     return `<div class="row" style="margin-bottom:8px"><span class="small muted">Sample</span><span class="seg" role="group" aria-label="ECG sample">${['A', 'B', 'C'].map(x => `<button data-act="corp-sample" data-v="${x}" aria-pressed="${smp === x}">ECG Sample ${x}</button>`).join('')}</span></div><div class="btn-wrap">${btns.join('')}</div>`;
   }
+  /* demo mode: what LINK CORPULS does by itself, and RESET CORPULS DEMO (TEST ONLY) */
+  function corpDemo() {
+    if (!S.corp || !S.corp.simulated) return '';
+    const on = S.corp.demo, secs = S.corp.demoEcgMs ? Math.round(S.corp.demoEcgMs / 1000) : 3, D = S.corp.defaults || {};
+    return `<div class="simdemo${on ? ' is-on' : ''}"><div class="simdemo__t"><b>${on ? 'DEMO MODE ON' : 'DEMO MODE OFF'}</b><span class="small">${on
+      ? `LINK CORPULS on the crew screen starts a fresh simulated feed by itself: connected, live values (HR ${D.hr} · SpO₂ ${D.spo2} % · BP ${D.sys}/${D.dia} · RR ${D.rr}), then ECG 1 about ${secs} s later. A requested repeat ECG is simulated from the crew screen. Nothing here is needed for the basic demonstration.`
+      : 'The simulated monitor does only what this simulator tells it (CORPULS_DEMO_MODE=false): trigger ECG 1 here.'}</span></div>
+      <button class="btn btn--secondary btn--sm" data-act="corp-reset">${icon('repeat', 'ico-sm')}RESET CORPULS DEMO</button></div>`;
+  }
+  async function corpReset(t) {
+    t.disabled = true;
+    try {
+      const x = await LIVE.request('POST', '/api/control/corpuls/reset-demo', {});
+      if (x.body && x.body.sim) S.corp = x.body.sim;
+      const n = x.body && x.body.monitors;
+      corpSay(x.status === 200 ? `Corpuls demo reset: ${n} simulated monitor${n === 1 ? '' : 's'} back to the clean demo state (connected, default values${S.corp && S.corp.demo ? '; a linked case still without an ECG gets ECG 1 again' : ''}). Cases and ECGs are not changed.` : (x.body && x.body.error) || 'Not reset.', x.status !== 200);
+    } catch (_) { corpSay('No connection.', true); } finally { t.disabled = false; renderCorp(); }
+  }
   function renderCorp() {
     corpDefault();
+    patch('corp-demo', corpDemo());
     patch('corp-sel', corpSel());
     patch('corp-st', corpStatus());
     patch('corp-conn', corpConn());
@@ -226,6 +246,7 @@
       case 'sel': S.sel = d.cad; S.rec = null; if (S.corp && S.corp.cases.some(c => c.cad === d.cad)) { S.corpCad = d.cad; S.sample = null; } render(); return loadSel();
       case 'corp': return corpAct(d.k, t);
       case 'corp-sample': S.sample = d.v; return renderCorp();
+      case 'corp-reset': return corpReset(t);
       case 'audf': S.audf = d.v; return render();
       case 'sim': { const v = d.v; await LIVE.request('POST', '/api/control/sim', { [d.k]: v }); return; }
       case 'screens': {
