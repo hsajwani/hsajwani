@@ -1,16 +1,23 @@
-/* Deletes the test database and stored images (every CAD case, active and completed, with its ECGs and audit events),
-   so the next start begins with no cases. The crew test user is recreated on start.
-   Run it with the server stopped. While the server runs, use "Delete all test data" in the test console instead. */
+/* TEST ONLY: deletes the test database and the stored ECG images (every CAD case, active and completed, with its ECGs
+   and audit events), so the next start begins with no cases. The database is rebuilt by the migrations on start and
+   the crew test user is recreated. The crew test password and the session keys in data/ are kept.
+   Run it with the server stopped. While the server runs, use "Delete all test data" in the test console instead.
+   Never run it against anything but fictional test data. */
 const fs = require('node:fs');
-const cfg = require('../server/config');
+const path = require('node:path');
 
-fetch(`http://127.0.0.1:${cfg.PORT}/api/ping`, { signal: AbortSignal.timeout(1500) })
+const ROOT = path.resolve(__dirname, '..');
+try { process.loadEnvFile(path.join(ROOT, '.env')); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+const PORT = Number(process.env.PORT || 3000);
+const DATA = path.resolve(ROOT, process.env.DATA_DIR || 'data');
+
+fetch(`http://127.0.0.1:${PORT}/api/ping`, { signal: AbortSignal.timeout(1500) })
   .then(() => {
-    console.error(`The server is still running on port ${cfg.PORT}. Either use "Delete all test data" in the test console\n` +
-      `(http://localhost:${cfg.PORT}/control) while it runs, or stop it first: npm run dev:stop (or Ctrl+C where npm start runs).`);
+    console.error(`The server is still running on port ${PORT}. Either use "Delete all test data" in the test console\n` +
+      `(http://localhost:${PORT}/control) while it runs, or stop it first: npm run dev:stop`);
     process.exit(1);
   }, () => {
-    for (const f of ['stemi-test.db', 'stemi-test.db-wal', 'stemi-test.db-shm']) fs.rmSync(`${cfg.DATA_DIR}/${f}`, { force: true });
-    fs.rmSync(cfg.IMAGE_DIR, { recursive: true, force: true });
-    console.log('Test data deleted. Start the server again with: npm run dev:bg');
+    for (const f of ['stemi-test.db', 'stemi-test.db-wal', 'stemi-test.db-shm']) fs.rmSync(path.join(DATA, f), { force: true });
+    fs.rmSync(path.join(DATA, 'images'), { recursive: true, force: true });
+    console.log(`Test data deleted (${DATA}). Start the server again with: npm run dev:bg`);
   });

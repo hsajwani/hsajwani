@@ -1,9 +1,10 @@
 /* The CAD number: entered manually by the crew (EMT) from the MDT / dispatch information.
-   One module for the crew tablet and the server, so both normalise and check the number the same way.
+   The browser's copy, for instant feedback on the crew tablet. The server's rules are the authority:
+   src/Masar.Domain/Rules/CadNumber.cs (C#). Keep both in step (the LEGACY Node.js server also loads this file).
    Canonical stored format: YYYYMMDD-NNNN-N (for example 20261004-0123-1), the format already used in the database.
    Shown on every screen as "CAD #20261004-0123-1".
    Accepted input: "CAD#20261004-0123-1", "cad # 20261004-0123-1", " 20261004-0123-1 ", "2026100401231".
-   The real CAD format is an open decision (Q-51); change PATTERN here and both sides follow. */
+   The real CAD format is an open decision (Q-51): change PATTERN here and in CadNumber.cs together. */
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) module.exports = factory();
   else root.CADN = factory();

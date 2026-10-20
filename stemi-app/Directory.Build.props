@@ -1,0 +1,16 @@
+<Project>
+  <!-- Settings shared by every project of the MASAR solution (STEMI pathway). -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <Deterministic>true</Deterministic>
+    <!-- The application version: also shown by /health and on every screen. Keep package.json in step. -->
+    <Version>0.7.0</Version>
+    <Product>MASAR — STEMI Coordination Platform (prototype)</Product>
+    <Company>National Ambulance (prototype for IT handover)</Company>
+    <Copyright>Prototype test build · fictional data only</Copyright>
+  </PropertyGroup>
+</Project>

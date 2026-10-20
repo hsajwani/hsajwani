@@ -31,7 +31,13 @@ async function main() {
     ok('A9', 'Before SEND: the ER cannot accept a case that was not sent', !(await er.one(A, 'er_accept', { name: 'Dr. Early' })).ok);
     await crew.req('POST', '/api/cases', { cad: A, cid: 'a1' });
     const up = await crew.upload(A), t = Date.now();
-    const sub = await crew.one(A, 'submit', { sendAt: t, md: { age: { v: '61 y', raw: { v: 61 }, t } }, ecg: { n: 1, acq: t - 30e3, variant: 'border', pri: 1, imgs: [{ i: 1, kind: 'full', q: 'file', at: t - 30e3, imageId: up.body.id }] } });
+    const ecg1 = { n: 1, acq: t - 30e3, variant: 'border', pri: 1, imgs: [{ i: 1, kind: 'full', q: 'file', at: t - 30e3, imageId: up.body.id }] };
+    const age = { v: '61 y', raw: { v: 61 }, t }, sex = { v: 'Male', raw: { v: 'Male' }, t }, complaint = { v: 'Chest pain', raw: { k: 'cp' }, t }, onset = { v: 'Unknown', raw: { nv: 'Unknown' }, t };
+    const partial = await crew.one(A, 'submit', { sendAt: t, md: { age, sex: { v: '', t }, complaint, onset }, ecg: ecg1 });
+    ok('A10a', 'SEND refused by the server without the four items (sex missing): nothing reaches the ER', !partial.ok && partial.status === 400 && partial.error === 'Choose the sex, or Unknown.' && (await crew.view(A)).state === 'draft', partial.error);
+    const future = await crew.one(A, 'submit', { sendAt: t, md: { age, sex, complaint, onset: { v: 'later', raw: { t: t + 3600e3 }, t } }, ecg: ecg1 });
+    ok('A10b', 'SEND refused with an onset in the future', !future.ok && future.error === 'The onset time cannot be in the future.', future.error);
+    const sub = await crew.one(A, 'submit', { sendAt: t, md: { age, sex, complaint, onset }, ecg: ecg1 });
     ok('A10', 'SEND: case and ECG 1 received', sub.ok, sub.error);
     let a = await crew.view(A);
     ok('A11', 'State after SEND: SENT TO ER; the ER was alerted, the Cardiologist was not', a.state === 'sent_to_er' && a.er.alerted && !a.cardio.activated && !a.cardio.alerted);
@@ -48,6 +54,9 @@ async function main() {
     ok('A19', 'The name is trimmed and saved with the acceptance time: ER REVIEWING', a.state === 'er_reviewing' && a.er.name === 'Dr. Test ER' && a.er.accepted > 0, a.er.name);
     ok('A20', 'A second acceptance changes nothing (first ER Doctor kept)', (await er.one(A, 'er_accept', { name: 'Dr. Someone Else' })).ok && (await er.view(A)).er.name === 'Dr. Test ER');
     ok('A21', 'COMPLETE refused while the ER reviews', (await crew.req('POST', '/api/cases/complete', { cad: A })).status === 409);
+    const unseen = await er.one(A, 'er_assess', { kind: 'activate', on: 1, name: 'Dr. Test ER' });
+    ok('A21a', 'The ER assessment is refused by the server until ECG 1 was viewed', !unseen.ok && unseen.status === 409 && unseen.error === 'View ECG 1 before recording the assessment.', unseen.error);
+    ok('A21b', 'Viewing ECG 1 is recorded', (await er.see(A, 1)).ok && !!(await er.view(A)).views.er['1|1']);
     ok('A22', 'NOT SUSPICIOUS refused without a reason', /reason/i.test((await er.one(A, 'er_assess', { kind: 'not_suspicious', on: 1, name: 'Dr. Test ER' })).error || ''));
     ok('A23', 'NOT SUSPICIOUS refused with an unknown reason', !(await er.one(A, 'er_assess', { kind: 'not_suspicious', reason: 'made-up', on: 1, name: 'Dr. Test ER' })).ok);
     ok('A24', 'NOT SUSPICIOUS + OTHER refused without an explanation', /OTHER/.test((await er.one(A, 'er_assess', { kind: 'not_suspicious', reason: 'other', comment: '   ', on: 1, name: 'Dr. Test ER' })).error || ''));
@@ -62,6 +71,9 @@ async function main() {
     a = await doc.view(A);
     ok('A32', 'Cardiologist name and time saved: CARDIOLOGIST REVIEWING', a.state === 'cardiologist_reviewing' && a.cardio.name === 'Dr. Test Cardiology' && a.cardio.ack > 0);
     ok('A33', 'COMPLETE refused while the cardiologist reviews', (await crew.req('POST', '/api/cases/complete', { cad: A })).status === 409);
+    const undecided = await doc.one(A, 'decision', { k: 'confirm', on: 1, name: 'Dr. Test Cardiology' });
+    ok('A33a', 'A decision is refused by the server until the Cardiologist viewed ECG 1 (the ER Doctor\'s view does not count)', !undecided.ok && undecided.status === 409 && undecided.error === 'View ECG 1 before deciding.', undecided.error);
+    await doc.see(A, 1);
     ok('A34', 'NOT STEMI refused without a reason', !(await doc.one(A, 'decision', { k: 'not', on: 1, name: 'Dr. Test Cardiology' })).ok);
     ok('A35', 'UNCLEAR — REPEAT ECG REQUESTED', (await doc.one(A, 'decision', { k: 'repeat', on: 1, reasons: ['Poor ECG quality'], name: 'Dr. Test Cardiology' })).ok);
     ok('A36', 'State REPEAT ECG REQUESTED; COMPLETE refused', (await crew.view(A)).state === 'repeat_requested' && (await crew.req('POST', '/api/cases/complete', { cad: A })).status === 409);
@@ -69,6 +81,7 @@ async function main() {
     const up2 = await crew.upload(A, 'test-ecg-2-evolving-anterior.jpg');
     ok('A38', 'Repeat ECG 2 sent', (await crew.one(A, 'ecg', { sendAt: Date.now(), ecg: { n: 2, acq: Date.now() - 5e3, variant: 'evolved', pri: 1, imgs: [{ i: 1, kind: 'full', q: 'file', at: Date.now() - 5e3, imageId: up2.body.id }] } })).ok);
     ok('A39', 'State: repeat ECG received, cardiologist reviewing', (await crew.view(A)).state === 'repeat_received');
+    await doc.see(A, 2);
     ok('A40', 'A decision on ECG 1 after ECG 2 arrived is refused', /ECG 2 has arrived/.test((await doc.one(A, 'decision', { k: 'confirm', on: 1, name: 'Dr. Test Cardiology' })).error || ''));
     ok('A41', 'CONFIRMED STEMI on ECG 2', (await doc.one(A, 'decision', { k: 'confirm', on: 2, name: 'Dr. Test Cardiology' })).ok);
     ok('A42', 'Only the crew completes the STEMI pathway', (await er.req('POST', '/api/cases/complete', { cad: A })).status === 403);
@@ -91,7 +104,7 @@ async function main() {
     /* ---------- case B: ER NOT SUSPICIOUS FOR STEMI closes the screening pathway; no cardiologist involvement ---------- */
     const B = H.cad(102);
     ok('B1', 'Case B sent', (await H.apiSend(crew, B)).submit.ok);
-    await er.one(B, 'er_accept', { name: 'Dr. Beta' });
+    await er.one(B, 'er_accept', { name: 'Dr. Beta' }); await er.see(B, 1);
     ok('B2', 'ER: NOT SUSPICIOUS FOR STEMI with reason OTHER and an explanation', (await er.one(B, 'er_assess', { kind: 'not_suspicious', reason: 'other', comment: '  Test explanation  ', on: 1, name: 'Dr. Beta' })).ok);
     const b = await er.view(B);
     ok('B3', 'Closed by the ER Doctor: reason, comment, closure reason and source saved', b.state === 'er_closed' && b.er.reason === 'OTHER' && b.er.comment === 'Test explanation' && b.closed.reason === 'ER Doctor assessment: NOT SUSPICIOUS FOR STEMI' && b.closed.source === 'ER Doctor screening decision');
@@ -108,11 +121,11 @@ async function main() {
     /* ---------- case C: NOT STEMI closes automatically ---------- */
     const C = H.cad(103);
     await H.apiSend(crew, C);
-    await er.one(C, 'er_accept', { name: 'Dr. Gamma' }); await er.one(C, 'er_assess', { kind: 'uncertain', on: 1, name: 'Dr. Gamma' });
+    await er.one(C, 'er_accept', { name: 'Dr. Gamma' }); await er.see(C, 1); await er.one(C, 'er_assess', { kind: 'uncertain', on: 1, name: 'Dr. Gamma' });
     let c = await doc.view(C);
     ok('C1', 'UNCERTAIN activates cardiology at once', c.state === 'cardiology_activated' && c.er.assessment === 'uncertain' && /UNCERTAIN/.test(c.cardio.reason));
     ok('C2', 'Audit: "ER Assessment: UNCERTAIN, Cardiology: ACTIVATED"', H.auditOf(S.DATA, C).some(x => x.action === 'ER Assessment: UNCERTAIN, Cardiology: ACTIVATED'));
-    await doc.one(C, 'ack', { name: 'Dr. Delta' });
+    await doc.one(C, 'ack', { name: 'Dr. Delta' }); await doc.see(C, 1);
     ok('C3', 'NOT STEMI with a reason', (await doc.one(C, 'decision', { k: 'not', on: 1, reason: 'No acute ischaemic changes', name: 'Dr. Delta' })).ok);
     c = await crew.view(C);
     ok('C4', 'NOT STEMI: decision stored, then closed automatically (reason and source)', c.state === 'not_stemi_closed' && c.dec.length === 1 && c.closed.reason === 'Cardiologist decision: NOT STEMI' && c.closed.source === 'automatic following Cardiologist decision');

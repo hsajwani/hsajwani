@@ -1,6 +1,10 @@
-# STEMI Coordination Platform · test build
+# MASAR · STEMI Coordination Platform · prototype
 
-**Version 0.6.1 · 15 October 2026 · corpuls → Crew → ER Doctor → Cardiologist**
+**Version 0.7.0 · 20 October 2026 · corpuls → Crew → ER Doctor → Cardiologist · ASP.NET Core backend**
+
+> **IT handover:** start with [docs/handover.md](docs/handover.md). The backend is a conventional ASP.NET Core / C#
+> solution (`Masar.sln`, .NET 10); the screens are plain HTML, CSS and JavaScript. Every document is listed under
+> [Documentation](#documentation) at the end of this file.
 
 > **TEST BUILD · FICTIONAL DATA ONLY.** Use only fictional patients, simulated CAD numbers, sample ECG images and the
 > test users. Never enter real patient information: this build runs over plain HTTP on a local network and has no
@@ -16,7 +20,21 @@
 > **Prototype clinician identification only.** The ER Doctor and the Cardiologist type their name; it is recorded
 > against each CAD number. A typed name is **not** secure authentication and gives no identity assurance. Production
 > needs the organisation's identity provider — hospital / National Ambulance single sign-on (for example Microsoft
-> Entra ID), staff ID, badge or PIN. See [docs/production-gaps.md](docs/production-gaps.md).
+> Entra ID), staff ID, badge or PIN. See [docs/security.md](docs/security.md) and [docs/production-gaps.md](docs/production-gaps.md).
+
+**Production readiness.** Nothing in this build is approved for clinical use. These parts are explicitly labelled:
+
+| Component | Status |
+|---|---|
+| Mock Corpuls Provider (simulated monitors) | PROTOTYPE ONLY |
+| Simulated AI Interpretation (scripted mock) | PROTOTYPE ONLY |
+| Free-text ER Doctor Name · Free-text Cardiologist Name | PROTOTYPE ONLY |
+| Crew test login · ER / Cardiologist / console device sessions | PROTOTYPE ONLY |
+| Test console (`/control`) | TEST ONLY |
+| SQLite database (`data/stemi-test.db`) | PROTOTYPE DATABASE unless approved for production |
+| ECG images on the local disk (`data/images/`) | PROTOTYPE ONLY |
+| Local development server (`npm run dev:bg`, `scripts/dev.js`) | DEVELOPMENT ONLY |
+| Node.js server (`server/`) | LEGACY — transition fallback only, to be removed |
 
 A narrow, time-critical STEMI coordination platform. It is **not** an ePCR, an ICCC / CAD replacement, a hospital EMR
 or a handover form. One case per CAD number travels the whole pathway and every screen sees the same case. The ECG and
@@ -46,18 +64,31 @@ CREW: OPEN STEMI PATHWAY → CAD number → LINK CORPULS → CORPULS CONNECTED �
 
 ## 1. Start on a Mac
 
-You need Node.js 22.13 or later (`node --version`); nothing else is installed — the app has no dependencies.
+You need:
+
+- the **.NET 10 SDK** (`dotnet --version` shows 10.0.x) — install it from <https://dotnet.microsoft.com/download/dotnet/10.0>
+  (the macOS Arm64 installer for Apple silicon) or with `brew install --cask dotnet-sdk`;
+- **Node.js 22.13 or later** (`node --version`) for the development runner and the end-to-end tests.
 
 ```bash
 cd ~/Documents
 git clone -b claude/magical-faraday-sjzcvc https://github.com/hsajwani/hsajwani.git   # first time only
 cd hsajwani/stemi-app
-npm run dev:bg          # start the development server in the background (keeps running after Terminal closes)
+npm run dev:bg          # build and start the development server in the background (keeps running after Terminal closes)
 npm run dev:status      # running? port? the addresses for the Mac and the iPhone
 ```
 
-If macOS asks *"Do you want the application node to accept incoming network connections?"*, click **Allow** (the
-iPhone needs it). The database is created in `data/` on first start and kept across restarts.
+The first start builds the backend and downloads its packages from NuGet (a minute or two); later starts take seconds.
+If the .NET SDK is not installed yet, the runner says so and starts the **legacy** Node.js server instead, so the
+screens keep working until .NET is installed.
+
+If macOS asks *"Do you want the application dotnet to accept incoming network connections?"*, click **Allow** (the
+iPhone needs it). The database is created in `data/` on first start and kept across restarts; a database made by an
+earlier version is taken over as it is, with every case kept.
+
+**The crew test password** is not written in the code. Either put `TEST_USER_PASSWORD=…` (any password you choose) in
+`.env` (copy `.env.example` first), or use the one generated on the first start: `cat data/crew-test-password.txt`.
+If your `.env` already sets `TEST_USER_PASSWORD`, that password keeps working.
 
 ### The development runner
 
@@ -69,8 +100,11 @@ iPhone needs it). The database is created in `data/` on first start and kept acr
 | `npm run dev:stop` | stop it |
 | `npm run dev` | the same server in the foreground (Ctrl+C stops it) |
 
-- A **backend change** (`server/`, `public/shared/cad.js`, `public/shared/rules.js`, `package.json`, `.env`) restarts
-  the server by itself. A **screen change** needs only a browser refresh. A crash is restarted.
+- A **backend change** (the `.cs`, `.csproj` and `appsettings*.json` files under `src/`, `Directory.*.props`,
+  `global.json`, `.env`) rebuilds and restarts the server by itself. A **screen change** (`public/`) needs only a
+  browser refresh. A crash is restarted; a failed build waits for the next file change (the errors are in the log).
+- **Legacy fallback:** `npm run dev -- --legacy` (or `STEMI_BACKEND=node` in `.env`) runs the old Node.js server
+  (`server/`) instead; the runner also does this by itself when the .NET SDK is missing. Transition only.
 - **The test data is kept.** A restart is never a reset; only *Delete all test data* (console) or `npm run reset`
   (server stopped) clears it.
 - **Log:** `.local/stemi-dev.log` (starts, restarts and why, errors, live-link connections; no passwords, cookies or
@@ -80,8 +114,8 @@ iPhone needs it). The database is created in `data/` on first start and kept acr
 
 ### Opening the screens
 
-- **Crew (Mac):** <http://localhost:3000/crew>, log in as **crew@test.local** / **stemi-test** (*Fill in the test
-  user*). Full screen with Ctrl+Cmd+F if you like; the layout fits the window (no scaled device frame).
+- **Crew (Mac):** <http://localhost:3000/crew>, log in as **crew@test.local** with the crew test password (see above;
+  *Fill in the test user* fills in the e-mail). Full screen with Ctrl+Cmd+F if you like; the layout fits the window.
 - **ER Doctor (Mac, second window, or another computer / tablet):** <http://localhost:3000/er>. Tap
   **START · ENABLE ALARM SOUND** (browsers allow sound only after a tap; needed after each reload).
 - **Cardiologist (iPhone, same Wi-Fi):** in Safari type the *Cardiologist on iPhone* address that `npm run dev:status`
@@ -234,7 +268,9 @@ findings scripted for its sample, with the rate the monitor reported); it does n
 anywhere — no external AI service is connected and no ECG data leaves the server. One analysis per ECG,
 shown unchanged to the crew, the ER and the cardiologist in a compact panel (rhythm, rate, ST, reciprocal, other,
 overall) with: *"AI interpretation is decision support. The Cardiologist makes the final STEMI decision."* The AI
-never activates cardiology, decides or closes anything. The interface (`server/ai/index.js`) is replaceable.
+never activates cardiology, decides or closes anything. The interface (`IEcgAiProvider`,
+`src/Masar.Application/Abstractions/IEcgAiProvider.cs`) is replaceable; the only implementation is the scripted
+`MockEcgAiProvider` (Simulated AI Interpretation — PROTOTYPE ONLY).
 
 ---
 
@@ -242,19 +278,20 @@ never activates cardiology, decides or closes anything. The interface (`server/a
 
 - **What is simulated:** the crew's corpuls3 and corpuls.mission. Each unit has one simulated monitor (Ambulance 214 →
   `SIM-C3-214`). Its values are fictional and never random: HR and SpO₂ move gradually towards the values set in the
-  simulator, RR changes every 30 s, the non-invasive BP is measured every `CORPULS_SIM_NIBP_SECONDS` (default 2 min) and
+  simulator, RR changes every 30 s, the non-invasive BP is measured every `Corpuls:SimNibpSeconds` (default 2 min) and
   keeps its measurement time. A 12-lead is a synthetic ECG drawn by the server from internal samples (*ECG Sample A /
   B / C*), marked FICTIONAL TEST DATA · NOT A PATIENT, at the monitor's current heart rate; in demo mode ECG 1 comes by
   itself and a repeat from the crew screen's simulated acquisition, otherwise when the tester triggers it. The samples
   are not validated diagnoses.
-- **The architecture:** `server/integrations/corpuls/` holds the provider contract (`contract.js`: the provider
-  interface and the normalized events VITALS_UPDATED, ECG_ACQUIRED, CORPULS_CONNECTION_CHANGED with the states
-  waiting · connected · reconnecting · disconnected), **MockCorpulsProvider** (`mock-provider.js`, `mock-ecg.js`) and
-  **RealCorpulsMissionProvider** (`real-provider.js`, a placeholder: not implemented, no network call).
-  `server/monitor.js` is the platform's side: it checks every event (the CAD number exists, the case is open, the
-  monitor is the one linked), stores each ECG once and numbers it, keeps the latest values with their time and a light
-  history, and audits only the significant moments. The screens see only the case record. `CORPULS_PROVIDER` picks the
-  provider.
+- **The architecture:** `src/Masar.Application/Monitoring/CorpulsContract.cs` holds the provider contract
+  (`ICorpulsProvider` and the normalized events VitalsUpdated, EcgAcquired, ConnectionChanged with the states
+  waiting · connected · reconnecting · disconnected; `ICorpulsSimulator` — TEST ONLY), **MockCorpulsProvider**
+  (`src/Masar.Infrastructure/Corpuls/MockCorpulsProvider.cs`, `MockEcgRenderer.cs` — PROTOTYPE ONLY) and
+  **RealCorpulsMissionProvider** (`RealCorpulsMissionProvider.cs`, a placeholder: not implemented, no network call).
+  `MonitorService` (`src/Masar.Application/Monitoring/`) is the platform's side: it checks every event (the CAD number
+  exists, the case is open, the monitor is the one linked), stores each ECG once and numbers it, keeps the latest values
+  with their time and a light history, and audits only the significant moments. The screens see only the case record.
+  `Corpuls:Provider` (`.env`: `CORPULS_PROVIDER`) picks the provider.
 - **Manual upload is the fallback only.** The primary path is the feed; the photo / upload of the 12-lead and the
   manual vital signs remain for when corpuls is not available.
 - **What MEAD / corpuls must still provide** before a real provider can be written: authentication, API
@@ -278,13 +315,13 @@ OPEN STEMI PATHWAY → enter the CAD number → LINK CORPULS → CORPULS CONNECT
 - Every LINK CORPULS starts a **fresh** simulated monitor: connected about a second later, HR 88 · SpO₂ 98 % · BP
   132/78 · RR 17 (HR with the small beat-to-beat variation of a real monitor, as a fixed pattern — never random), and
   ECG 1 (*ECG Sample A*, borderline) about `CORPULS_DEMO_ECG_SECONDS` (3) seconds after CORPULS CONNECTED. Values keep
-  updating every `CORPULS_SIM_TICK_MS` (5 s).
+  updating every `Corpuls:SimTickMs` (5 s).
 - A requested repeat ECG comes from the crew screen's SIMULATE REPEAT ECG ACQUISITION (ECG 2 is *Sample B*, evolved;
   ECG 3 *Sample C*). The audit records it as a prototype action, then *ECG 2 received from corpuls*.
 - No automatic ECG 1 when the tablet already holds a manual fallback ECG for the case.
 - **RESET CORPULS DEMO** (test console, TEST ONLY) puts every simulated monitor back to that clean state (connected,
   default values; a linked case still without an ECG gets its ECG 1 again). Cases and ECGs are not touched.
-- `CORPULS_DEMO_MODE=false` switches the demo off: the simulated monitor then does only what the console tells it.
+- `Corpuls:DemoMode = false` (`.env`: `CORPULS_DEMO_MODE=false`) switches the demo off: the simulated monitor then does only what the console tells it.
 
 ### Advanced demonstration (test console → CORPULS SIMULATOR — TEST ONLY)
 
@@ -315,12 +352,21 @@ These controls exist only in the console, never on the crew, ER or cardiologist 
 
 ## 5. Tests
 
-Each suite starts its own server on a random port with a temporary database: the development server and `data/` are
-not touched. Browser suites need Playwright with Chromium (`npm install -g playwright && npx playwright install
-chromium`; in the Claude Code cloud container run them with `NODE_PATH=$(npm root -g)`).
+Two layers, both automated (details: [docs/testing.md](docs/testing.md)):
+
+- **.NET tests** — `npm run test:unit` (= `dotnet test Masar.sln`): the pathway state machine and every server-side
+  rule, closed-case immutability, the CAD number and name rules, the mock providers, the database migrations (from a
+  clean database, and taking over a database made by the Node.js prototype), the application services end to end, and
+  the HTTP API through the real ASP.NET Core pipeline.
+- **End-to-end suites** — the commands below. Each suite builds the backend, starts it on a random port with a
+  temporary database and a random crew password: the development server and `data/` are not touched. Browser suites
+  need Playwright with Chromium (`npm install -g playwright && npx playwright install chromium`; in the Claude Code
+  cloud container run them with `NODE_PATH=$(npm root -g)`). `STEMI_BACKEND=node npm run test:…` runs a suite against
+  the legacy Node.js server for comparison.
 
 | Command | What it checks |
 |---|---|
+| `npm run test:unit` | the .NET unit and integration tests (`tests/Masar.UnitTests`, `tests/Masar.IntegrationTests`) |
 | `npm run test:api` | the server's rules through the API: every allowed transition and every refusal, closed-case security, name validation, roles, the console, a 0.4.0 case still opening |
 | `npm run test:demo` | the prototype demo mode: LINK CORPULS → connected, live values and ECG 1 with no console input (1), SEND TO ER after ECG 1 (2), the fallback not prominent while connected (3) and prominent after a connection loss (4), the repeat ECG simulated from the crew screen arriving as ECG 2 from corpuls (5), no automatic events for a closed case (6), RESET CORPULS DEMO |
 | `npm run test:corpuls` | the corpuls flow end to end with the demo mode off (every acquisition is the test's own) (crew, ER, cardiologist and the simulator): tests A–L — link, connect, ECG 1, vital signs, SEND, repeat ECGs 2 and 3, connection loss and fallback, reconnection without duplicates, refusal of unlinked or late data, closure, the Case Summary — plus pause, signal loss with a held ECG, a server restart, and the corpuls.mission placeholder |
@@ -328,38 +374,49 @@ chromium`; in the Claude Code cloud container run them with `NODE_PATH=$(npm roo
 | `npm run test:pathway` | UNCERTAIN, NOT SUSPICIOUS with a reason and with OTHER, NOT STEMI, names per CAD number (ER and cardiologist), searching completed cases |
 | `npm run test:cad` | CAD number entry and normalisation, LINK CORPULS, CASE ALREADY EXISTS, correcting the number of an unsent case (its corpuls feed moves with it), the unsent case across a reload and its discard, offline entry (manual fallback offered) and offline SEND and updates |
 | `npm run test:visual` | screenshots of every major screen at desktop, tablet, portrait and phone sizes (`scripts/out/visual/`), including the corpuls states (waiting, connected, ECG 1, vital signs, missing items, ready, sent, repeat, connection lost, fallback, the ER and the Cardiologist with live and lost monitor data, the simulator), with checks for overflow, tap-target size, alt text and accessible names |
-| `npm test` | api, demo, corpuls, acceptance, pathway and cad in a row |
+| `npm test` | unit, api, demo, corpuls, acceptance, pathway and cad in a row |
 
 The 17 required scenarios: 1, 2, 3, 7, 8, 10, 11, 15, 16, 17 in `test:acceptance`; 4, 5, 6, 9, 12, 13 in
 `test:pathway`; 14 and 15 in `test:api` (as well as the rules behind all of them).
 
-## 6. Settings (`.env`, see `.env.example`)
+## 6. Settings
 
-| Variable | Default | What it does |
-|---|---|---|
-| `PORT` / `HOST` | `3000` / `0.0.0.0` | where the server listens (`0.0.0.0` lets the iPhone connect) |
-| `TEST_USER_PASSWORD` | `stemi-test` | the crew test user's password |
-| `SESSION_SECRET` | generated | signs the crew login and the device sessions; generated once in `data/.session-secret` |
-| `SESSION_HOURS` | `24` | crew login duration |
-| `DATA_DIR` | `data` | the SQLite database and the ECG images |
-| `AI_PROVIDER` / `MOCK_AI_DELAY_MS` | `mock` / `5000` | the simulated AI and how long it "processes" |
-| `CORPULS_PROVIDER` | `mock` | `mock`: the simulated corpuls feed. `corpuls-mission`: the placeholder for the real interface (not implemented: nothing connects, the manual fallback is the only ECG path) |
-| `CORPULS_SIM_TICK_MS` | `5000` | the simulated monitor's vital-signs update interval (also the expected interval behind the technical freshness indicator) |
-| `CORPULS_SIM_NIBP_SECONDS` | `120` | how often the simulated monitor measures the blood pressure |
-| `CORPULS_SIM_CONNECT_MS` | `800` | how long the simulated monitor takes to connect after LINK CORPULS |
-| `CORPULS_DEMO_MODE` | `true` | the prototype demo: LINK CORPULS starts a fresh simulated feed that connects, sends live values and ECG 1 by itself; the crew can simulate a requested repeat ECG. `false`: the simulated monitor does only what the test console tells it |
-| `CORPULS_DEMO_ECG_SECONDS` | `3` | demo mode: seconds from CORPULS CONNECTED to the automatic ECG 1 |
-| `HEARTBEAT_MS` | `5000` | live-link heartbeat |
-| `MAX_IMAGE_BYTES` | 8 MB | largest ECG image accepted |
-| `DEV_AUTO_PULL` | `false` | the development runner fast-forwards this checkout from GitHub every 30 s |
+The backend reads standard .NET configuration: `src/Masar.Api/appsettings.json`, then `appsettings.{Environment}.json`,
+then environment variables (`Section__Key`, for example `Corpuls__DemoMode=false`). Every key, its default and its
+meaning: [docs/configuration.md](docs/configuration.md). No secret is in the source code or in `appsettings.json`.
 
-Never put real secrets or patient data in `.env` (it is not committed).
+For local development the runner reads `.env` (copy `.env.example`) and translates the prototype's names:
+
+| `.env` | .NET configuration key | Default | What it does |
+|---|---|---|---|
+| `PORT` / `HOST` | `Kestrel:Endpoints:Http:Url` | `3000` / `0.0.0.0` | where the server listens (`0.0.0.0` lets the iPhone connect) |
+| `TEST_USER_PASSWORD` | `Prototype:CrewTestUser:Password` | generated | the crew test user's password (PROTOTYPE ONLY); unset: generated once in `data/crew-test-password.txt` |
+| `SESSION_HOURS` | `Sessions:CrewSessionHours` | `24` | crew login duration |
+| `DATA_DIR` | `Storage:DataDirectory` | `data` | the SQLite database, the ECG images, the session keys |
+| `MAX_IMAGE_BYTES` | `Storage:MaxImageBytes` | 8 MB | largest ECG image accepted |
+| `AI_PROVIDER` / `MOCK_AI_DELAY_MS` | `Ai:Provider` / `Ai:MockDelayMs` | `mock` / `5000` | the simulated AI and how long it "processes" |
+| `CORPULS_PROVIDER` | `Corpuls:Provider` | `mock` | `mock`: the simulated corpuls feed. `corpuls-mission`: the placeholder for the real interface (not implemented: nothing connects, the manual fallback is the only ECG path) |
+| `CORPULS_SIM_TICK_MS` | `Corpuls:SimTickMs` | `5000` | the simulated monitor's vital-signs update interval (also the expected interval behind the technical freshness indicator) |
+| `CORPULS_SIM_NIBP_SECONDS` | `Corpuls:SimNibpSeconds` | `120` | how often the simulated monitor measures the blood pressure |
+| `CORPULS_SIM_CONNECT_MS` | `Corpuls:SimConnectMs` | `800` | how long the simulated monitor takes to connect after LINK CORPULS |
+| `CORPULS_DEMO_MODE` | `Corpuls:DemoMode` | `true` | the prototype demo: LINK CORPULS starts a fresh simulated feed that connects, sends live values and ECG 1 by itself; the crew can simulate a requested repeat ECG. `false`: the simulated monitor does only what the test console tells it |
+| `CORPULS_DEMO_ECG_SECONDS` | `Corpuls:DemoEcgSeconds` | `3` | demo mode: seconds from CORPULS CONNECTED to the automatic ECG 1 |
+| `HEARTBEAT_MS` | `Live:HeartbeatMs` | `5000` | live-link heartbeat |
+| `DEV_AUTO_PULL` | (runner only) | `false` | the development runner fast-forwards this checkout from GitHub every 30 s |
+| `STEMI_BACKEND` | (runner only) | — | `node`: run the LEGACY Node.js server instead (transition only) |
+
+`SESSION_SECRET` is no longer used: the session cookies are protected by ASP.NET Core Data Protection, with its keys in
+`data/keys/`. Never put real secrets or patient data in `.env` (it is not committed).
 
 ## 7. The database
 
-One SQLite file, `data/stemi-test.db`; ECG images in `data/images/` with their SHA-256 in the database. Starting a new
-version **adds columns, it never wipes data**: cases made before 0.6.0 (photographed ECGs, crew-entered vital signs)
-and before 0.5.0 (no ER step) still open.
+One SQLite file, `data/stemi-test.db` (SQLite — PROTOTYPE DATABASE unless approved for production); ECG images in
+`data/images/` with their SHA-256 in the database. The schema is managed by **EF Core migrations**
+(`src/Masar.Infrastructure/Persistence/Migrations/`), applied automatically at start: a new database is built from
+them, and a database made by the Node.js prototype is taken over as it is (its missing columns added, nothing
+deleted). Starting a new version **never wipes data**: cases made before 0.6.0 (photographed ECGs, crew-entered vital
+signs) and before 0.5.0 (no ER step) still open. Tables, columns and how to add a migration:
+[docs/database.md](docs/database.md).
 
 New in 0.6.0: on `cases` the corpuls link and feed (`corpuls_provider`, `corpuls_device_id`, `corpuls_device_label`,
 `corpuls_linked_at`, `corpuls_linked_by`, `corpuls_status`, `corpuls_status_at`, `corpuls_last_data_at`,
@@ -372,7 +429,7 @@ moments). New in 0.5.0 on `cases`: the ER fields (`er_doctor_name`, `er_accepted
 (`cardiology_activated_at`, `cardiology_activation_reason`, `cardiologist_name`, `cardiologist_acknowledged_at`,
 `cardiologist_decision`, `cardiologist_decision_at`) beside `closure_reason`, `closure_source`, `closed_at`. The old
 handover, destination and ETA tables stay so older databases open; nothing uses them. Full list:
-[docs/architecture.md](docs/architecture.md). Look inside with `sqlite3 data/stemi-test.db`.
+[docs/database.md](docs/database.md). Look inside with `sqlite3 data/stemi-test.db`.
 
 The audit trail (`audit_events`) records every significant event with time, CAD number, person, role (crew, er,
 cardiologist, system, test-console) and action — for example *STEMI case opened … · CAD number manually entered by crew
@@ -387,31 +444,43 @@ heartbeats are never audited.
 
 ```
 stemi-app/
-├── server/            index.js (routes) · auth.js (crew login, device sessions) · pathway.js (state machine)
-│                      platform.js (actions, audit, alerts, snapshots, pushes) · live.js (SSE) · db.js · schema.sql
-│                      monitor.js (the corpuls feed on the platform's side) · seed.js · config.js · ai/ (interface + mock)
-│                      integrations/corpuls/  contract.js · mock-provider.js · mock-ecg.js · real-provider.js · index.js
-├── public/
-│   ├── index.html     choose a screen
-│   ├── crew/ er/ cardiologist/ control/ login/
-│   └── shared/        ds.css (design system) · ui.js · clinical.js (ECG viewer, AI panel, timeline, summary, alarm)
-│                      live.js · rules.js (names, ER reasons, state labels) · cad.js · ecg.js (fictional ECGs) · fonts/
-├── scripts/           dev.js (runner) · reset.js · tests (api, corpuls, acceptance, pathway, cad-entry, visual-qa, lib/)
-├── samples/           fictional test ECG images
-└── docs/              architecture.md · corpuls-integration.md · open-decisions.md · production-gaps.md
+├── Masar.sln                     the .NET solution (build: dotnet build Masar.sln · test: dotnet test Masar.sln)
+├── global.json · Directory.Build.props · Directory.Packages.props · dotnet-tools.json   SDK, shared settings, package versions, dotnet-ef
+├── src/
+│   ├── Masar.Domain/             the STEMI pathway state machine (Pathway/) and clinical rules (Rules/), the entities — no dependencies
+│   ├── Masar.Application/        the use cases: cases, actions (ops), the case record, audit, AI, the corpuls feed (Monitoring/), test data
+│   ├── Masar.Infrastructure/     EF Core + SQLite (Persistence/, Migrations/), the mock corpuls provider and ECG drawing (Corpuls/),
+│   │                             the mock AI (Ai/), the image store (Storage/), the crew test user (Identity/), configuration options
+│   └── Masar.Api/                ASP.NET Core: Program.cs, Controllers/, Live/ (SSE), Security/ (prototype sessions), Hosting/, appsettings*.json
+├── tests/
+│   ├── Masar.UnitTests/          xUnit: domain, database, providers, application services
+│   └── Masar.IntegrationTests/   xUnit + WebApplicationFactory: the HTTP API through the real pipeline
+├── public/                       the screens (plain HTML, CSS, JavaScript; served from Frontend:RootPath)
+│   ├── index.html · crew/ · er/ · cardiologist/ · control/ · login/
+│   └── shared/                   ds.css (design system) · ui.js · clinical.js · live.js (SSE + actions) · rules.js and cad.js
+│                                 (browser copies of the server rules, for instant feedback: keep in step with Masar.Domain/Rules) · ecg.js · fonts/
+├── scripts/                      dev.js (DEVELOPMENT ONLY runner) · reset.js · lib/dotnet.js · end-to-end suites and lib/harness.js
+├── samples/                      fictional test ECG images
+├── docs/                         the handover documentation (see below)
+└── server/                       LEGACY Node.js server (the prototype up to 0.6.1) — transition fallback only
 ```
 
 ## 9. Troubleshooting
 
 | Problem | What to do |
 |---|---|
-| The iPhone cannot open the page | Same Wi-Fi for both; type the address with `http://` and the port. Guest / office Wi-Fi often blocks device-to-device traffic: try the iPhone's Personal Hotspot. **System Settings → Network → Firewall** must allow `node`; on macOS 15+ **Privacy & Security → Local Network** must allow Terminal. Check `http://<Mac IP>:3000/health` from the iPhone. |
+| The iPhone cannot open the page | Same Wi-Fi for both; type the address with `http://` and the port. Guest / office Wi-Fi often blocks device-to-device traffic: try the iPhone's Personal Hotspot. **System Settings → Network → Firewall** must allow `dotnet`; on macOS 15+ **Privacy & Security → Local Network** must allow Terminal. Check `http://<Mac IP>:3000/health` from the iPhone. |
+| `npm run dev:bg` says the .NET SDK is missing | Install the .NET 10 SDK (section 1), then `npm run dev:restart`. Until then the legacy Node.js server runs. |
+| The server does not start after a change | `npm run dev:status`; the build or start errors are in `.local/stemi-dev.log`. The runner retries after the next file change. |
+| The crew login is refused | The password is `TEST_USER_PASSWORD` in `.env`, or the one in `data/crew-test-password.txt`. After the update to 0.7.0 every screen must log in / reload once (new session cookies). |
 | No alarm sound | Tap START · ENABLE ALARM SOUND after every reload; silent mode off, volume up, page in front. A red banner means sound is blocked: tap it. |
 | CONNECTION LOST | The server stopped, the Mac slept or the Wi-Fi changed: `npm run dev:status`; the screens reconnect by themselves. |
 | Port in use | `npm run dev:status` tells whether it is this server; otherwise set another `PORT` in `.env`. |
 | The crew screen shows CORPULS CONNECTION LOST or CORPULS NOT CONNECTED | An earlier test disconnected the simulated monitor: test console → CORPULS SIMULATOR → **RESET CORPULS DEMO** (or **CONNECT MONITOR** for that case). |
-| No ECG appears after LINK CORPULS | In demo mode ECG 1 arrives about 3 s after CORPULS CONNECTED. With `CORPULS_DEMO_MODE=false`: CORPULS SIMULATOR → **TRIGGER ECG 1**. Or use the crew's *Manual ECG fallback*. |
+| No ECG appears after LINK CORPULS | In demo mode ECG 1 arrives about 3 s after CORPULS CONNECTED. With the demo mode off (`Corpuls:DemoMode = false`): CORPULS SIMULATOR → **TRIGGER ECG 1**. Or use the crew's *Manual ECG fallback*. |
 | Start again with no cases | Test console → **Delete all test data**, or `npm run dev:stop && npm run reset && npm run dev:bg`. |
+
+More: [docs/troubleshooting.md](docs/troubleshooting.md).
 
 ## 10. Known limits
 
@@ -427,8 +496,33 @@ stemi-app/
 - The corpuls feed is simulated (no real monitor, no corpuls.mission). One monitor per unit; a monitor serves one case
   at a time. ECGs acquired on the monitor before the case was linked do not attach. The *stale data* indicator is
   technical (3 × the expected update interval), not a clinical threshold.
+- One server instance only: changes are serialised in-process and the live link is held in memory (scale-out needs a
+  different design, see [docs/architecture.md](docs/architecture.md)).
 
-## 11. What changed in 0.6.1 — prototype demo mode
+## 11. What changed in 0.7.0 — ASP.NET Core backend for the IT handover
+
+- **The backend is now ASP.NET Core / C# (.NET 10)**: `Masar.sln` with Domain (state machine, clinical rules),
+  Application (use cases), Infrastructure (EF Core + SQLite, the providers) and Api (controllers, live link, sessions).
+  A faithful port: the same screens, the same HTTP API and live events, the same database file and schema — existing
+  test data keeps working. The behaviour is proven by the unchanged end-to-end suites passing against it.
+- **Clinical workflow rules on the server:** the state machine, closed-case immutability and every refusal are
+  enforced on the server, as before. Two rules that only the screens checked are now enforced by the server too: SEND
+  needs the crew's four items (Unknown is an answer), and the ER assessment / Cardiologist decision needs the latest ECG
+  opened by that role. The screens already required both, so nothing changes for a user. The legacy Node.js fallback
+  applies the same two rules.
+- **Configuration** is standard .NET configuration (`appsettings.json`, environment variables); the `.env` names keep
+  working through the development runner. **No password in the source code:** the crew test password comes from
+  configuration or is generated once in `data/crew-test-password.txt`.
+- **Sessions** use ASP.NET Core cookie authentication with Data Protection (still PROTOTYPE ONLY). Breaking: every
+  screen logs in / reloads once after the update.
+- **Database migrations** (EF Core): a clean database is built reproducibly; a database made by the Node.js prototype
+  is taken over without changes to its data.
+- **Tests:** new .NET unit and integration tests (`npm run test:unit`); the end-to-end suites now run against the .NET
+  backend with a random crew password per run.
+- **Handover documentation:** [docs/handover.md](docs/handover.md) and the documents listed below.
+- The **Node.js server** (`server/`) stays only as a labelled LEGACY fallback during the transition.
+
+## 12. What changed in 0.6.1 — prototype demo mode
 
 - **The demonstration runs by itself** (`CORPULS_DEMO_MODE`, on by default): LINK CORPULS starts a fresh simulated
   feed — CONNECTING TO CORPULS… → CORPULS CONNECTED → live HR / SpO₂ / BP / RR → ECG 1 RECEIVED FROM CORPULS about 3 s
@@ -445,7 +539,7 @@ stemi-app/
 - **Test console:** demo mode status and **RESET CORPULS DEMO**; all advanced controls kept.
 - New demo values (HR 88 · SpO₂ 98 % · BP 132/78 · RR 17); new test suite `npm run test:demo`.
 
-## 12. What changed in 0.6.0
+## 13. What changed in 0.6.0
 
 - **Corpuls-driven crew workflow:** OPEN STEMI PATHWAY → CAD number → **LINK CORPULS** → the ECG and the vital signs
   arrive from the (simulated) corpuls feed → the crew enters only age, sex, presenting complaint and symptom onset →
@@ -466,7 +560,7 @@ stemi-app/
   its CAD number can still be corrected, and the case is discarded with its feed ended.
 - New test suite `npm run test:corpuls`; the other suites follow the new flow.
 
-## 13. What changed in 0.5.0
+## 14. What changed in 0.5.0
 
 - **New ER Doctor step and screen (`/er`)** between the crew and the cardiologist, with its own alarm, name
   identification, the three assessments and the reason-required NOT SUSPICIOUS FOR STEMI closure.
@@ -486,3 +580,21 @@ stemi-app/
   route are gone.
 
 Open decisions: [docs/open-decisions.md](docs/open-decisions.md). Before production: [docs/production-gaps.md](docs/production-gaps.md).
+
+## Documentation
+
+| Document | What it covers |
+|---|---|
+| [docs/handover.md](docs/handover.md) | **start here** — purpose, architecture, status of every integration, operations, open items |
+| [docs/architecture.md](docs/architecture.md) | system and component diagrams, layering, concurrency, the live link, background processes |
+| [docs/clinical-workflow.md](docs/clinical-workflow.md) | the STEMI pathway as implemented: roles, states, rules, closures, audit |
+| [docs/api.md](docs/api.md) | every HTTP route, the live events, the actions, the case record (the API contract) |
+| [docs/configuration.md](docs/configuration.md) | every setting, environments, secrets |
+| [docs/database.md](docs/database.md) | tables, migrations, backups, moving to another database |
+| [docs/deployment.md](docs/deployment.md) | build, publish, run, production considerations |
+| [docs/security.md](docs/security.md) | the prototype security model and what production needs |
+| [docs/corpuls-integration.md](docs/corpuls-integration.md) | the corpuls provider architecture, the simulated feed, what MEAD / corpuls must supply |
+| [docs/testing.md](docs/testing.md) | the test layers, how to run them, the quality gate |
+| [docs/troubleshooting.md](docs/troubleshooting.md) | symptoms, causes and fixes |
+| [docs/open-decisions.md](docs/open-decisions.md) · [docs/production-gaps.md](docs/production-gaps.md) | pending decisions and what production needs |
+| [docs/adr/0001-aspnet-core-backend.md](docs/adr/0001-aspnet-core-backend.md) | why ASP.NET Core, and the alternatives considered |

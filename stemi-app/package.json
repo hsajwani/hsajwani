@@ -1,18 +1,23 @@
 {
   "name": "stemi-unified-platform-test",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "private": true,
-  "description": "STEMI Coordination Platform test build: crew → ER Doctor → Cardiologist on one shared case per CAD number. Fictional test data only.",
+  "description": "MASAR — STEMI Coordination Platform (prototype): crew → ER Doctor → Cardiologist on one shared case per CAD number. ASP.NET Core backend (src/), HTML/CSS/JavaScript screens (public/). Fictional test data only.",
   "license": "UNLICENSED",
-  "engines": { "node": ">=22.13" },
+  "engines": {
+    "node": ">=22.13"
+  },
   "scripts": {
-    "start": "node --disable-warning=ExperimentalWarning server/index.js",
+    "build": "dotnet build Masar.sln",
+    "start": "dotnet run --project src/Masar.Api",
+    "start:legacy": "node --disable-warning=ExperimentalWarning server/index.js",
     "dev": "node scripts/dev.js run",
     "dev:bg": "node scripts/dev.js bg",
     "dev:status": "node scripts/dev.js status",
     "dev:restart": "node scripts/dev.js restart",
     "dev:stop": "node scripts/dev.js stop",
-    "reset": "node --disable-warning=ExperimentalWarning scripts/reset.js",
+    "reset": "node scripts/reset.js",
+    "test:unit": "dotnet test Masar.sln",
     "test:acceptance": "node --disable-warning=ExperimentalWarning scripts/acceptance.js",
     "test:cad": "node --disable-warning=ExperimentalWarning scripts/cad-entry-test.js",
     "test:pathway": "node --disable-warning=ExperimentalWarning scripts/pathway-test.js",
@@ -20,6 +25,6 @@
     "test:corpuls": "node --disable-warning=ExperimentalWarning scripts/corpuls-test.js",
     "test:demo": "node --disable-warning=ExperimentalWarning scripts/demo-test.js",
     "test:visual": "node --disable-warning=ExperimentalWarning scripts/visual-qa.js",
-    "test": "npm run -s test:api && npm run -s test:demo && npm run -s test:corpuls && npm run -s test:acceptance && npm run -s test:pathway && npm run -s test:cad"
+    "test": "npm run -s test:unit && npm run -s test:api && npm run -s test:demo && npm run -s test:corpuls && npm run -s test:acceptance && npm run -s test:pathway && npm run -s test:cad"
   }
 }

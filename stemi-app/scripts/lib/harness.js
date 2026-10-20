@@ -1,12 +1,20 @@
-/* Shared test harness for the STEMI test suites (scripts/*.js).
-   Each suite starts its own server on a random port with a temporary data folder, so it never touches the development
-   server (npm run dev) or data/. Fictional test data only.
+/* Shared test harness for the STEMI end-to-end test suites (scripts/*.js).
+   Each suite starts its own server — the ASP.NET Core backend (src/Masar.Api), built first — on a random port with a
+   temporary data folder, so it never touches the development server (npm run dev) or data/. Fictional test data only.
+   STEMI_BACKEND=node runs the suites against the LEGACY Node.js server (server/) instead, for comparison.
    Browser suites need Playwright with Chromium: npm install -g playwright && npx playwright install chromium
    (in the Claude Code cloud container run with NODE_PATH=$(npm root -g)). */
 const { spawn, execFileSync } = require('node:child_process');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const DOTNET = require('./dotnet');
+
+const LEGACY_NODE = process.env.STEMI_BACKEND === 'node';
+/* the crew test password of this test run: random, never in the source code */
+const PASSWORD = crypto.randomBytes(12).toString('base64url');
+let built = false;
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const OUT = path.join(ROOT, 'scripts', 'out');
@@ -39,15 +47,30 @@ function Results(name) {
 }
 
 /* ---------- a server of its own ---------- */
+/* settings use the prototype names (MOCK_AI_DELAY_MS, CORPULS_DEMO_MODE …); scripts/lib/dotnet.js translates them */
 async function startServer(env) {
   const PORT = 3050 + Math.floor(Math.random() * 900), BASE = `http://localhost:${PORT}`;
   const DATA = (env && env.DATA_DIR) || fs.mkdtempSync(path.join(os.tmpdir(), 'stemi-test-'));
-  const proc = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', 'server/index.js'], {
-    cwd: ROOT, env: { ...process.env, STEMI_DEV: '', PORT: String(PORT), DATA_DIR: DATA, MOCK_AI_DELAY_MS: '1500', HEARTBEAT_MS: '2000', CORPULS_SIM_TICK_MS: '1000', CORPULS_PROVIDER: 'mock', ...(env || {}) }, stdio: ['ignore', 'pipe', 'pipe']
-  });
+  const settings = { MOCK_AI_DELAY_MS: '1500', HEARTBEAT_MS: '2000', CORPULS_SIM_TICK_MS: '1000', CORPULS_PROVIDER: 'mock', ...(env || {}), DATA_DIR: DATA, TEST_USER_PASSWORD: PASSWORD };
+  let proc;
+  if (LEGACY_NODE) {
+    proc = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', 'server/index.js'], {
+      cwd: ROOT, env: { ...process.env, STEMI_DEV: '', PORT: String(PORT), ...settings }, stdio: ['ignore', 'pipe', 'pipe']
+    });
+  } else {
+    if (!built) {
+      if (!DOTNET.sdkVersion()) throw new Error(DOTNET.NO_SDK);
+      DOTNET.build();
+      built = true;
+    }
+    proc = DOTNET.start({
+      ...process.env, ASPNETCORE_ENVIRONMENT: 'Production', Frontend__RootPath: path.join(ROOT, 'public'), Logging__LogLevel__Default: 'Warning',
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1', DOTNET_NOLOGO: '1', ...DOTNET.dotnetEnv(settings, { host: 'localhost', port: PORT })
+    });
+  }
   let log = '';
   proc.stdout.on('data', d => { log += d; }); proc.stderr.on('data', d => { log += d; });
-  for (let i = 0; i < 80 && !log.includes('Test console'); i++) await sleep(100);
+  for (let i = 0; i < 300 && !log.includes('Test console') && proc.exitCode === null; i++) await sleep(100);
   if (!log.includes('Test console')) throw new Error('The test server did not start:\n' + log);
   return {
     PORT, BASE, DATA, proc, log: () => log,
@@ -77,12 +100,15 @@ function Api(BASE, role) {
     },
     /* a crew login, or the device session a page gives */
     async start() {
-      if (role === 'crew') return api.req('POST', '/api/login', { email: 'crew@test.local', password: 'stemi-test' });
+      if (role === 'crew') return api.req('POST', '/api/login', { email: 'crew@test.local', password: PASSWORD });
       const r = await fetch(BASE + '/' + role); take(r); return { status: r.status };
     },
     op(c, k, data) { return { id: `t-${role}-${Date.now().toString(36)}-${++n}`, cad: c, k, t: Date.now(), data: data || {} }; },
     async ops(...list) { const r = await api.req('POST', '/api/ops', { ops: list }); return r.body && r.body.results ? r.body.results : [{ ok: false, error: 'HTTP ' + r.status }]; },
     async one(c, k, data) { return (await api.ops(api.op(c, k, data)))[0]; },
+    /* the ER Doctor / Cardiologist screen opens ECG n (image i), as the screens do before an assessment or a decision:
+       the server records the view and refuses an assessment or decision on an ECG that was never opened */
+    async see(c, n, i, name) { return api.one(c, 'viewed', { n, i: i || 1, ...(name ? { name } : {}) }); },
     async view(c) { const r = await api.req('GET', '/api/cases/view?cad=' + encodeURIComponent(c)); return r.status === 200 ? r.body.rec : null; },
     async upload(c, file) {
       const buf = fs.readFileSync(path.join(ROOT, 'samples', file || 'test-ecg-1-borderline-anterior.jpg'));
@@ -137,7 +163,7 @@ async function crewPage(browser, BASE, errors, ctxOpts) {
   const ctx = await browser.newContext({ viewport: { width: 1180, height: 820 }, ...(ctxOpts || {}) });
   const page = await ctx.newPage(); watch(page, errors, 'crew');
   await page.goto(BASE + '/login');
-  await page.fill('#email', 'crew@test.local'); await page.fill('#pw', 'stemi-test');
+  await page.fill('#email', 'crew@test.local'); await page.fill('#pw', PASSWORD);
   await Promise.all([page.waitForURL('**/crew'), page.click('button[type=submit]')]);
   await page.waitForSelector('[data-act="new-case"]');
   await page.waitForSelector('.conn:not(.conn--wait)');
@@ -198,4 +224,4 @@ async function shot(page, name, full) {
   await page.screenshot({ path: path.join(OUT, name + '.png'), fullPage: !!full }).catch(() => {});
 }
 
-module.exports = { ROOT, OUT, sleep, cad, DAY, playwright, Results, startServer, db, auditOf, Api, apiSend, testConsole, sim, demoMode, SOUND_PROBE, PHONE, watch, crewPage, clinPage, crewNewCase, giveName, shot };
+module.exports = { ROOT, OUT, PASSWORD, LEGACY_NODE, sleep, cad, DAY, playwright, Results, startServer, db, auditOf, Api, apiSend, testConsole, sim, demoMode, SOUND_PROBE, PHONE, watch, crewPage, clinPage, crewNewCase, giveName, shot };

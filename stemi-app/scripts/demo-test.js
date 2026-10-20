@@ -87,7 +87,7 @@ async function main(S) {
     await H.shot(C, 'demo-05-sent');
 
     /* ---------- 5. repeat ECG: simulated on the crew screen, arrives from corpuls on the same CAD ---------- */
-    await er.one(A, 'er_accept', { name: 'Dr. Demo ER' }); await er.one(A, 'er_assess', { kind: 'activate', on: 1, name: 'Dr. Demo ER' });
+    await er.one(A, 'er_accept', { name: 'Dr. Demo ER' }); await er.see(A, 1); await er.one(A, 'er_assess', { kind: 'activate', on: 1, name: 'Dr. Demo ER' });
     await D.waitForSelector(`.activation >> text=CAD #${A}`, { timeout: 15000 });
     await D.click('.activation [data-act="ack"]'); await H.giveName(D, 'Dr. Demo Cardiology');
     await D.waitForSelector('#c-dock [data-act="decide"]:not([aria-disabled="true"])', { timeout: 10000 });

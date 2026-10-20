@@ -62,17 +62,17 @@ async function main(S) {
     const demo = async n => { const r = await con.req('POST', '/api/control/demo-case', { cad: c(n) }); if (r.status !== 200) throw new Error('demo case ' + n + ': ' + JSON.stringify(r.body)); };
     const DRN = 'Dr. Ahmed Mohammed', DCN = 'Dr. Sara Al Mansoori';
     for (let i = 1; i <= 9; i++) await demo(i);
-    for (let i = 2; i <= 9; i++) await er.one(c(i), 'er_accept', { name: DRN });
+    for (let i = 2; i <= 9; i++) { await er.one(c(i), 'er_accept', { name: DRN }); await er.see(c(i), 1, 1, DRN); }
     await er.one(c(3), 'er_assess', { kind: 'not_suspicious', reason: 'alternative', comment: 'Fictional test comment: pericardial rub on auscultation', on: 1, name: DRN });
     for (const i of [4, 5, 6, 7, 8, 9]) await er.one(c(i), 'er_assess', { kind: i === 5 ? 'uncertain' : 'activate', on: 1, name: DRN });
-    for (const i of [5, 6, 7, 8, 9]) await doc.one(c(i), 'ack', { name: DCN });
+    for (const i of [5, 6, 7, 8, 9]) { await doc.one(c(i), 'ack', { name: DCN }); await doc.see(c(i), 1, 1, DCN); }
     await doc.one(c(6), 'decision', { k: 'repeat', on: 1, reasons: ['Dynamic changes suspected'], instr: 'Add V7 to V9', within: 10, name: DCN });
     await doc.one(c(7), 'decision', { k: 'confirm', on: 1, note: 'Fictional test note', name: DCN });
     await sim(7, 'set', { sys: 128, dia: 76, hr: 92 }); await sim(7, 'send-vitals');
     await crew.one(c(7), 'rec', { k: 'asp', label: 'Aspirin', v: 'Given' });
     /* a serial case: ECG 1, 2 and 3 from corpuls */
     await doc.one(c(8), 'decision', { k: 'repeat', on: 1, reasons: ['Dynamic changes suspected'], name: DCN });
-    await sim(8, 'trigger-ecg', { sample: 'B' });
+    await sim(8, 'trigger-ecg', { sample: 'B' }); await doc.see(c(8), 2, 1, DCN);
     await doc.one(c(8), 'decision', { k: 'repeat', on: 2, reasons: ['Repeat due to ongoing symptoms'], name: DCN });
     await sim(8, 'trigger-ecg', { sample: 'C' });
     /* a completed case */
@@ -119,8 +119,8 @@ async function main(S) {
       await check(p, `crew-ready-${k}`, `Crew · ready to send (${k})`);
       await p.click('[data-act="send"]'); await p.waitForSelector('.status-panel', { timeout: 15000 });
       await check(p, `crew-sent-${k}`, `Crew · after SEND (${k})`);
-      await er.one(Y, 'er_accept', { name: DRN }); await er.one(Y, 'er_assess', { kind: 'activate', on: 1, name: DRN });
-      await doc.one(Y, 'ack', { name: DCN }); await doc.one(Y, 'decision', { k: 'repeat', on: 1, reasons: ['Poor ECG quality'], instr: 'Repeat with V7 to V9', name: DCN });
+      await er.one(Y, 'er_accept', { name: DRN }); await er.see(Y, 1, 1, DRN); await er.one(Y, 'er_assess', { kind: 'activate', on: 1, name: DRN });
+      await doc.one(Y, 'ack', { name: DCN }); await doc.see(Y, 1, 1, DCN); await doc.one(Y, 'decision', { k: 'repeat', on: 1, reasons: ['Poor ECG quality'], instr: 'Repeat with V7 to V9', name: DCN });
       await p.waitForSelector('.modal [data-act="dec-ack"]', { timeout: 15000 }); await p.click('.modal [data-act="dec-ack"]');
       await check(p, `crew-repeat-${k}`, `Crew · repeat ECG requested, SIMULATE REPEAT ECG ACQUISITION (${k})`);
       await p.click('.status-panel [data-act="demo-acq"]'); await p.waitForSelector('.status-panel >> text=REPEAT ECG SENT', { timeout: 10000 });
@@ -176,7 +176,7 @@ async function main(S) {
     await doc.one(c(4), 'ack', { name: DCN }); /* no older activation waiting: each pass acknowledges its own */
     for (const [vp, k] of [[VP.phone, 'phone'], [VP.phoneLand, 'phone-landscape'], [VP.tablet, 'tablet']]) {
       /* each pass acknowledges one new activation */
-      const nc = c(++fresh); await demo(fresh); await er.one(nc, 'er_accept', { name: DRN }); await er.one(nc, 'er_assess', { kind: 'activate', on: 1, name: DRN });
+      const nc = c(++fresh); await demo(fresh); await er.one(nc, 'er_accept', { name: DRN }); await er.see(nc, 1, 1, DRN); await er.one(nc, 'er_assess', { kind: 'activate', on: 1, name: DRN });
       const ctx = await browser.newContext({ ...(k.startsWith('phone') ? H.PHONE : {}), viewport: vp }), p = await ctx.newPage(); H.watch(p, errors, 'cardiologist');
       await p.goto(S.BASE + '/cardiologist'); await check(p, `card-gate-${k}`, `Cardiologist start screen (${k})`);
       await p.click('#gate-go'); await p.waitForSelector('.activation');

@@ -73,6 +73,36 @@ function needLatest(F, on) {
   if (!Number.isInteger(on)) throw err(400, 'The decision must name the ECG it covers.');
   if (on !== F.nEcg) throw err(409, `ECG ${F.nEcg} has arrived since this screen was updated. Review ECG ${F.nEcg} before recording this.`);
 }
+/* an ER assessment or a Cardiologist decision is made on an ECG this role has actually opened (the screens record the
+   view); views recorded by 0.4.0 and earlier (ecg_views, Cardiologist only) count too. Same rule as the .NET backend
+   (ActionService.NeedViewed), so it holds whatever sent the action, not only in the browser. */
+function needViewed(cad, role, n, message) {
+  const seen = D.get('SELECT 1 AS x FROM ecg_role_views WHERE cad=? AND role=? AND ecg_n=? LIMIT 1', cad, role, n)
+    || (role === 'cardiologist' && D.get('SELECT 1 AS x FROM ecg_views WHERE cad=? AND ecg_n=? LIMIT 1', cad, n));
+  if (!seen) throw err(409, message);
+}
+/* the crew's four items at SEND (age, sex, presenting complaint, symptom onset; Unknown is an answer): the crew screen's
+   rule (public/crew/crew.js, mdErrors) applied again on the server, as the .NET backend does
+   (Masar.Domain/Rules/MinimumDataRules.cs). Completeness and plausibility only, not clinical criteria. Returns the
+   message for the first missing item, or null. */
+const asNumber = x => (typeof x === 'number' ? x : typeof x === 'string' && x.trim() !== '' && !Number.isNaN(+x) ? +x : null);
+function sendMissing(md, now) {
+  const answer = k => {
+    const v = md && typeof md === 'object' ? md[k] : null;
+    if (!v || typeof v !== 'object' || Array.isArray(v) || v.v == null || typeof v.v === 'object' || String(v.v) === '') return null;
+    const r = v.raw && typeof v.raw === 'object' && !Array.isArray(v.raw) ? v.raw : {};
+    return { nv: !!r.nv, n: asNumber(r.v), k: typeof r.k === 'string' ? r.k : null, other: r.other == null || typeof r.other === 'object' ? '' : String(r.other), t: asNumber(r.t) };
+  };
+  const age = answer('age'), sex = answer('sex'), complaint = answer('complaint'), onset = answer('onset');
+  if (!age) return 'Enter the age (or an estimate), or choose Unknown.';
+  if (!age.nv && !(Number.isInteger(age.n) && age.n >= 0 && age.n <= 120)) return 'Age: a whole number from 0 to 120 years.';
+  if (!sex) return 'Choose the sex, or Unknown.';
+  if (!complaint) return 'Choose the presenting complaint (or the reason for the ECG).';
+  if (complaint.k === 'oth' && !complaint.other.trim()) return 'Describe the presenting complaint.';
+  if (!onset) return 'Enter the symptom onset time, or choose Unknown.';
+  if (!onset.nv && !(onset.t != null && onset.t <= now + 5 * 60e3)) return 'The onset time cannot be in the future.';
+  return null;
+}
 
 /* ---------- storing ECGs, images and the minimum data ---------- */
 /* an ECG uploaded by the crew: the manual fallback (the normal ECG arrives from corpuls, server/monitor.js) */
@@ -118,6 +148,9 @@ function crewOp(A, o, F, rcv, W) {
       /* the ECG normally arrived from corpuls already; an ECG in the action is the crew's manual fallback */
       const e = d.ecg && Array.isArray(d.ecg.imgs) && d.ecg.imgs.length ? d.ecg : null;
       if (!e && !F.nEcg) throw err(400, 'An ECG is needed to send the case: wait for the ECG from corpuls, or use the manual ECG fallback.');
+      /* the case reaches the ER only with the crew's four items (Unknown is an answer) */
+      const missing = sendMissing(d.md, rcv);
+      if (missing) throw err(400, missing);
       const n = e ? F.nEcg + 1 : null;
       if (e) insertEcg(cad, { ...e, n }, d.sendAt, rcv, ME, o.id);
       D.run('UPDATE cases SET submitted_at=?, server_received_at=?, delivered_late=?, er_alerted_at=?, draft_discarded_at=NULL WHERE cad=?', sane(d.sendAt, rcv), rcv, d.late ? 1 : 0, rcv, cad);
@@ -247,6 +280,7 @@ function erOp(A, o, F, rcv, W) {
     case 'er_assess': {
       const nm = needName(d.name || C.er_doctor_name);
       needLatest(F, d.on);
+      needViewed(cad, A.role, d.on, `View ECG ${d.on} before recording the assessment.`);
       if (d.kind === 'activate' || d.kind === 'uncertain') {
         const lab = d.kind === 'activate' ? 'ACTIVATE CARDIOLOGIST' : 'UNCERTAIN';
         D.run(`UPDATE cases SET er_assessment=?, er_assessment_at=?, er_assessed_by=?, er_assessment_ecg=?,
@@ -323,6 +357,7 @@ function docOp(A, o, F, rcv, W) {
       if (!RULES.DECISIONS[d.k]) throw err(400, 'Unknown decision.');
       const nm = needName(d.name || C.cardiologist_name);
       needLatest(F, d.on);
+      needViewed(cad, A.role, d.on, `View ECG ${d.on} before deciding.`);
       const reason = RULES.cleanText(d.reason, 300), note = RULES.cleanText(d.note), adv = RULES.cleanText(d.adv), instr = RULES.cleanText(d.instr, 300);
       if (d.k === 'not' && !reason) throw err(400, 'NOT STEMI needs a reason.');
       const reasons = (Array.isArray(d.reasons) ? d.reasons : []).map(r => RULES.cleanText(r, 100)).filter(Boolean).slice(0, 8);

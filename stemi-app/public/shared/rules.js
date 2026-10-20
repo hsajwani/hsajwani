@@ -1,4 +1,6 @@
-/* The STEMI pathway's shared rules: one module for every screen and for the server, so both check the same way.
+/* The STEMI pathway's shared rules, as every screen uses them for instant feedback and wording. The server's rules are
+   the authority (C#, src/Masar.Domain: Rules/ClinicianName.cs, Rules/ErAssessmentRules.cs, Pathway/*): keep both in
+   step (the LEGACY Node.js server also loads this file).
    - the clinician's name (prototype identification only: a typed name, NOT authentication)
    - the ER Doctor's reasons for NOT SUSPICIOUS FOR STEMI
    - the pathway states and how each screen words them
@@ -42,7 +44,7 @@
     return { ok: true, reason: r.label, comment: c };
   }
 
-  /* ---------- the pathway states (the server derives the state; see server/pathway.js) ----------
+  /* ---------- the pathway states (the server derives the state: src/Masar.Domain/Pathway/PathwayStateMachine.cs) ----------
      tone: crit (urgent / confirmed STEMI) · warn (uncertain, pending) · ok (completed) · info (in progress) · neutral */
   const STATES = {
     draft: { crew: ['DRAFT — NOT SENT', 'neutral'] },

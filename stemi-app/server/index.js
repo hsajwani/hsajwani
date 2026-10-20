@@ -1,4 +1,6 @@
-/* STEMI Coordination Platform · test build (crew → ER Doctor → Cardiologist).
+/* LEGACY — the Node.js server of the prototype up to 0.6.1, kept only as a transition fallback (npm run dev -- --legacy,
+   STEMI_BACKEND=node). The backend is the ASP.NET Core application in src/ (docs/handover.md); do not develop here.
+   STEMI Coordination Platform · test build (crew → ER Doctor → Cardiologist).
    TEST DATA ONLY: fictional patients, simulated CAD numbers, simulated ECG images, test users.
    One process serves every role's screen (/crew, /er, /cardiologist, /control), the API, the live event stream and the
    stored ECG images. */
@@ -325,7 +327,9 @@ server.listen(cfg.PORT, cfg.HOST, () => {
   console.log(` Test console:               http://localhost:${cfg.PORT}/control`);
   if (lan.length > 1) console.log(` Other addresses: ${lan.slice(1).map(a => `${a.address} (${a.name})`).join(', ')}`);
   console.log(` Health: http://localhost:${cfg.PORT}/health · database: ${path.relative(cfg.ROOT, cfg.DB_FILE)} (kept across restarts) · AI: ${cfg.AI_PROVIDER} (simulated) · corpuls: ${cfg.CORPULS_PROVIDER === 'mock' ? `simulated feed (MockCorpulsProvider${cfg.CORPULS_DEMO_MODE ? ', demo mode: automatic ECG 1' : ''})` : cfg.CORPULS_PROVIDER + ' (not implemented)'}`);
-  if (!DEV) console.log(` Crew test login: crew@test.local · password: ${process.env.TEST_USER_PASSWORD ? '(from .env)' : cfg.TEST_PASSWORD}\n The iPhone must be on the same Wi-Fi. Stop the server with Ctrl+C.`);
+  console.log(` LEGACY Node.js server (transition fallback): the backend is the ASP.NET Core application in src/ — see docs/handover.md`);
+  console.log(` Crew test login: crew@test.local · password: from ${cfg.TEST_PASSWORD_SOURCE}`);
+  if (!DEV) console.log(' The iPhone must be on the same Wi-Fi. Stop the server with Ctrl+C.');
   console.log(`${line}\n`);
 });
 

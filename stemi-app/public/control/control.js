@@ -171,7 +171,7 @@
     const on = S.corp.demo, secs = S.corp.demoEcgMs ? Math.round(S.corp.demoEcgMs / 1000) : 3, D = S.corp.defaults || {};
     return `<div class="simdemo${on ? ' is-on' : ''}"><div class="simdemo__t"><b>${on ? 'DEMO MODE ON' : 'DEMO MODE OFF'}</b><span class="small">${on
       ? `LINK CORPULS on the crew screen starts a fresh simulated feed by itself: connected, live values (HR ${D.hr} · SpO₂ ${D.spo2} % · BP ${D.sys}/${D.dia} · RR ${D.rr}), then ECG 1 about ${secs} s later. A requested repeat ECG is simulated from the crew screen. Nothing here is needed for the basic demonstration.`
-      : 'The simulated monitor does only what this simulator tells it (CORPULS_DEMO_MODE=false): trigger ECG 1 here.'}</span></div>
+      : 'The simulated monitor does only what this simulator tells it (Corpuls:DemoMode = false): trigger ECG 1 here.'}</span></div>
       <button class="btn btn--secondary btn--sm" data-act="corp-reset">${icon('repeat', 'ico-sm')}RESET CORPULS DEMO</button></div>`;
   }
   async function corpReset(t) {

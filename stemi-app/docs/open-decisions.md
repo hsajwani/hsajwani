@@ -1,8 +1,12 @@
-# Open decisions in this build (0.6.1)
+# Open decisions in this build (0.7.0)
 
 Where a decision is still open, the build uses a working default and says so. None of these defaults is confirmed.
 Reminder and escalation times are governance configurable and not set; the build invents no numbers, rosters,
 response times, hospital capabilities or clinical criteria.
+
+The decisions for the IT handover (hosting, identity, database, operations) are in
+[Decisions for the IT handover](#decisions-for-the-it-handover-070), each with its owner. What must change before
+production is in [production-gaps.md](production-gaps.md).
 
 ## Questions requiring a decision
 
@@ -34,6 +38,29 @@ response times, hospital capabilities or clinical criteria.
 | C-7 | One monitor, two cases | A monitor serves one case at a time: linking it to a new case ends the previous case's feed, which keeps what it received. |
 | C-8 | What happens to the feed when the pathway closes? | It ends; the last values stay with the case; late data for the closed case is refused. A lost connection never closes the pathway, cancels the case or triggers a decision. |
 
+## Decisions for the IT handover (0.7.0)
+
+From 0.7.0 the backend is ASP.NET Core (C#), so it can be handed over to National Ambulance IT
+([handover.md](handover.md)). These questions were not decided by building the prototype. Each has an owner; none of
+the working defaults is approved.
+
+| # | Question | What this build does (working default) | Owner |
+|---|---|---|---|
+| H-1 | Hosting platform: IIS on Windows Server, Azure App Service, or Linux; on-premises or cloud; data residency | Runs anywhere .NET 10 runs. Only a local development computer and the cloud development container were used. The options are listed in [deployment.md](deployment.md#hosting-options-for-production-not-verified-here) and none is verified. | IT, Information Security |
+| H-2 | HTTPS: where TLS ends (Kestrel or a reverse proxy), certificates, HSTS | Plain HTTP on a local network ([security.md](security.md#transport-and-http-headers)) | IT, Information Security |
+| H-3 | Identity provider for the crew, ER Doctors and Cardiologists (e.g. Microsoft Entra ID with OpenID Connect, staff ID, MFA, shared MDT devices) | One crew test account; no login for the ER and Cardiologist screens (Free-text ER Doctor Name / Free-text Cardiologist Name — PROTOTYPE ONLY) | Information Security, IT, Clinical Governance, hospitals |
+| H-4 | Production database: SQL Server or PostgreSQL, or an approval of SQLite | SQLite — PROTOTYPE DATABASE, one file on the server's disk ([database.md](database.md)) | IT, Information Security |
+| H-5 | Storage and protection of the ASP.NET Core Data Protection keys (certificate, DPAPI, Key Vault), and key rotation | Plain XML files in the data folder | IT, Information Security |
+| H-6 | Central logging and monitoring: the logging platform, health and readiness monitoring, alerting the support team | Structured console logging; `/health` is a liveness check only | IT |
+| H-7 | Backup frequency and encryption; retention periods for cases, ECG images, the audit trail and backups | No backup is configured; nothing is deleted automatically | Clinical Governance, Information Security, IT |
+| H-8 | CI/CD pipeline: automated build, tests and quality gate, publish, deployment, NuGet source | Scripts and documented commands only ([testing.md](testing.md#it-handover-quality-gate)); no pipeline in the repository | IT |
+| H-9 | When to remove the legacy Node.js server (`server/`) and its fallback in the development runner | Kept as a transition fallback ([deployment.md](deployment.md#the-transition-from-the-nodejs-prototype)) | IT, MASAR programme |
+| H-10 | Scale-out and availability: more than one instance, failover, maintenance windows | Exactly one process ([deployment.md](deployment.md#single-instance)) | IT, MASAR programme |
+| H-11 | Removing or disabling the test console (TEST ONLY) in production builds, and how that is verified | The test console is part of every build and reachable by anyone who opens `/control` | IT, Information Security |
+| H-12 | The MASAR programme structure: who owns the platform, its workstreams and governance bodies, and who approves releases and clinical changes | Not described in the repository | MASAR programme |
+| H-13 | When and how corpuls.mission is integrated, and who supplies the interface information ([corpuls-integration.md](corpuls-integration.md)) | Mock Corpuls Provider — PROTOTYPE ONLY; the real provider is a placeholder | MEAD, Corpuls, MASAR programme, Information Security |
+| H-14 | Whether any ECG AI is used in V1, which service, and its validation (Q-26) | Simulated AI Interpretation — PROTOTYPE ONLY | Clinical Governance, MASAR programme |
+
 ## Design choices not yet confirmed
 
 The alert band across the ER screen (rather than a full-screen alert), the full-screen activation layer on the
@@ -51,4 +78,5 @@ bar, and SIMULATE REPEAT ECG ACQUISITION on the crew screen (no physical monitor
 
 Hospital, cath-lab and ACC screens; cath-lab activation; destination / transfer; administration and rosters;
 lock-screen push and escalation; an amendment workflow for closed cases; real identity (SSO); the real corpuls.mission
-connection (simulated only; see corpuls-integration.md); other monitors (ZOLL, LIFEPAK).
+connection (simulated only; see corpuls-integration.md); other monitors (ZOLL, LIFEPAK); a production deployment
+(hosting, HTTPS, identity provider, production database, backups, central logging: see production-gaps.md).

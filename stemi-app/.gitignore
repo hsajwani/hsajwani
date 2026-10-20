@@ -1,4 +1,5 @@
 node_modules/
+# fictional test data, the generated crew test password and the session keys: never committed
 data/
 .env
 *.log
@@ -6,3 +7,13 @@ data/
 scripts/out/
 # local development runner: PID file, log (npm run dev / dev:bg)
 .local/
+# .NET build output and IDE files
+bin/
+obj/
+*.user
+.vs/
+.idea/
+TestResults/
+*.db
+*.db-shm
+*.db-wal

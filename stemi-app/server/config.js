@@ -1,5 +1,6 @@
-/* Settings come from environment variables (see .env.example). Nothing here is a secret worth protecting:
-   this build holds fictional test data only. */
+/* LEGACY Node.js server (the prototype before 0.7.0), kept only as a transition fallback: the backend is now the
+   ASP.NET Core application in src/ (docs/handover.md). Settings come from environment variables (see .env.example).
+   This build holds fictional test data only; no secret is in the source code. */
 const path = require('node:path');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
@@ -18,6 +19,15 @@ function sessionSecret() {
   return fs.readFileSync(f, 'utf8').trim();
 }
 
+/* the crew test password: from .env (TEST_USER_PASSWORD), or generated once and kept in the data folder — the same
+   file the ASP.NET Core backend uses (data/crew-test-password.txt). Never in the source code, never printed. */
+function crewPassword() {
+  if (process.env.TEST_USER_PASSWORD) return { value: process.env.TEST_USER_PASSWORD, source: '.env (TEST_USER_PASSWORD)' };
+  const f = path.join(DATA_DIR, 'crew-test-password.txt');
+  if (!fs.existsSync(f)) fs.writeFileSync(f, crypto.randomBytes(12).toString('base64url') + '\n', { mode: 0o600 });
+  return { value: fs.readFileSync(f, 'utf8').trim(), source: f };
+}
+
 const num = (v, d) => (v === undefined || v === '' ? d : Number(v));
 
 module.exports = {
@@ -30,7 +40,8 @@ module.exports = {
   HOST: process.env.HOST || '0.0.0.0',
   SESSION_SECRET: sessionSecret(),
   SESSION_HOURS: num(process.env.SESSION_HOURS, 24),
-  TEST_PASSWORD: process.env.TEST_USER_PASSWORD || 'stemi-test',
+  TEST_PASSWORD: crewPassword().value,
+  TEST_PASSWORD_SOURCE: crewPassword().source,
   /* the AI service behind the interface in server/ai/: only "mock" exists in this build */
   AI_PROVIDER: process.env.AI_PROVIDER || 'mock',
   MOCK_AI_DELAY_MS: num(process.env.MOCK_AI_DELAY_MS, 5000),

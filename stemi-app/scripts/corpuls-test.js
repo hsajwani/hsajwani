@@ -136,8 +136,9 @@ async function main(S) {
     ok('P', 'Data resumed: LIVE FROM CORPULS again', await C.waitForFunction(() => /LIVE FROM CORPULS/.test(document.querySelector('#c-mon').innerText), null, { timeout: 8000 }).then(() => true, () => false));
 
     /* ---------- H. connection loss ---------- */
-    const lastBefore = row(A).corpuls_last_data_at;
     await sim('disconnect');
+    /* read once the disconnect has taken effect: a routine sample may land just before it, never after it */
+    const lastBefore = row(A).corpuls_last_data_at;
     ok('H', 'Crew: CORPULS CONNECTION LOST · Last data received · MANUAL FALLBACK AVAILABLE', await C.waitForSelector('#c-bar .cbar--warn', { timeout: 8000 }).then(() => true, () => false)
       && /CORPULS CONNECTION LOST/.test(await C.textContent('#c-bar')) && /Last data received \d\d:\d\d:\d\d/.test(await C.textContent('#c-bar')) && /MANUAL FALLBACK AVAILABLE/.test(await C.textContent('#c-bar')));
     ok('H', 'Crew: the last values stay visible (greyed, with their time)', (await tile('hr')) === '96' && await C.isVisible('#c-mon .mon.is-dim'));
